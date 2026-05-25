@@ -10,7 +10,7 @@ ASMFLAGS = -f elf32
 LDFLAGS = -T linker.ld -nostdlib
 
 # Source files
-C_SOURCES = kernel/kernel.c drivers/screen.c drivers/ports.c libc/mem.c
+C_SOURCES = kernel/kernel.c drivers/screen.c drivers/ports.c libc/mem.c libc/string.c
 ASM_SOURCES = boot/boot.asm
 
 # Object files (replace .c with .o and .asm with .o)
