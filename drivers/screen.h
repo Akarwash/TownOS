@@ -12,5 +12,6 @@
 void screen_clear(void);
 void print_char(char c);
 void print_string(char *str);
+void print_int(uint32_t n);
 
 #endif

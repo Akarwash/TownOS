@@ -47,7 +47,16 @@ void print_char(char c) {
     if (c == '\n') {
         int row = offset / MAX_COLS;
         offset = (row + 1) * MAX_COLS;
-    } 
+    }
+    else if (c == '\b') {
+        if (offset > 0) {
+            offset--;
+            video[offset * 2] = ' ';
+            video[offset * 2 + 1] = WHITE_ON_BLACK;
+        }
+        set_cursor(offset);
+        return;
+    }
     else {
         video[offset * 2] = c;
         video[offset * 2 + 1] = WHITE_ON_BLACK;
@@ -68,6 +77,25 @@ void print_string(char *str) {
     while (str[i] != '\0') {
         print_char(str[i]);
         i++;
+    }
+}
+
+void print_int(uint32_t n) {
+    char buf[11];
+    int i = 0;
+
+    if (n == 0) {
+        print_char('0');
+        return;
+    }
+
+    while (n > 0) {
+        buf[i++] = '0' + (n % 10);
+        n /= 10;
+    }
+
+    while (i > 0) {
+        print_char(buf[--i]);
     }
 }
 
