@@ -1,7 +1,7 @@
 # Learning Operating Systems with MiniOS
 
 This folder teaches how an operating system works, using **MiniOS** — the little
-32-bit x86 kernel in this repository — as a running example. Every abstract idea
+x86-64 kernel in this repository — as a running example. Every abstract idea
 (interrupts, memory, drivers) is tied back to a real file you can open and read.
 
 The goal is not just "understand this codebase." It is **understand operating
@@ -74,7 +74,7 @@ linker.ld .................. memory layout of the final binary         → ch.7
 
 A computer starts in a dumb 16-bit mode running firmware. The firmware (or a
 bootloader like GRUB) loads your kernel into memory and jumps to it. Your kernel
-switches the CPU into 32-bit protected mode, sets up tables that describe memory
+climbs the CPU into 64-bit long mode, sets up tables that describe memory
 (the GDT) and how to handle interrupts (the IDT), programs the interrupt
 controller so hardware can get the CPU's attention, and then installs drivers for
 the screen, keyboard, and timer. Finally it enters an idle loop and does nothing
