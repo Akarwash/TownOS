@@ -4,12 +4,12 @@
 idt_entry_t idt[256];
 idt_ptr_t idt_ptr;
 
-void idt_set_entry(int index, uint32_t base, uint16_t selector, uint8_t flags) {
-    idt[index].base_low  = base & 0xFFFF;
-    idt[index].base_high = (base >> 16) & 0xFFFF;
-    idt[index].selector  = selector;
-    idt[index].always0   = 0;
-    idt[index].flags     = flags;
+void idt_set_entry(int index, uint64_t base, uint16_t selector, uint8_t flags) {
+    // TODO(long-mode): pack a 64-bit handler address into the 16-byte gate.
+    //   The 64-bit gate splits the address across offset_low/offset_mid/
+    //   offset_high, sets selector/flags, and zeroes ist + reserved. Writing
+    //   this out (and getting the flags right) is being done by hand.
+    (void)index; (void)base; (void)selector; (void)flags;
 }
 
 static void pic_remap(void) {
@@ -40,18 +40,20 @@ static void pic_remap(void) {
 
 void idt_init(void) {
     idt_ptr.limit = sizeof(idt) - 1;
-    idt_ptr.base  = (uint32_t)&idt;
+    idt_ptr.base  = (uint64_t)&idt;
 
-    // Zero out the entire IDT
+    // Zero out the entire IDT (portable).
     uint8_t *ptr = (uint8_t *)&idt;
     uint32_t i;
     for (i = 0; i < sizeof(idt); i++) {
         ptr[i] = 0;
     }
 
-    // Remap the PIC
+    // Remap the PIC (portable port I/O, unchanged in 64-bit).
     pic_remap();
 
-    // Load the IDT
-    __asm__ __volatile__("lidt (%0)" : : "r" (&idt_ptr));
+    // TODO(long-mode): load the IDT register (lidt). The instruction is the
+    //   same mnemonic but the whole install path is being brought up by hand
+    //   alongside the 64-bit gate format, so it is left as a stub for now.
+    // __asm__ __volatile__("lidt (%0)" : : "r" (&idt_ptr));
 }

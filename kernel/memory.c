@@ -17,18 +17,18 @@ void memory_init(void) {
     memset(frame_bitmap, 0, sizeof(frame_bitmap));
 }
 
-uint32_t alloc_frame(void) {
+uint64_t alloc_frame(void) {
     uint32_t i;
     for (i = 0; i < MAX_FRAMES; i++) {
         if (!test_bit(i)) {
             set_bit(i);
-            return MEMORY_START + i * FRAME_SIZE;
+            return MEMORY_START + (uint64_t)i * FRAME_SIZE;
         }
     }
     return 0;   // out of memory
 }
 
-void free_frame(uint32_t addr) {
+void free_frame(uint64_t addr) {
     if (addr < MEMORY_START) {
         return;
     }

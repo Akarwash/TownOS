@@ -42,13 +42,17 @@ A kernel is the definitive freestanding program. MiniOS's compiler flags make th
 explicit:
 
 ```makefile
-CFLAGS = -ffreestanding -m32 -fno-pie -nostdlib -nodefaultlibs -Wall -Wextra
+CFLAGS = -ffreestanding -m64 -mno-red-zone -mcmodel=kernel -fno-pie -nostdlib -nodefaultlibs -Wall -Wextra
 ```
 
 - **`-ffreestanding`** — tells the compiler "no standard library, no `main`
   assumptions, don't emit calls into libc." Without it, the compiler might, say,
   replace a copy loop with a call to the `memcpy` that doesn't exist here.
-- **`-m32`** — generate 32-bit code (protected mode; ch.1–2), even on a 64-bit host.
+- **`-m64`** — generate 64-bit code (long mode), even on a different host.
+- **`-mno-red-zone`** — disable the 128-byte red zone below the stack pointer;
+  it is unsafe once interrupts run in kernel mode.
+- **`-mcmodel=kernel`** — assume the kernel lives in the top 2 GB of the address
+  space, the memory model expected for a 64-bit kernel.
 - **`-fno-pie`** — no position-independent code. A kernel loads at a *fixed*
   address (1 MB); PIE is for relocatable user programs and would add pointless
   indirection.
@@ -65,32 +69,32 @@ are the functions the kernel actually uses — the screen driver's `scroll` need
 `<stddef.h>` are technically part of the hosted world you have opted out of. You
 are rebuilding the floor you normally stand on, one plank at a time.
 
-## The cross-compiler: why `i686-elf-gcc`
+## The cross-compiler: why `x86_64-elf-gcc`
 
 Your Mac's built-in compiler produces binaries for *your Mac* — the host OS, the
-host CPU (ARM), the host executable format (Mach-O). A kernel for 32-bit x86 needs
+host CPU (ARM), the host executable format (Mach-O). A kernel for bare-metal x86-64 needs
 none of those. Compiling with the host toolchain would, at best, embed subtle
 host assumptions and, at worst, silently produce something that cannot boot.
 
 The solution is a **cross-compiler**: a compiler that runs on one platform (your
-ARM Mac) but *produces code for a different target* (32-bit x86, bare metal, ELF
+ARM Mac) but *produces code for a different target* (x86-64, bare metal, ELF
 format). That target is spelled out in the name:
 
 ```
-i686-elf-gcc
-│    │   └── the compiler
-│    └────── ELF output, no target OS ("bare metal")
-└─────────── the i686 (32-bit x86) instruction set
+x86_64-elf-gcc
+│      │   └── the compiler
+│      └────── ELF output, no target OS ("bare metal")
+└───────────── the x86-64 (64-bit x86) instruction set
 ```
 
 The `-elf` with no OS name is the important part: it means "there is no operating
 system on the target" — which is correct, because MiniOS *is* the operating system.
-A compiler like `i686-linux-gnu-gcc` would assume Linux is present and produce code
-that expects Linux system calls. `i686-elf-gcc` assumes nothing.
+A compiler like `x86_64-linux-gnu-gcc` would assume Linux is present and produce code
+that expects Linux system calls. `x86_64-elf-gcc` assumes nothing.
 
-`nasm` (the assembler) and `qemu-system-i386` (the emulator) round out the
+`nasm` (the assembler) and `qemu-system-x86_64` (the emulator) round out the
 toolchain: NASM assembles `boot.asm`, `gdt_flush.asm`, and `isr_stubs.asm` into
-object files, and QEMU emulates a 32-bit x86 PC so you can run the result without
+object files, and QEMU emulates an x86-64 PC so you can run the result without
 rebooting real hardware.
 
 ## The linker script: arranging the binary (`linker.ld`)
@@ -139,10 +143,10 @@ build artifact there is.
 The Makefile just automates the toolchain into a repeatable pipeline:
 
 ```
-each .c  --(i686-elf-gcc $(CFLAGS) -c)-->  .o
-each .asm --(nasm -f elf32)------------->  .o
-all .o   --(i686-elf-ld -T linker.ld)-->  minios.bin
-minios.bin --(qemu-system-i386 -kernel)-> running OS
+each .c  --(x86_64-elf-gcc $(CFLAGS) -c)-->  .o
+each .asm --(nasm -f elf64)------------->  .o
+all .o   --(x86_64-elf-ld -T linker.ld)-->  minios.bin
+minios.bin --(qemu-system-x86_64 -kernel)-> running OS
 ```
 
 Key points:
@@ -171,7 +175,7 @@ gdt_flush.asm ─nasm┤
  isr_stubs.asm ─nasm┤
                     ├─► *.o ─┐
   kernel.c ─gcc─────┤        │
-     gdt.c ─gcc─────┤        ├─ i686-elf-ld ─T linker.ld ─► minios.bin (ELF)
+     gdt.c ─gcc─────┤        ├─ x86_64-elf-ld ─T linker.ld ─► minios.bin (ELF)
   screen.c ─gcc─────┤        │                                   │
     ... etc ─gcc────┘        │                          qemu -kernel minios.bin
                              │                                   │
@@ -188,7 +192,7 @@ understands, and QEMU boots it.
 - **`make` alternatives**: real kernels use recursive Make, Kbuild (Linux), CMake,
   or Meson, but the core pipeline — compile freestanding, link with a script — is
   identical.
-- **Building your own cross-compiler**: `i686-elf-gcc` came from Homebrew, but the
+- **Building your own cross-compiler**: `x86_64-elf-gcc` came from Homebrew, but the
   OSDev wiki's "GCC Cross-Compiler" guide walks through building binutils and GCC
   yourself. Doing it once teaches you what a "target triple" really means.
 - **`objdump` and `readelf`** let you inspect `minios.bin`: `readelf -l` shows the

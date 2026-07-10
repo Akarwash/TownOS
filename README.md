@@ -1,9 +1,15 @@
 # MiniOS
 
-A hobby operating system built from scratch in C and x86 assembly. It boots via
-Multiboot into 32-bit protected mode, sets up the GDT and IDT, handles hardware
+A hobby operating system built from scratch in C and x86-64 assembly. It boots via
+Multiboot, climbs into 64-bit long mode, sets up the GDT and IDT, handles hardware
 interrupts (timer + keyboard), manages physical memory, and runs an interactive
 shell — all in about 1,000 lines of code.
+
+> **Status:** MiniOS is mid-migration from 32-bit to x86-64. The portable code,
+> build system, types, and linker script are already 64-bit. The long-mode boot
+> path (the 32→64 climb, 64-bit GDT/IDT install, and ISR save/restore) is being
+> hand-written and is not finished yet, so **the project does not currently build
+> or boot.** See [CONVERSION_NOTES.md](CONVERSION_NOTES.md) for what remains.
 
 ## Features
 
@@ -21,16 +27,16 @@ shell — all in about 1,000 lines of code.
 
 ### 1. Install the toolchain (macOS, Homebrew)
 
-MiniOS needs a **cross-compiler** that targets bare-metal 32-bit x86, an
+MiniOS needs a **cross-compiler** that targets bare-metal x86-64, an
 assembler, and an emulator. All four are plain Homebrew formulae:
 
 ```bash
-brew install i686-elf-gcc i686-elf-binutils nasm qemu
+brew install x86_64-elf-gcc x86_64-elf-binutils nasm qemu
 ```
 
 > Why a cross-compiler? Your Mac's built-in compiler produces binaries for macOS
-> on your host CPU. A kernel needs code for a bare 32-bit x86 machine with no OS
-> underneath. `i686-elf-gcc` produces exactly that. See
+> on your host CPU. A kernel needs code for a bare x86-64 machine with no OS
+> underneath. `x86_64-elf-gcc` produces exactly that. See
 > [docs/07-build-system-and-toolchain.md](docs/07-build-system-and-toolchain.md).
 
 ### 2. Build
@@ -49,7 +55,7 @@ source compile with no warnings.
 make run
 ```
 
-This launches the kernel in QEMU (`qemu-system-i386 -kernel minios.bin`). A window
+This launches the kernel in QEMU (`qemu-system-x86_64 -kernel minios.bin`). A window
 opens showing:
 
 ```
@@ -116,7 +122,7 @@ Makefile     — build system
 
 ## Tech stack
 
-- **Languages:** C, x86 assembly (NASM)
-- **Toolchain:** `i686-elf-gcc` cross-compiler, `i686-elf-ld`, GNU Make
-- **Emulator:** QEMU (`qemu-system-i386`)
-- **Target:** x86, 32-bit protected mode
+- **Languages:** C, x86-64 assembly (NASM)
+- **Toolchain:** `x86_64-elf-gcc` cross-compiler, `x86_64-elf-ld`, GNU Make
+- **Emulator:** QEMU (`qemu-system-x86_64`)
+- **Target:** x86-64, 64-bit long mode

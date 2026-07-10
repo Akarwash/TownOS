@@ -1,29 +1,15 @@
 #include "gdt.h"
 
-gdt_entry_t gdt[3];
-gdt_ptr_t gdt_ptr;
+// TODO(long-mode): 64-bit GDT (HAND-WRITTEN).
+//   This whole file is a stub. The final version will:
+//     - declare the GDT array (null, kernel code, kernel data descriptors)
+//     - fill each descriptor with the correct 64-bit long-mode bit pattern
+//     - set gdt_ptr.limit / gdt_ptr.base and call gdt_flush to load it
+//   The descriptor contents and the gdt_flush routine are being written by
+//   hand, so nothing is generated here.
 
-extern void gdt_flush(uint32_t gdt_ptr_addr);
-
-static void gdt_set_entry(int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t granularity) {
-    gdt[index].base_low    = base & 0xFFFF;
-    gdt[index].base_middle = (base >> 16) & 0xFF;
-    gdt[index].base_high   = (base >> 24) & 0xFF;
-
-    gdt[index].limit_low   = limit & 0xFFFF;
-    gdt[index].granularity  = (limit >> 16) & 0x0F;
-    gdt[index].granularity |= granularity & 0xF0;
-
-    gdt[index].access = access;
-}
+extern void gdt_flush(uint64_t gdt_ptr_addr);   // defined in gdt_flush.asm (stub)
 
 void gdt_init(void) {
-    gdt_ptr.limit = sizeof(gdt) - 1;
-    gdt_ptr.base  = (uint32_t)&gdt;
-
-    gdt_set_entry(0, 0, 0, 0, 0);            // null descriptor
-    gdt_set_entry(1, 0, 0xFFFFF, 0x9A, 0xCF); // kernel code
-    gdt_set_entry(2, 0, 0xFFFFF, 0x92, 0xCF); // kernel data
-
-    gdt_flush((uint32_t)&gdt_ptr);
+    // TODO(long-mode): build the 64-bit descriptors and call gdt_flush().
 }

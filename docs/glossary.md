@@ -145,8 +145,8 @@ brackets is where the term is explained in depth.
   assumptions; what kernels compile as. [ch.7]
 - **Hosted** — a normal C environment with a full standard library and OS. [ch.7]
 - **Cross-compiler** — a compiler that runs on one platform but targets another
-  (`i686-elf-gcc`: runs on your Mac, targets bare-metal 32-bit x86). [ch.7]
-- **Target triple** — the `arch-vendor-os` string (e.g. `i686-elf`) naming what a
+  (`x86_64-elf-gcc`: runs on your Mac, targets bare-metal x86-64). [ch.7]
+- **Target triple** — the `arch-vendor-os` string (e.g. `x86_64-elf`) naming what a
   compiler produces; `-elf` with no OS means "bare metal." [ch.7]
 - **ELF (Executable and Linkable Format)** — the binary format the linker emits and
   QEMU's `-kernel` loads. [ch.7]
@@ -157,5 +157,5 @@ brackets is where the term is explained in depth.
 - **Section (`.text`, `.rodata`, `.data`, `.bss`)** — named regions of a binary for
   code, constants, initialised data, and zeroed data respectively. [ch.7]
 - **NASM** — the assembler MiniOS uses for its `.asm` files. [ch.7]
-- **QEMU** — the emulator that runs `minios.bin` as a virtual 32-bit PC. [ch.7]
+- **QEMU** — the emulator that runs `minios.bin` as a virtual x86-64 PC. [ch.7]
 - **Object file (`.o`)** — compiled-but-not-yet-linked output from one source file. [ch.7]

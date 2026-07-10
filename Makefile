@@ -1,12 +1,32 @@
+# ============================================================================
+# Cross toolchain install (x86_64-elf) — this repo builds a freestanding
+# x86-64 kernel and needs a cross compiler that targets bare metal, not the host.
+#
+# macOS (Homebrew):
+#   brew install x86_64-elf-gcc x86_64-elf-binutils nasm qemu
+#
+# Debian / Ubuntu:
+#   sudo apt install nasm qemu-system-x86
+#   # No distro package ships an x86_64-elf cross gcc/binutils; build from source
+#   # (see https://wiki.osdev.org/GCC_Cross-Compiler) targeting --target=x86_64-elf,
+#   # or on 64-bit hosts the native gcc/ld can be used with the flags below.
+#
+# NOTE: the build will NOT link successfully until the hand-written long-mode /
+# GDT / IDT / ISR stubs are filled in. That is expected — see CONVERSION_NOTES.md.
+# ============================================================================
+
 # Compilers and tools
-CC = i686-elf-gcc
-LD = i686-elf-ld
+CC = x86_64-elf-gcc
+LD = x86_64-elf-ld
 ASM = nasm
-QEMU = qemu-system-i386
+QEMU = qemu-system-x86_64
 
 # Compiler flags
-CFLAGS = -ffreestanding -m32 -fno-pie -nostdlib -nodefaultlibs -Wall -Wextra
-ASMFLAGS = -f elf32
+#   -m64            build 64-bit code
+#   -mno-red-zone   the red zone is unsafe once interrupts run in kernel mode
+#   -mcmodel=kernel code/data live in the negative 2GB; required for a 64-bit kernel
+CFLAGS = -ffreestanding -m64 -mno-red-zone -mcmodel=kernel -fno-pie -nostdlib -nodefaultlibs -Wall -Wextra
+ASMFLAGS = -f elf64
 LDFLAGS = -T linker.ld -nostdlib
 
 # Source files

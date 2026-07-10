@@ -3,11 +3,14 @@
 
 #include "../include/types.h"
 
+// 64-bit register snapshot handed to the C interrupt handlers. Field names and
+// widths are updated for x86-64; the assembly that actually saves them (with
+// this exact layout/order) is hand-written in isr_stubs.asm.
 typedef struct {
-    uint32_t ds;
-    uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax;
-    uint32_t int_no, err_code;
-    uint32_t eip, cs, eflags, user_esp, user_ss;
+    uint64_t rdi, rsi, rbp, rbx, rdx, rcx, rax;
+    uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
+    uint64_t int_no, err_code;
+    uint64_t rip, cs, rflags, user_rsp, ss;
 } registers_t;
 
 typedef void (*isr_handler_t)(registers_t *);
