@@ -2,17 +2,21 @@
 # Cross toolchain install (x86_64-elf) — this repo builds a freestanding
 # x86-64 kernel and needs a cross compiler that targets bare metal, not the host.
 #
-# macOS (Homebrew):
+# This machine (macOS / Apple Silicon, Homebrew) — the following was run and works:
 #   brew install x86_64-elf-gcc x86_64-elf-binutils nasm qemu
+#   # verified: x86_64-elf-gcc 16.1.0, x86_64-elf-ld (binutils) 2.46.1,
+#   #           nasm 3.01, qemu 11.0.0
 #
-# Debian / Ubuntu:
+# Debian / Ubuntu (reference — not run here):
 #   sudo apt install nasm qemu-system-x86
 #   # No distro package ships an x86_64-elf cross gcc/binutils; build from source
 #   # (see https://wiki.osdev.org/GCC_Cross-Compiler) targeting --target=x86_64-elf,
 #   # or on 64-bit hosts the native gcc/ld can be used with the flags below.
 #
-# NOTE: the build will NOT link successfully until the hand-written long-mode /
-# GDT / IDT / ISR stubs are filled in. That is expected — see CONVERSION_NOTES.md.
+# NOTE: the build will NOT link successfully until the hand-written GDT / IDT /
+# ISR stubs are filled in. boot/boot.asm's long-mode climb is now implemented, so
+# the remaining undefined symbols are the ISR/IRQ entry points in
+# kernel/isr_stubs.asm. That link failure is expected — see CONVERSION_NOTES.md.
 # ============================================================================
 
 # Compilers and tools

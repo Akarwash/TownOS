@@ -1,128 +1,70 @@
 # MiniOS
 
-A hobby operating system built from scratch in C and x86-64 assembly. It boots via
-Multiboot, climbs into 64-bit long mode, sets up the GDT and IDT, handles hardware
-interrupts (timer + keyboard), manages physical memory, and runs an interactive
-shell — all in about 1,000 lines of code.
+A hobby x86-64 operating system kernel built from scratch in C and assembly.
 
-> **Status:** MiniOS is mid-migration from 32-bit to x86-64. The portable code,
-> build system, types, and linker script are already 64-bit. The long-mode boot
-> path (the 32→64 climb, 64-bit GDT/IDT install, and ISR save/restore) is being
-> hand-written and is not finished yet, so **the project does not currently build
-> or boot.** See [CONVERSION_NOTES.md](CONVERSION_NOTES.md) for what remains.
+MiniOS boots via Multiboot, climbs the CPU into 64-bit long mode, sets up the GDT
+and TSS, and is being built toward an interrupt-driven interactive shell. It is a
+learning kernel: one address space, everything at ring 0, no processes and no
+filesystem. The point is to understand how an operating system works by building a
+small real one, not to be a production OS.
 
-## Features
+## Status
 
-- Multiboot-compliant bootloader (`boot/boot.asm`)
-- Flat-model GDT and full IDT with PIC remapping
-- Interrupt dispatch: 32 CPU exceptions + 16 hardware IRQs
-- PIT timer driver (100 Hz) on IRQ 0
-- PS/2 keyboard driver on IRQ 1
-- Physical memory frame allocator (bitmap)
-- VGA text-mode screen driver with scrolling and a hardware cursor
-- Minimal hand-written libc (`string`, `mem`)
-- Interactive shell with `help`, `clear`, `hello`, `tick`
+MiniOS **compiles and assembles but does not yet link**, so it does not run yet.
+This is expected. The link fails on the interrupt entry symbols `isr0`-`isr31` and
+`irq0`-`irq15`, which live in `kernel/isr_stubs.asm`. That file and `kernel/idt.c`
+are the two remaining hand-written stubs. Full status is in
+[docs/README.md](docs/README.md).
 
 ## Quick start
 
-### 1. Install the toolchain (macOS, Homebrew)
-
-MiniOS needs a **cross-compiler** that targets bare-metal x86-64, an
-assembler, and an emulator. All four are plain Homebrew formulae:
+Install the toolchain (macOS, Homebrew):
 
 ```bash
 brew install x86_64-elf-gcc x86_64-elf-binutils nasm qemu
 ```
 
-> Why a cross-compiler? Your Mac's built-in compiler produces binaries for macOS
-> on your host CPU. A kernel needs code for a bare x86-64 machine with no OS
-> underneath. `x86_64-elf-gcc` produces exactly that. See
-> [docs/07-build-system-and-toolchain.md](docs/07-build-system-and-toolchain.md).
-
-### 2. Build
+Build:
 
 ```bash
 make
 ```
 
-This compiles every C and assembly file, then links them with `linker.ld` into
-`minios.bin` (an ELF image the Multiboot loader understands). You should see each
-source compile with no warnings.
+For Linux instructions, exact versions, how to run under QEMU, and how to debug,
+see [docs/building.md](docs/building.md).
 
-### 3. Run
+## Documentation
 
-```bash
-make run
-```
+MiniOS keeps two separate bodies of documentation:
 
-This launches the kernel in QEMU (`qemu-system-x86_64 -kernel minios.bin`). A window
-opens showing:
+- **[docs/](docs/README.md)** is project documentation: factual, derived from the
+  source. What MiniOS is, how it is built, and why the load-bearing decisions were
+  made. Start here to build or hack on the kernel.
+- **[learnings/](learnings/README.md)** is conceptual learning material: how
+  operating systems work in general, using MiniOS as the running example. Start
+  here to learn the ideas.
 
-```
-Welcome to MiniOS!
-> _
-```
+They must not blur: `docs/` states facts about this codebase, `learnings/` teaches
+concepts.
 
-### 4. Try the shell
-
-Type a command and press Enter. Backspace works.
-
-| Command | What it does |
-|---------|--------------|
-| `help`  | list the available commands |
-| `clear` | clear the screen |
-| `hello` | print a greeting |
-| `tick`  | print the timer tick count (increments 100×/second) |
-
-Run `tick` twice a second apart — the number jumps by ~100, which proves the timer
-interrupt (IRQ 0) is firing. Typing at all proves the keyboard interrupt (IRQ 1)
-is working. Anything else prints `Unknown command: ...`.
-
-To quit QEMU: close the window, or press `Ctrl-A` then `X` in the terminal if you
-launched it there.
-
-### Rebuild from scratch
-
-```bash
-make clean && make
-```
-
-## How it all works
-
-This repo doubles as a guided course in operating systems. The
-[`docs/`](docs/README.md) folder walks through every concept — booting, the GDT,
-interrupts, drivers, memory, and the shell — using this code as the concrete
-example. Start at [docs/README.md](docs/README.md), which includes a map of which
-source file implements each idea.
-
-Recommended reading order:
-
-1. [What is an operating system?](docs/00-what-is-an-operating-system.md)
-2. [How an OS boots](docs/01-how-an-os-boots.md)
-3. [Protected mode and the GDT](docs/02-protected-mode-and-the-gdt.md)
-4. [Interrupts](docs/03-interrupts.md) ← the heart of the system
-5. [Drivers and I/O](docs/04-drivers-and-io.md)
-6. [Memory management](docs/05-memory-management.md)
-7. [The shell and event loop](docs/06-the-shell-and-event-loop.md)
-8. [Build system and toolchain](docs/07-build-system-and-toolchain.md)
-
-## Project structure
+## Repository layout
 
 ```
-boot/       — Multiboot bootloader (assembly)
-kernel/     — core OS: GDT, IDT, interrupts, timer, memory, kernel_main
-drivers/    — hardware drivers: screen, keyboard, I/O ports
-libc/       — minimal C standard library (string, mem)
-shell/      — interactive command shell
-include/    — shared type definitions
-docs/        — learning guide (start here to understand the code)
-linker.ld    — memory layout: kernel loads at 1 MB
-Makefile     — build system
+boot/       Multiboot header and the 32 to 64 long-mode climb (assembly)
+kernel/     GDT/TSS, IDT, interrupt dispatch, timer, memory allocator, kernel_main
+drivers/    hardware drivers: screen, keyboard, I/O ports
+libc/       minimal freestanding C library (string, mem)
+shell/      interactive command shell
+include/    shared type definitions
+docs/       project documentation (factual)
+learnings/  OS concepts and teaching material
+linker.ld   section layout: kernel loads at 1M
+Makefile    build system
 ```
 
-## Tech stack
+See [docs/architecture.md](docs/architecture.md) for the file-by-file
+responsibilities and the subsystem map.
 
-- **Languages:** C, x86-64 assembly (NASM)
-- **Toolchain:** `x86_64-elf-gcc` cross-compiler, `x86_64-elf-ld`, GNU Make
-- **Emulator:** QEMU (`qemu-system-x86_64`)
-- **Target:** x86-64, 64-bit long mode
+## License
+
+See [LICENSE](LICENSE).

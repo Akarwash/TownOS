@@ -1,82 +1,49 @@
-# Learning Operating Systems with MiniOS
+# MiniOS project documentation
 
-This folder teaches how an operating system works, using **MiniOS** — the little
-x86-64 kernel in this repository — as a running example. Every abstract idea
-(interrupts, memory, drivers) is tied back to a real file you can open and read.
+This is the factual documentation for MiniOS: what it is, how it is put together,
+how to build and run it, and why the load-bearing decisions were made. It is
+derived from the source, not from concepts. For the conceptual "how operating
+systems work" material, see [`../learnings/`](../learnings/README.md) instead.
+The two are kept separate on purpose: `docs/` states facts about this codebase,
+`learnings/` teaches ideas.
 
-The goal is not just "understand this codebase." It is **understand operating
-systems as a whole**, and use MiniOS as the concrete thing your intuition can
-grab onto.
+## Pages
 
-## Who this is for
+| Page | What it covers |
+|------|----------------|
+| [architecture.md](architecture.md) | What MiniOS is, the directory layout, the subsystem map, and control flow from `_start` to the event loop |
+| [building.md](building.md) | Toolchain and versions, install commands, how to build and run, and how to debug |
+| [reference/boot-sequence.md](reference/boot-sequence.md) | The 32 to 64 long-mode climb in `boot/boot.asm`, step by step |
+| [reference/memory-map.md](reference/memory-map.md) | Physical memory layout: load address, VGA buffer, identity-mapped region, page tables, stacks |
+| [reference/gdt.md](reference/gdt.md) | The kernel GDT and TSS: selector table, descriptor layouts, and the bootstrap-vs-kernel GDT split |
+| [decisions/](decisions/) | Architecture decision records (ADRs) for the load-bearing choices |
 
-You know C. You are comfortable with pointers, structs, and bitwise operators.
-You have seen a little assembly but do not need to be fluent. You are curious
-about what actually happens between pressing the power button and a blinking
-cursor.
+Reference page pending: `reference/idt.md`. The IDT is not documented yet because
+`kernel/idt.c` is still a stub (see Status below). It will be written once the IDT
+install path exists.
 
-## How to read this
+## Decisions
 
-Read the chapters in order the first time — each one builds on the last. Later,
-use them as reference. Each chapter follows the same shape:
+- [0001 — Target x86-64 rather than i686](decisions/0001-target-x86-64.md)
+- [0002 — Use 2MB pages and identity-map the first 8MB](decisions/0002-2mb-pages-and-8mb-identity-map.md)
+- [0003 — Bootstrap GDT separate from the kernel GDT](decisions/0003-bootstrap-gdt-separate-from-kernel-gdt.md)
+- [0004 — Build the TSS before user mode exists](decisions/0004-build-tss-before-user-mode.md)
 
-1. **The big idea** — the concept as it exists in *all* operating systems (Linux,
-   Windows, macOS, a microwave's firmware). This is the part that transfers.
-2. **How the hardware forces the design** — why the concept exists at all. Most
-   OS design is not arbitrary; it is the software shape of a hardware constraint.
-3. **How MiniOS does it** — the specific files, functions, and magic numbers,
-   with pointers into the source.
-4. **Going further** — how real, production kernels extend the idea, plus
-   exercises.
+## Status
 
-## The chapters
+MiniOS **compiles and assembles but does not yet link**, and therefore does not
+run. This is expected, not a broken setup.
 
-| # | File | What you'll learn |
-|---|------|-------------------|
-| 0 | [00-what-is-an-operating-system.md](00-what-is-an-operating-system.md) | What an OS actually is, the kernel/user split, and the four jobs every kernel does |
-| 1 | [01-how-an-os-boots.md](01-how-an-os-boots.md) | Power-on to `kernel_main`: firmware, bootloaders, Multiboot, real vs protected mode |
-| 2 | [02-protected-mode-and-the-gdt.md](02-protected-mode-and-the-gdt.md) | Segmentation, privilege rings, and why MiniOS builds a "flat" GDT |
-| 3 | [03-interrupts.md](03-interrupts.md) | The single most important OS mechanism: IDT, the PIC, ISRs, IRQs, and EOI |
-| 4 | [04-drivers-and-io.md](04-drivers-and-io.md) | Talking to hardware: port I/O, the VGA screen, PS/2 keyboard, and the PIT timer |
-| 5 | [05-memory-management.md](05-memory-management.md) | Physical vs virtual memory, allocators, paging, and where MiniOS stops |
-| 6 | [06-the-shell-and-event-loop.md](06-the-shell-and-event-loop.md) | Tying it together: the event loop, `hlt`, and how a keypress becomes a command |
-| 7 | [07-build-system-and-toolchain.md](07-build-system-and-toolchain.md) | Freestanding C, cross-compilers, linker scripts, and how bytes become a bootable image |
-| — | [glossary.md](glossary.md) | Every acronym and term, defined in one place |
+- All C sources compile cleanly under `-Wall -Wextra`.
+- All assembly sources assemble cleanly with `nasm -f elf64`.
+- The link fails on undefined symbols `isr0`-`isr31` and `irq0`-`irq15`, which
+  are the interrupt entry points that belong in `kernel/isr_stubs.asm`. That file
+  and `kernel/idt.c` are the two remaining `TODO(long-mode)` stubs.
 
-## A map of MiniOS
+What is implemented: the Multiboot header and the 32 to 64 long-mode climb
+(`boot/boot.asm`), the kernel GDT and TSS (`kernel/gdt.c`, `kernel/gdt_flush.asm`),
+the PIC remap and IDT zeroing (`kernel/idt.c`, partial), and all the portable C
+(drivers, libc, timer, memory allocator, shell). See
+[architecture.md](architecture.md) for the full implemented-vs-stub map.
 
-Keep this next to you. It shows which source file implements each concept.
-
-```
-boot/boot.asm .............. Multiboot header + first instructions   → ch.1
-kernel/kernel.c ............ kernel_main: the "init" sequence          → ch.6
-kernel/gdt.c / gdt_flush.asm  Global Descriptor Table (segmentation)  → ch.2
-kernel/idt.c ............... Interrupt Descriptor Table + PIC remap    → ch.3
-kernel/isr.c / isr_stubs.asm  Interrupt handlers (C side + asm stubs)  → ch.3
-kernel/timer.c ............. PIT timer driver (IRQ0)                    → ch.4
-kernel/memory.c ............ physical memory allocator                 → ch.5
-drivers/screen.c ........... VGA text-mode output                      → ch.4
-drivers/keyboard.c ......... PS/2 keyboard input (IRQ1)                → ch.4
-drivers/ports.c ............ in/out instruction wrappers               → ch.4
-libc/string.c, mem.c ....... hand-rolled standard library              → ch.7
-shell/shell.c .............. the interactive command loop              → ch.6
-include/types.h ............ fixed-width integer types                 → ch.7
-linker.ld .................. memory layout of the final binary         → ch.7
-```
-
-> Note: some of these files are still empty stubs. The build spec in
-> [../completion-doc.md](../completion-doc.md) describes exactly what each one
-> should contain. These docs explain the *why* behind that spec so that when you
-> implement each file, you understand what you are building and not just what to
-> type.
-
-## The one-paragraph summary of everything
-
-A computer starts in a dumb 16-bit mode running firmware. The firmware (or a
-bootloader like GRUB) loads your kernel into memory and jumps to it. Your kernel
-climbs the CPU into 64-bit long mode, sets up tables that describe memory
-(the GDT) and how to handle interrupts (the IDT), programs the interrupt
-controller so hardware can get the CPU's attention, and then installs drivers for
-the screen, keyboard, and timer. Finally it enters an idle loop and does nothing
-until an interrupt — a keypress, a timer tick — wakes it up to do work. That loop,
-woken by interrupts, *is* the operating system. Everything else is detail.
+For the exact build, run, and debug commands, see [building.md](building.md).
