@@ -91,8 +91,43 @@ Surgical mechanical fact corrections that *were* applied: the toolchain chapter
 `docs/README.md` summary (toolchain names, flags, `elf64`, `qemu-system-x86_64`,
 "long mode"). `docs/lecture.md` and `learning.md` were not touched.
 
+## Toolchain install + current build status (this machine)
+
+Host detected: **macOS (Apple Silicon), Homebrew**. `nasm` and `qemu` were
+already present; the cross gcc/binutils were installed:
+
+```bash
+brew install x86_64-elf-gcc x86_64-elf-binutils
+```
+
+Verified versions:
+
+- `x86_64-elf-gcc` — GCC 16.1.0
+- `x86_64-elf-ld` — GNU binutils 2.46.1
+- `nasm` — 3.01
+- `qemu-system-x86_64` — 11.0.0
+
+The cross compiler is available, so the Makefile's `CC`/`LD` were left unchanged
+(no native-toolchain fallback needed); only the toolchain comment block was
+refreshed to record what actually worked here.
+
+`make` build status:
+
+1. **C sources compile** — all 14 objects build cleanly with `x86_64-elf-gcc`,
+   no warnings.
+2. **`boot/boot.asm` assembles** — `nasm -f elf64`, clean. The 32→64 long-mode
+   climb is now implemented (see `BOOT_NOTES.md`).
+3. **Link still fails, as expected** — `x86_64-elf-ld` reports undefined
+   references to the ISR/IRQ entry points that live in the still-stubbed
+   `kernel/isr_stubs.asm` (referenced by `kernel/isr.c:isr_install`):
+   `isr0`–`isr31` and `irq0`–`irq15` (48 symbols). Filling in
+   `isr_stubs.asm` (and the `gdt.c`/`gdt_flush.asm`/`idt.c` stubs) is the
+   remaining hand-written work.
+
+QEMU was not run.
+
 ## Not done, on purpose
 
-- No build or QEMU run was attempted.
+- No QEMU run was attempted.
 - No new teaching/conceptual docs about long mode, paging, the boot climb, or
   the 64-bit interrupt/GDT mechanism were written.
