@@ -53,3 +53,47 @@ Likely suspects:
 - a table that was not zeroed before use, or
 - an identity map that does not cover the address of the code executing at the
   moment CR0.PG is set.
+
+# The kernel GDT + TSS (`kernel/gdt.c`, `gdt.h`, `gdt_flush.asm`)
+
+`boot.asm` gets us into long mode with a throwaway bootstrap GDT. Once C is
+running, `gdt_init()` installs the real kernel GDT. It deliberately keeps the
+bootstrap selectors (`0x08` kernel code, `0x10` kernel data) meaning the same
+thing, so the CS reload inside `gdt_flush` stays valid.
+
+## Selector layout (7 slots)
+
+| index | descriptor | selector |
+|---|---|---|
+| 0 | null | 0x00 |
+| 1 | kernel code, DPL 0 | 0x08 |
+| 2 | kernel data, DPL 0 | 0x10 |
+| 3 | user code, DPL 3 | 0x1B (0x18 \| 3) |
+| 4 | user data, DPL 3 | 0x23 (0x20 \| 3) |
+| 5, 6 | TSS descriptor (16 bytes, spans two slots) | 0x28 |
+
+## Why the TSS descriptor is 16 bytes, not 8
+
+Code/data descriptors are 8 bytes with a 32-bit base — fine, because their base
+is ignored in long mode anyway. A TSS descriptor, though, must point at a real
+64-bit linear address, and a 64-bit base does not fit in the legacy 8-byte
+descriptor's 32-bit base fields. So a system (TSS) descriptor is extended with an
+extra 32 bits of base plus a reserved word, making it 16 bytes — it occupies two
+GDT slots (5 and 6 here).
+
+## Why CS is reloaded with `retfq`, not a far jump
+
+In 32-bit mode you reload CS with `jmp 0x08:label`. In 64-bit mode that
+encoding — a far jump with an immediate `selector:offset` — does not exist. The
+workaround is a far *return*: `retfq` pops RIP and then CS off the stack. So
+`gdt_flush` pops its own return address, pushes the new CS selector (`0x08`),
+pushes the return address back on top, and `retfq`s — which lands back at the
+caller with CS reloaded. The data segments (`ds/es/fs/gs/ss`) are ordinary `mov`s
+and need no such trick.
+
+## The TSS is inert for now
+
+`ltr 0x28` loads the task register, and `tss.rsp0` points at a dedicated 16KB
+ring-0 stack (separate from the boot stack). But everything currently runs at
+CPL 0, so no interrupt crosses a privilege boundary, so the CPU never consults
+`rsp0`. The TSS exists purely for the user-mode (ring 3) work coming later.
