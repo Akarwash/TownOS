@@ -2,9 +2,9 @@
 #include "ports.h"
 #include "../kernel/isr.h"
 #include "../shell/shell.h"
+#include "../include/vectors.h"
 
 #define KEYBOARD_DATA_PORT 0x60
-#define IRQ1_INTERRUPT     33
 #define KEY_RELEASE_MASK   0x80
 
 // US QWERTY scan code (set 1) to ASCII. Index = scan code, 0 = unmapped/ignored.
@@ -37,5 +37,5 @@ static void keyboard_callback(registers_t *regs) {
 }
 
 void keyboard_init(void) {
-    register_interrupt_handler(IRQ1_INTERRUPT, keyboard_callback);
+    register_interrupt_handler(IRQ_KEYBOARD, keyboard_callback);
 }

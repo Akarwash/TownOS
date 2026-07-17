@@ -1,11 +1,11 @@
 #include "timer.h"
 #include "isr.h"
 #include "../drivers/ports.h"
+#include "../include/vectors.h"
 
 #define PIT_BASE_FREQUENCY  1193180
 #define PIT_CHANNEL0        0x40
 #define PIT_COMMAND         0x43
-#define IRQ0_INTERRUPT      32
 
 static volatile uint32_t tick = 0;
 
@@ -19,7 +19,7 @@ uint32_t get_tick(void) {
 }
 
 void timer_init(uint32_t frequency) {
-    register_interrupt_handler(IRQ0_INTERRUPT, timer_callback);
+    register_interrupt_handler(IRQ_TIMER, timer_callback);
 
     uint32_t divisor = PIT_BASE_FREQUENCY / frequency;
 

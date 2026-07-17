@@ -19,6 +19,18 @@
 extern isr_handler
 extern irq_handler
 
+; ============================================================================
+; MANUAL COUPLING, NO COMPILER CHECK. KEEP IN SYNC WITH include/vectors.h.
+;
+; NASM cannot include a C header, so PIC_MASTER_VECTOR_BASE is duplicated here
+; as an `equ`. The IRQ macro below derives every hardware vector from it, the
+; same way vectors.h derives IRQ_TIMER, IRQ_KEYBOARD, and the rest. If you move
+; the base in vectors.h, you MUST move it here too. Nothing will warn you if
+; these two numbers drift apart; the symptom is IRQs landing on the wrong gate.
+; This is the same class of invisible coupling as the registers_t push order.
+; ============================================================================
+PIC_MASTER_VECTOR_BASE equ 0x40
+
 ; --- Per-vector entry macros --------------------------------------------------
 ; For most vectors the CPU pushes no error code. For a handful of exceptions it
 ; pushes a real one. To give the C handler a single uniform stack layout, the
@@ -40,11 +52,11 @@ isr%1:
     jmp isr_common_stub
 %endmacro
 
-%macro IRQ 2                   ; hardware IRQ %1, delivered at remapped vector %2
+%macro IRQ 1                   ; hardware IRQ %1, delivered at PIC base + %1
 global irq%1
 irq%1:
     push 0                      ; IRQs never carry an error code, push a dummy
-    push %2                     ; remapped vector number (32..47)
+    push PIC_MASTER_VECTOR_BASE + %1   ; remapped vector, derived from the base
     jmp irq_common_stub
 %endmacro
 
@@ -84,25 +96,27 @@ ISR_NOERR 29
 ISR_NOERR 30
 ISR_NOERR 31
 
-; --- Hardware IRQ entry points (IRQ 0..15 -> vectors 32..47) -------------------
-; The PIC was remapped (see idt.c) so IRQ0 arrives as vector 32, IRQ1 as 33, and
-; so on, clear of Intel's reserved 0..31 exception range.
-IRQ 0,  32
-IRQ 1,  33
-IRQ 2,  34
-IRQ 3,  35
-IRQ 4,  36
-IRQ 5,  37
-IRQ 6,  38
-IRQ 7,  39
-IRQ 8,  40
-IRQ 9,  41
-IRQ 10, 42
-IRQ 11, 43
-IRQ 12, 44
-IRQ 13, 45
-IRQ 14, 46
-IRQ 15, 47
+; --- Hardware IRQ entry points (IRQ 0..15 -> vectors 0x40..0x4F) ---------------
+; The PIC was remapped (see idt.c) so IRQ0 arrives as vector 0x40, IRQ1 as 0x41,
+; and so on, clear of Intel's reserved 0..31 exception range. The vector is
+; PIC_MASTER_VECTOR_BASE + the IRQ line; IRQ8..15 land at 0x48..0x4F, which the
+; slave PIC base (0x48) in vectors.h names.
+IRQ 0
+IRQ 1
+IRQ 2
+IRQ 3
+IRQ 4
+IRQ 5
+IRQ 6
+IRQ 7
+IRQ 8
+IRQ 9
+IRQ 10
+IRQ 11
+IRQ 12
+IRQ 13
+IRQ 14
+IRQ 15
 
 ; --- Register save / restore --------------------------------------------------
 ; `pusha` does not exist in 64-bit, so every general-purpose register is pushed

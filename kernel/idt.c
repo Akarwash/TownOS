@@ -1,5 +1,6 @@
 #include "idt.h"
 #include "../drivers/ports.h"
+#include "../include/vectors.h"
 
 idt_entry_t idt[256];
 idt_ptr_t idt_ptr;
@@ -34,9 +35,12 @@ static void pic_remap(void) {
     port_byte_out(0x20, 0x11);
     port_byte_out(0xA0, 0x11);
 
-    // ICW2: set interrupt vector offsets
-    port_byte_out(0x21, 0x20);    // master PIC: IRQs start at interrupt 32 (0x20)
-    port_byte_out(0xA1, 0x28);    // slave PIC: IRQs start at interrupt 40 (0x28)
+    // ICW2: set interrupt vector offsets. Self-describing map (vectors.h): the
+    // master delivers IRQ0..7 starting at 0x40, the slave IRQ8..15 at 0x48. Both
+    // bases are multiples of 8 as ICW2 requires. This is a deliberate move off
+    // the conventional 0x20/0x28 (see docs/decisions/0005).
+    port_byte_out(0x21, PIC_MASTER_VECTOR_BASE);   // master PIC base -> 0x40
+    port_byte_out(0xA1, PIC_SLAVE_VECTOR_BASE);    // slave PIC base  -> 0x48
 
     // ICW3: tell PICs about each other
     port_byte_out(0x21, 0x04);    // master: slave is on IRQ 2 (bit 2 set)
