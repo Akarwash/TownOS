@@ -2,6 +2,14 @@
 
 **Source files:** `kernel/gdt.c`, `kernel/gdt.h`, `kernel/gdt_flush.asm`
 
+> **Note: this chapter describes the original 32-bit design.** MiniOS is now an
+> x86-64 long-mode kernel. The concepts below still hold, but the specifics have
+> moved on: the flat three-entry 32-bit GDT is now a seven-slot 64-bit GDT with a
+> TSS, and `gdt_flush` reloads CS with a far return (`retfq`) rather than the
+> 32-bit far jump shown here. For what actually runs today, see
+> [../docs/reference/gdt.md](../docs/reference/gdt.md). This chapter is kept as
+> personal learning material and is intentionally not rewritten.
+
 This chapter is about how the CPU *describes and protects memory* — and why an
 OS's very first real job is to hand the CPU a table explaining what memory means.
 

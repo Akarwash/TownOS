@@ -18,9 +18,12 @@ grab onto.
 > [`../docs/`](../docs/README.md). To learn how operating systems work, stay
 > here.
 >
-> Note: some chapters here still describe the older 32-bit protected-mode model
-> and are being rewritten for x86-64 long mode. Where a chapter and `../docs/`
-> disagree on a fact, `../docs/` is correct.
+> Note: chapters 1, 2, 3, and 5 were written for the original 32-bit
+> protected-mode design and describe it, not the current kernel. MiniOS is now
+> x86-64 long mode. These chapters are kept as personal learning material and are
+> deliberately **not** rewritten; each one carries a note at the top pointing to
+> the current reference page. Where a chapter and [`../docs/`](../docs/README.md)
+> disagree on a fact, `../docs/` is the current truth.
 
 ## Who this is for
 
@@ -80,12 +83,11 @@ include/types.h ............ fixed-width integer types                 → ch.7
 linker.ld .................. memory layout of the final binary         → ch.7
 ```
 
-> Note: some of these files are still stubs (`kernel/idt.c` and
-> `kernel/isr_stubs.asm`). The factual state of what is implemented and what is
-> pending lives in the project documentation at
+> Note: all of these files are now implemented and the kernel boots. The factual
+> state of what is implemented lives in the project documentation at
 > [`../docs/`](../docs/README.md). These chapters explain the *why* behind the
-> code so that when you implement each file, you understand what you are building
-> and not just what to type.
+> code so that when you read each file, you understand what it is doing and not
+> just what it says.
 
 ## The one-paragraph summary of everything
 

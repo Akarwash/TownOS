@@ -1,28 +1,174 @@
 ; ============================================
-; ISR and IRQ assembly stubs (64-bit) — STUB, HAND-WRITTEN
+; ISR and IRQ assembly stubs (64-bit)
 ; ============================================
 ;
-; TODO(long-mode): 64-bit ISR/IRQ entry points and common stubs.
+; The CPU tells us WHICH interrupt fired only by WHERE it jumps: the IDT gate for
+; vector N points at the address of stub N. There is no register that says "this
+; is interrupt N". So we need one tiny entry point per vector, and each one
+; hardcodes and pushes its own number before funnelling into a shared stub. That
+; is the whole reason 48 near-identical labels exist below.
 ;
-; This whole file is intentionally empty of implementation. In 64-bit the
-; save/restore sequence is different from the 32-bit version and must be
-; written by hand:
-;   - `pusha` / `popa` DO NOT EXIST in 64-bit; every GPR (rax..r15) is pushed
-;     and popped individually, in the exact order matching `registers_t`.
-;   - the CPU pushes a larger interrupt frame (rip, cs, rflags, rsp, ss) and,
-;     for some vectors, an error code; the dummy-error-code trick still applies.
-;   - handlers receive registers_t* in RDI per the System V AMD64 ABI, not via
-;     a pushed stack pointer argument.
-;   - return is `iretq`, not `iret`.
+; CRITICAL COUPLING: the order in which the common stub pushes registers MUST
+; mirror, field for field, the `registers_t` struct in kernel/isr.h. The compiler
+; cannot see this relationship, so nothing warns you if it drifts. Get it wrong
+; and every field the C handler reads is shifted, which normally ends in a silent
+; triple fault. If you touch either side, touch both. (isr.h says so too.)
+
+[bits 64]
+
+extern isr_handler
+extern irq_handler
+
+; --- Per-vector entry macros --------------------------------------------------
+; For most vectors the CPU pushes no error code. For a handful of exceptions it
+; pushes a real one. To give the C handler a single uniform stack layout, the
+; no-error path pushes a dummy 0 in the error-code slot so both paths look the
+; same from `registers_t`'s point of view.
+
+%macro ISR_NOERR 1              ; exception WITHOUT a CPU error code
+global isr%1
+isr%1:
+    push 0                      ; dummy error code, keeps the frame uniform
+    push %1                     ; this stub's own vector number
+    jmp isr_common_stub
+%endmacro
+
+%macro ISR_ERR 1               ; exception where the CPU already pushed one
+global isr%1
+isr%1:
+    push %1                     ; vector number only; real error code already on stack
+    jmp isr_common_stub
+%endmacro
+
+%macro IRQ 2                   ; hardware IRQ %1, delivered at remapped vector %2
+global irq%1
+irq%1:
+    push 0                      ; IRQs never carry an error code, push a dummy
+    push %2                     ; remapped vector number (32..47)
+    jmp irq_common_stub
+%endmacro
+
+; --- CPU exception entry points (vectors 0..31) -------------------------------
+; Error-code-pushing vectors are 8, 10, 11, 12, 13, 14, 17. Everything else in
+; this range gets a dummy via ISR_NOERR.
+ISR_NOERR 0
+ISR_NOERR 1
+ISR_NOERR 2
+ISR_NOERR 3
+ISR_NOERR 4
+ISR_NOERR 5
+ISR_NOERR 6
+ISR_NOERR 7
+ISR_ERR   8
+ISR_NOERR 9
+ISR_ERR   10
+ISR_ERR   11
+ISR_ERR   12
+ISR_ERR   13
+ISR_ERR   14
+ISR_NOERR 15
+ISR_NOERR 16
+ISR_ERR   17
+ISR_NOERR 18
+ISR_NOERR 19
+ISR_NOERR 20
+ISR_NOERR 21
+ISR_NOERR 22
+ISR_NOERR 23
+ISR_NOERR 24
+ISR_NOERR 25
+ISR_NOERR 26
+ISR_NOERR 27
+ISR_NOERR 28
+ISR_NOERR 29
+ISR_NOERR 30
+ISR_NOERR 31
+
+; --- Hardware IRQ entry points (IRQ 0..15 -> vectors 32..47) -------------------
+; The PIC was remapped (see idt.c) so IRQ0 arrives as vector 32, IRQ1 as 33, and
+; so on, clear of Intel's reserved 0..31 exception range.
+IRQ 0,  32
+IRQ 1,  33
+IRQ 2,  34
+IRQ 3,  35
+IRQ 4,  36
+IRQ 5,  37
+IRQ 6,  38
+IRQ 7,  39
+IRQ 8,  40
+IRQ 9,  41
+IRQ 10, 42
+IRQ 11, 43
+IRQ 12, 44
+IRQ 13, 45
+IRQ 14, 46
+IRQ 15, 47
+
+; --- Register save / restore --------------------------------------------------
+; `pusha` does not exist in 64-bit, so every general-purpose register is pushed
+; by hand. The push order is the REVERSE of the field order in `registers_t`:
+; after the final `push rdi`, RSP points exactly at the struct's first field
+; (rdi), which makes RSP a valid `registers_t*`.
 ;
-; What must eventually be defined here (referenced extern from isr.c):
-;   isr0..isr31          CPU exception entry points
-;   irq0..irq15          hardware interrupt entry points (vectors 32..47)
-;   isr_common_stub      shared save -> call isr_handler -> restore -> iretq
-;   irq_common_stub      shared save -> call irq_handler  -> restore -> iretq
-;
-; extern isr_handler
-; extern irq_handler
-;
-; Nothing below is generated on purpose. Until this is hand-written the kernel
-; will not link (isr.c references the isrN/irqN symbols above).
+; registers_t field order (low address -> high address):
+;   rdi rsi rbp rbx rdx rcx rax  r8 r9 r10 r11 r12 r13 r14 r15  int_no err_code
+;   rip cs rflags user_rsp ss
+; The last five are pushed by the CPU; int_no/err_code by the per-vector stubs;
+; the fifteen below by these macros.
+
+%macro PUSH_GPRS 0
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+%endmacro
+
+%macro POP_GPRS 0
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+%endmacro
+
+; --- Shared tails -------------------------------------------------------------
+; Both stubs: save GPRs, hand the frame pointer to the C handler in RDI (the
+; System V AMD64 first-argument register), restore GPRs, drop the vector number
+; and error code (16 bytes), and return with iretq (the 64-bit interrupt return).
+
+isr_common_stub:
+    PUSH_GPRS
+    mov rdi, rsp                ; registers_t* -> first argument
+    call isr_handler
+    POP_GPRS
+    add rsp, 16                 ; discard pushed vector number + error code
+    iretq
+
+irq_common_stub:
+    PUSH_GPRS
+    mov rdi, rsp                ; registers_t* -> first argument
+    call irq_handler
+    POP_GPRS
+    add rsp, 16                 ; discard pushed vector number + error code
+    iretq

@@ -16,11 +16,9 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 | [reference/boot-sequence.md](reference/boot-sequence.md) | The 32 to 64 long-mode climb in `boot/boot.asm`, step by step |
 | [reference/memory-map.md](reference/memory-map.md) | Physical memory layout: load address, VGA buffer, identity-mapped region, page tables, stacks |
 | [reference/gdt.md](reference/gdt.md) | The kernel GDT and TSS: selector table, descriptor layouts, and the bootstrap-vs-kernel GDT split |
+| [reference/idt.md](reference/idt.md) | The IDT and interrupt entry path: gate format, PIC remap, the 48 stubs, dispatch, and EOI |
+| [project-status.md](project-status.md) | What works, what was never built, and the natural next steps |
 | [decisions/](decisions/) | Architecture decision records (ADRs) for the load-bearing choices |
-
-Reference page pending: `reference/idt.md`. The IDT is not documented yet because
-`kernel/idt.c` is still a stub (see Status below). It will be written once the IDT
-install path exists.
 
 ## Decisions
 
@@ -31,19 +29,17 @@ install path exists.
 
 ## Status
 
-MiniOS **compiles and assembles but does not yet link**, and therefore does not
-run. This is expected, not a broken setup.
+MiniOS **builds, links, and boots to an interactive shell** under QEMU.
 
 - All C sources compile cleanly under `-Wall -Wextra`.
 - All assembly sources assemble cleanly with `nasm -f elf64`.
-- The link fails on undefined symbols `isr0`-`isr31` and `irq0`-`irq15`, which
-  are the interrupt entry points that belong in `kernel/isr_stubs.asm`. That file
-  and `kernel/idt.c` are the two remaining `TODO(long-mode)` stubs.
+- The kernel links into `minios.elf` and is repackaged as a Multiboot-loadable
+  `minios.bin`. `make run` boots it under QEMU: the banner and prompt appear, the
+  timer ticks on IRQ 0, the keyboard delivers keypresses on IRQ 1, and the shell
+  runs `help`, `clear`, `hello`, and `tick`.
 
-What is implemented: the Multiboot header and the 32 to 64 long-mode climb
-(`boot/boot.asm`), the kernel GDT and TSS (`kernel/gdt.c`, `kernel/gdt_flush.asm`),
-the PIC remap and IDT zeroing (`kernel/idt.c`, partial), and all the portable C
-(drivers, libc, timer, memory allocator, shell). See
-[architecture.md](architecture.md) for the full implemented-vs-stub map.
+The full feature list, the things that were deliberately never built (user mode,
+syscalls, a scheduler, per-process paging, a filesystem), and the natural next
+steps are in [project-status.md](project-status.md).
 
 For the exact build, run, and debug commands, see [building.md](building.md).

@@ -1,2 +1,7 @@
 # macOS
 .DS_Store
+
+# Build artifacts
+*.o
+minios.elf
+minios.bin

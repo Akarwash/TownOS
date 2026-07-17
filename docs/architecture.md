@@ -27,9 +27,9 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `kernel/kernel.c` | `kernel_main`: the init sequence and the idle loop. | Implemented |
 | `kernel/gdt.c`, `kernel/gdt.h` | Kernel GDT (null, kernel code/data, user code/data) and 64-bit TSS. | Implemented |
 | `kernel/gdt_flush.asm` | `lgdt`, reload data segments, reload CS via far return, `ltr`. | Implemented |
-| `kernel/idt.c`, `kernel/idt.h` | IDT table, `idt_set_entry`, PIC remap, IDT zeroing. | Partial: `idt_set_entry` body and `lidt` are stubs |
-| `kernel/isr.c`, `kernel/isr.h` | C-side interrupt dispatch: `isr_install`, `isr_handler`, `irq_handler`, handler registration. | Implemented (depends on the asm stubs below) |
-| `kernel/isr_stubs.asm` | `isr0`-`isr31`, `irq0`-`irq15` entry points and the common save/restore stubs. | Stub (empty) |
+| `kernel/idt.c`, `kernel/idt.h` | IDT table, `idt_set_entry`, PIC remap, IDT zeroing, `lidt`. | Implemented |
+| `kernel/isr.c`, `kernel/isr.h` | C-side interrupt dispatch: `isr_install`, `isr_handler`, `irq_handler`, handler registration. | Implemented |
+| `kernel/isr_stubs.asm` | `isr0`-`isr31`, `irq0`-`irq15` entry points and the common save/restore stubs. | Implemented |
 | `kernel/timer.c`, `kernel/timer.h` | PIT driver: program channel 0, count ticks on IRQ 0. | Implemented |
 | `kernel/memory.c`, `kernel/memory.h` | Bitmap physical frame allocator. | Implemented |
 | `drivers/screen.c`, `drivers/screen.h` | VGA text output: `print_char`/`print_string`/`print_int`, scrolling, cursor. | Implemented |
@@ -44,21 +44,21 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 
 ## Subsystem map
 
-The boot-to-shell chain, with implementation state:
+The boot-to-shell chain:
 
 ```
-boot (boot.asm) ............ implemented   long-mode climb, hands off to kernel_main
-  -> GDT/TSS (gdt.c) ....... implemented   segment descriptors + TSS, ltr
-  -> IDT (idt.c) ........... partial       PIC remap + IDT zero done; set_entry/lidt stubbed
-  -> ISR stubs (isr_stubs)   stub          isr0-31 / irq0-15 not written -> link fails here
-  -> drivers ............... implemented   screen, keyboard, timer, ports
-  -> shell event loop ...... implemented   waits on interrupts, dispatches commands
+boot (boot.asm) ............ long-mode climb, hands off to kernel_main
+  -> GDT/TSS (gdt.c) ....... segment descriptors + TSS, ltr
+  -> IDT (idt.c) ........... PIC remap, IDT zero, set_entry, lidt
+  -> ISR stubs (isr_stubs)   isr0-31 / irq0-15 entry points, common save/restore
+  -> drivers .............. screen, keyboard, timer, ports
+  -> shell event loop ..... waits on interrupts, dispatches commands
 ```
 
-The kernel builds and assembles but does not link: `kernel/isr.c` references the
-`isr0`-`isr31` / `irq0`-`irq15` symbols that `kernel/isr_stubs.asm` has not
-defined yet. See [building.md](building.md) for the exact failure and
-[README.md](README.md) for status.
+The kernel links into `minios.elf`, is repackaged as a Multiboot-loadable
+`minios.bin`, and boots to the shell under QEMU. See [building.md](building.md)
+for the build and run steps and [reference/idt.md](reference/idt.md) for the
+interrupt path.
 
 ## Control flow
 

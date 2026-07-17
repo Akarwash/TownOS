@@ -1,13 +1,32 @@
 # Changelog
 
 All notable changes to MiniOS are recorded here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). MiniOS has no releases
-yet, so everything lives under Unreleased.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-17
+
+First booting version. MiniOS builds, links, and boots to an interactive shell
+under QEMU, with the timer and keyboard driving interrupts.
+
 ### Added
 
+- 64-bit IDT install in `kernel/idt.c`: `idt_set_entry` packs a 64-bit handler
+  address across `offset_low`/`offset_mid`/`offset_high`, sets selector `0x08`,
+  IST 0, and gate flags `0x8E` (present, DPL 0, interrupt gate), and `idt_init`
+  loads the register with `lidt`.
+- Interrupt entry points in `kernel/isr_stubs.asm`: `isr0`-`isr31` and
+  `irq0`-`irq15`, with the `ISR_NOERR`/`ISR_ERR` macros normalising the error-code
+  frame (real error code on vectors 8, 10, 11, 12, 13, 14, 17; dummy 0 elsewhere)
+  and the common stubs that save the 15 general-purpose registers, pass a
+  `registers_t*` in `RDI`, call the C dispatcher, and return with `iretq`.
+- Boot path fix in the `Makefile`: link to `minios.elf` (ELF64, keeps gdb
+  symbols), then repackage with `x86_64-elf-objcopy -O elf32-i386` into
+  `minios.bin`, which QEMU's Multiboot `-kernel` loader accepts.
+- `docs/reference/idt.md` documenting the IDT and interrupt entry path, and
+  `docs/project-status.md` recording what works, what was never built, and the
+  next steps.
 - 32 to 64 long-mode climb in `boot/boot.asm`: three-level 2MB-page identity map
   of the first 8MB, PAE, `CR3`, EFER.LME, paging enable, a bootstrap GDT, and the
   far jump into 64-bit code that calls `kernel_main`.
@@ -33,6 +52,9 @@ yet, so everything lives under Unreleased.
   project documentation. The two are kept strictly separate.
 - Root `README.md` rewritten as a short entry point that signposts `docs/` and
   `learnings/` instead of embedding the full guide.
+- `learnings/` chapters 1, 2, 3, and 5 carry a note that they describe the
+  original 32-bit design, each linking to the current x86-64 reference page; the
+  index states that `docs/` is the current source of truth.
 
 ### Removed
 
@@ -40,11 +62,3 @@ yet, so everything lives under Unreleased.
   absorbed into `docs/` (toolchain into `docs/building.md`, boot climb into
   `docs/reference/boot-sequence.md`, GDT/TSS into `docs/reference/gdt.md`), the
   ADRs, and this changelog.
-
-### Pending (not yet implemented)
-
-- `kernel/idt.c`: `idt_set_entry` gate packing and the `lidt` install are stubs.
-- `kernel/isr_stubs.asm`: the `isr0`-`isr31` / `irq0`-`irq15` entry points and the
-  common save/restore stubs are unwritten, so the kernel does not link yet.
-- Several `learnings/` chapters still describe the 32-bit model and need rewriting
-  for long mode.
