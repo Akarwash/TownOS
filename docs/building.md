@@ -53,30 +53,24 @@ make
 ```
 
 This assembles every `.asm` file with `nasm -f elf64`, compiles every `.c` file
-with the cross-compiler, and links them with `linker.ld` into `minios.bin`, an
-ELF image the Multiboot loader understands. To rebuild from scratch:
+with the cross-compiler, and produces two artifacts:
+
+- `minios.elf` — the linked ELF64 image with 64-bit symbols, used for gdb.
+- `minios.bin` — the same image repackaged with `x86_64-elf-objcopy -O
+  elf32-i386`, which is what QEMU's Multiboot `-kernel` loader accepts.
+
+QEMU's built-in Multiboot loader rejects an ELF64 image ("Cannot load x86-64
+image, give a 32bit one"). The entry code in `boot/boot.asm` starts in 32-bit
+protected mode and climbs to long mode itself, and every address in the image
+lives in low memory, so relabelling the ELF container as `elf32-i386` is accepted
+by the loader and boots correctly. The code is unchanged; only the ELF header
+class differs.
+
+To rebuild from scratch:
 
 ```bash
 make clean && make
 ```
-
-## Current expected failure
-
-The build does **not** link yet, and this is expected. `make` will compile and
-assemble everything cleanly, then fail at the link step with undefined references
-to `isr0`-`isr31` and `irq0`-`irq15`:
-
-```
-x86_64-elf-ld: kernel/isr.o: in function `isr_install':
-isr.c: undefined reference to `isr0'
-...
-isr.c: undefined reference to `irq15'
-```
-
-These symbols belong in `kernel/isr_stubs.asm`, which is still a stub. If you see
-this, your setup is fine. See [README.md](README.md) for the full status. Until
-those symbols exist, `minios.bin` is not produced and the run/debug steps below
-cannot be exercised yet.
 
 ## Run
 
@@ -84,8 +78,8 @@ cannot be exercised yet.
 make run
 ```
 
-This runs `qemu-system-x86_64 -kernel minios.bin`. On a working build a window
-opens showing the banner and a shell prompt:
+This runs `qemu-system-x86_64 -kernel minios.bin`. A window opens showing the
+banner and a shell prompt:
 
 ```
 Welcome to MiniOS!
@@ -93,8 +87,9 @@ Welcome to MiniOS!
 ```
 
 Type a command and press Enter (Backspace works): `help`, `clear`, `hello`,
-`tick`. To quit QEMU, close the window, or press `Ctrl-A` then `X` in the
-launching terminal.
+`tick`. The timer ticks on IRQ 0 (`tick` prints the count) and the keyboard
+delivers keypresses on IRQ 1. To quit QEMU, close the window, or press `Ctrl-A`
+then `X` in the launching terminal.
 
 ## Debug
 
@@ -127,10 +122,11 @@ qemu-system-x86_64 -kernel minios.bin -s -S
 - `-s` opens a gdb server on TCP port 1234.
 - `-S` freezes the CPU at startup so you can set breakpoints before anything runs.
 
-In another terminal:
+In another terminal, point gdb at `minios.elf` (the ELF64 image keeps the 64-bit
+symbols; `minios.bin` does not):
 
 ```bash
-gdb minios.bin
+gdb minios.elf
 (gdb) target remote :1234
 (gdb) break kernel_main
 (gdb) continue
