@@ -7,6 +7,25 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- Ring-3 (CPL 3) user mode. `kernel/usermode.c` (`enter_user_mode`) forges the
+  five-value `iretq` frame (SS, RSP, RFLAGS, CS, RIP) and returns into ring 3
+  with the user selectors (`GDT_SELECTOR_USER_CODE` 0x1B, `GDT_SELECTOR_USER_DATA`
+  0x23) and IF kept set. `user/user_program.c` is a self-contained ring-3 program
+  in a new `.user_text` section that writes its stack, then runs `cli` to force a
+  #GP as proof it is really CPL 3. `kernel/kernel.c` drops to it after init. This
+  activates the previously inert user GDT descriptors and `tss.rsp0`.
+- `GDT_SELECTOR_*` constants in `kernel/gdt.h` (kernel/user code/data, TSS) as the
+  single source of truth for selector values; `kernel/gdt.c` loads the TSS by name.
+- `PG_USER` (page user/US bit) in `boot/boot.asm`. `PML4[0]`/`PDPT[0]` are made
+  permissive (user bit set) and the PD leaves gate real access: `PD[0]`/`PD[1]`
+  stay kernel-only, `PD[2]` (4-6M, user code) and `PD[3]` (6-8M, user stack) get
+  the user bit. The PD loop is unrolled into four explicit per-region writes.
+- `.user_text` section in `linker.ld` at `0x400000`, placed in its own `PT_LOAD`
+  segment via a new `PHDRS` block so the 1M-to-4M gap is not padded into the file
+  (`minios.bin` stays ~25KB).
+- `docs/decisions/0006-user-mode-with-separate-pages.md` and
+  `docs/reference/user-mode.md` documenting the ring-3 drop, the page-privilege
+  layout, and how the #GP / #PF results prove it.
 - `include/vectors.h`, the single source of truth for every interrupt vector
   number: all 32 named CPU exceptions, `PIC_MASTER_VECTOR_BASE` (0x40) and
   `PIC_SLAVE_VECTOR_BASE` (0x48), every IRQ vector derived from the base
@@ -24,6 +43,12 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Changed
 
+- `kernel_main` now hands off to ring 3 (`enter_user_mode`) as its last act
+  instead of calling `shell_init`; the shell is still compiled and working but is
+  off the boot path (the ring-3 program faults and the kernel halts before the
+  idle loop). `docs/architecture.md`, `docs/project-status.md`, and
+  `docs/reference/memory-map.md` updated for the ring-3 region (and its overlap
+  with the frame allocator pool at 4M).
 - Moved hardware IRQs off the conventional 0x20 base to a self-describing map:
   CPU exceptions at 0x00-0x1F, hardware IRQs at 0x40-0x4F, syscalls reserved at
   0x50-0x5F, so the high nibble names the category in a fault log. `pic_remap()`

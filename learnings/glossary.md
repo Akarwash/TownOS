@@ -34,7 +34,8 @@ brackets is where the term is explained in depth.
 - **Flat memory model** — defining all segments as base 0, limit 4 GB so
   segmentation effectively disappears; used by MiniOS and most modern OSes. [ch.2]
 - **Privilege rings (0–3)** — hardware privilege levels. Ring 0 = kernel, ring 3 =
-  user. MiniOS uses only ring 0. [ch.0, ch.2]
+  user. MiniOS runs at ring 0 but now drops to ring 3 for a demonstration program
+  (see `docs/reference/user-mode.md`). [ch.0, ch.2]
 - **Granularity bit** — a descriptor flag that makes the limit count 4 KB pages
   instead of bytes, allowing a 20-bit limit to span 4 GB. [ch.2]
 - **`__attribute__((packed))`** — a GCC directive that forbids the compiler from

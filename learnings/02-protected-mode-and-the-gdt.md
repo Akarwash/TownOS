@@ -60,8 +60,12 @@ Descriptors also encode a **privilege level** (0–3), the famous **rings**:
 - Rings 1 and 2 exist but almost nobody uses them.
 
 The CPU checks the ring on every access and every privileged instruction. This is
-the hardware foundation of the kernel/user split from chapter 0. MiniOS only ever
-uses ring 0 — but the descriptors still have to *declare* ring 0, because the
+the hardware foundation of the kernel/user split from chapter 0. This chapter
+described MiniOS as ring-0-only; that is no longer strictly true — it now drops to
+ring 3 to run a small demonstration program in its own pages, which is exactly
+what the user code/data descriptors declared here are for. The mechanism is in
+[`../docs/reference/user-mode.md`](../docs/reference/user-mode.md). The concept
+below is unchanged: descriptors still have to *declare* their ring, because the
 field is not optional.
 
 ## The "flat" memory model

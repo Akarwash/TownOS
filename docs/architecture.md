@@ -2,8 +2,11 @@
 
 MiniOS is a small x86-64 hobby kernel that boots via Multiboot, climbs into
 64-bit long mode, and runs an interrupt-driven interactive shell. It is a
-learning kernel: single address space, everything at ring 0, no processes and no
-filesystem.
+learning kernel: single address space, no processes and no filesystem. It now
+also drops to ring 3 (CPL 3) to run a small demonstration program in its own
+user-accessible pages, proving the privilege boundary — but there is still no
+scheduler, so that drop is a one-way demo, not multitasking. See
+[reference/user-mode.md](reference/user-mode.md).
 
 This page is a map, not a tutorial. For the concepts behind each subsystem, see
 [`../learnings/`](../learnings/README.md) and follow the cross-links.
@@ -17,6 +20,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `drivers/` | Hardware drivers: VGA text screen, PS/2 keyboard, port I/O helpers. |
 | `libc/` | Minimal freestanding C library: `string` and `mem` routines. |
 | `shell/` | The interactive command shell. |
+| `user/` | The ring-3 demonstration program (`.user_text`, runs at CPL 3). |
 | `include/` | Shared definitions (`types.h`, the fixed-width integer types). |
 
 ## Source files
@@ -24,8 +28,10 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | File | Responsibility | State |
 |------|----------------|-------|
 | `boot/boot.asm` | Multiboot header, page tables, PAE/EFER/paging, bootstrap GDT, far jump to 64-bit, call `kernel_main`. | Implemented |
-| `kernel/kernel.c` | `kernel_main`: the init sequence and the idle loop. | Implemented |
-| `kernel/gdt.c`, `kernel/gdt.h` | Kernel GDT (null, kernel code/data, user code/data) and 64-bit TSS. | Implemented |
+| `kernel/kernel.c` | `kernel_main`: the init sequence, then hands off to ring 3. | Implemented |
+| `kernel/gdt.c`, `kernel/gdt.h` | Kernel GDT (null, kernel code/data, user code/data) and 64-bit TSS; selector constants. | Implemented |
+| `kernel/usermode.c`, `kernel/usermode.h` | `enter_user_mode`: forge the `iretq` frame and drop to ring 3. | Implemented |
+| `user/user_program.c` | The ring-3 demo program in `.user_text`; runs a privileged op to prove CPL 3. | Implemented |
 | `kernel/gdt_flush.asm` | `lgdt`, reload data segments, reload CS via far return, `ltr`. | Implemented |
 | `kernel/idt.c`, `kernel/idt.h` | IDT table, `idt_set_entry`, PIC remap, IDT zeroing, `lidt`. | Implemented |
 | `kernel/isr.c`, `kernel/isr.h` | C-side interrupt dispatch: `isr_install`, `isr_handler`, `irq_handler`, handler registration. | Implemented |
@@ -39,7 +45,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `libc/mem.c`, `libc/mem.h` | `memcpy`, `memset`. | Implemented |
 | `shell/shell.c`, `shell/shell.h` | Command loop: buffer keypresses, dispatch `help`/`clear`/`hello`/`tick`. | Implemented |
 | `include/types.h` | Fixed-width integer types and `NULL`. | Implemented |
-| `linker.ld` | Section layout, kernel loads at 1M. | Implemented |
+| `linker.ld` | Section layout: kernel at 1M, `.user_text` at 4M in its own `PT_LOAD` segment. | Implemented |
 | `Makefile` | Build rules, toolchain, flags. | Implemented |
 
 ## Subsystem map
@@ -52,13 +58,14 @@ boot (boot.asm) ............ long-mode climb, hands off to kernel_main
   -> IDT (idt.c) ........... PIC remap, IDT zero, set_entry, lidt
   -> ISR stubs (isr_stubs)   isr0-31 / irq0-15 entry points, common save/restore
   -> drivers .............. screen, keyboard, timer, ports
-  -> shell event loop ..... waits on interrupts, dispatches commands
+  -> enter_user_mode ...... forge iretq frame, drop to ring 3 (usermode.c)
+  -> user_program ......... runs at CPL 3, faults back into the kernel
 ```
 
 The kernel links into `minios.elf`, is repackaged as a Multiboot-loadable
-`minios.bin`, and boots to the shell under QEMU. See [building.md](building.md)
-for the build and run steps and [reference/idt.md](reference/idt.md) for the
-interrupt path.
+`minios.bin`, and boots under QEMU. See [building.md](building.md) for the build
+and run steps, [reference/idt.md](reference/idt.md) for the interrupt path, and
+[reference/user-mode.md](reference/user-mode.md) for the ring-3 drop.
 
 ## Control flow
 
@@ -72,13 +79,17 @@ From power-on to the idle loop:
 3. The 64-bit entry sets `RSP = stack_top` and calls `kernel_main`.
 4. `kernel_main` (`kernel/kernel.c`) runs the init sequence in order:
    `gdt_init()`, `isr_install()`, `timer_init(100)`, `keyboard_init()`,
-   `memory_init()`, then clears the screen, prints the banner, and calls
-   `shell_init()`.
-5. `kernel_main` enters an idle loop of `hlt`. The CPU sleeps until an interrupt
-   (timer tick on IRQ 0, keypress on IRQ 1) wakes it. Keypresses drive the shell;
-   the event loop woken by interrupts is the running system.
+   `memory_init()`, then clears the screen and prints the banner.
+5. `kernel_main` calls `enter_user_mode(&user_program, USER_STACK_TOP)`, forging
+   an `iretq` frame that drops to ring 3 and runs the demo program in its own
+   pages. The program executes a privileged instruction, faults back into the
+   kernel, and the diagnostic handler halts. `enter_user_mode` does not return,
+   so the `hlt` idle loop below it is unreachable in this build. See
+   [reference/user-mode.md](reference/user-mode.md).
 
-`kernel_main` takes no arguments and is not expected to return.
+`kernel_main` takes no arguments and is not expected to return. (Interrupts stay
+enabled across the drop, so the timer and keyboard still fire while ring-3 code
+runs, up until the fault.)
 
 ## Where to read more
 

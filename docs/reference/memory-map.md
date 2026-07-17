@@ -11,9 +11,11 @@ physical address.
 |--------|---------|------|--------|-------|
 | Real-mode / low memory | `0x000000` | up to 1M | (hardware) | Not used by MiniOS, but inside the identity map. |
 | VGA text buffer | `0x0B8000` | 4000 bytes (80x25x2) | `drivers/screen.h` (`VIDEO_ADDRESS`) | Memory-mapped text output. Inside the identity map. |
-| Kernel image load address | `0x100000` (1M) | image size | `linker.ld` (`. = 1M`) | Sections load here in order: `.multiboot`, `.text`, `.rodata`, `.data`, `.bss`. |
-| Identity-mapped region | `0x000000` - `0x7FFFFF` | 8 MB | `boot/boot.asm` (4 x 2MB PD entries) | The only mapped region. Covers the VGA buffer and the kernel. |
-| Frame allocator pool | `0x400000` (4M) - `0x8400000` (132M) | 128 MB | `kernel/memory.c` (`MEMORY_START`, `MAX_FRAMES`) | Bitmap tracks 32768 x 4KB frames starting at 4M. See caveat below. |
+| Kernel image load address | `0x100000` (1M) | image size | `linker.ld` (`. = 1M`) | Sections load here in order: `.multiboot`, `.text`, `.rodata`, `.data`, `.bss`. Ring-0 only (PD[0]/PD[1] have no user bit). |
+| Ring-3 program code (`.user_text`) | `0x400000` (4M) | ~29 bytes | `linker.ld`, `user/user_program.c` | User-accessible (PD[2], user bit set). Its own `PT_LOAD` segment so the gap from the kernel is not padded into the file. |
+| Ring-3 program stack | `0x600000` - `0x7FFFFF` | 2 MB page | `boot/boot.asm` (PD[3]), `USER_STACK_TOP` = `0x800000` | User-accessible (PD[3], user bit set). Stack grows down from `0x800000`. |
+| Identity-mapped region | `0x000000` - `0x7FFFFF` | 8 MB | `boot/boot.asm` (4 x 2MB PD entries) | The only mapped region. PD[0]/PD[1] kernel-only; PD[2]/PD[3] user-accessible. Covers the VGA buffer, the kernel, and the ring-3 pages. |
+| Frame allocator pool | `0x400000` (4M) - `0x8400000` (132M) | 128 MB | `kernel/memory.c` (`MEMORY_START`, `MAX_FRAMES`) | Bitmap tracks 32768 x 4KB frames starting at 4M. Overlaps the ring-3 region — see caveats below. |
 
 ## Objects in `.bss` (addresses determined at link time)
 
@@ -47,6 +49,17 @@ this is not a bug today, but any code that actually dereferences a frame above 8
 would fault until a real virtual-memory system maps it. Per-process address spaces
 and a proper VM layer are future work (see
 [decision 0002](../decisions/0002-2mb-pages-and-8mb-identity-map.md)).
+
+## Caveat: the frame pool overlaps the ring-3 region
+
+The frame allocator's pool starts at exactly `0x400000` (4M) — the same address
+where the ring-3 program's code and stack live (PD[2]/PD[3], 4-8M). So the
+allocator would hand out frames that sit on top of the running user program. This
+is latent, not active: in the current demo `kernel_main` drops to ring 3
+immediately after `memory_init()` and nothing allocates a frame, and the
+allocator only returns addresses without writing them. A real user/VM layer must
+resolve the collision (move the pool, or reserve the user region in the bitmap).
+See [decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
 
 ## Related
 
