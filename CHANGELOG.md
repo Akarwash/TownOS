@@ -5,6 +5,41 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- `include/vectors.h`, the single source of truth for every interrupt vector
+  number: all 32 named CPU exceptions, `PIC_MASTER_VECTOR_BASE` (0x40) and
+  `PIC_SLAVE_VECTOR_BASE` (0x48), every IRQ vector derived from the base
+  (`IRQ_TIMER` = 0x40, `IRQ_KEYBOARD` = 0x41, through `IRQ_15`), and
+  `SYSCALL_VECTOR` (0x50, reserved, not wired up).
+- Diagnostic exception handlers in `kernel/isr.c`: `isr_handler` now decodes the
+  fault instead of printing a bare number. Page faults print the faulting CR2
+  address and decoded error-code bits (read/write, present, user/kernel,
+  reserved-bit, instruction fetch); general protection faults decode the
+  offending selector or state plainly that the error code is zero; double faults
+  explain that the error code carries no information. Every exception prints its
+  vector, name, and RIP/CS/RFLAGS, then halts with `cli; hlt`.
+- `docs/decisions/0005-self-describing-vector-map.md` recording the vector-map
+  decision and its costs.
+
+### Changed
+
+- Moved hardware IRQs off the conventional 0x20 base to a self-describing map:
+  CPU exceptions at 0x00-0x1F, hardware IRQs at 0x40-0x4F, syscalls reserved at
+  0x50-0x5F, so the high nibble names the category in a fault log. `pic_remap()`
+  in `kernel/idt.c` now programs ICW2 to 0x40/0x48; `kernel/isr.c` installs the
+  IRQ gates off the base; `kernel/isr_stubs.asm` derives IRQ vectors from a
+  `PIC_MASTER_VECTOR_BASE` `equ` kept in sync with `vectors.h` by hand.
+- Fixed the End-Of-Interrupt slave-PIC check in `kernel/isr.c` to compare against
+  `PIC_SLAVE_VECTOR_BASE` instead of a hardcoded 40, which would otherwise stop
+  acknowledging IRQ 8 to 15 (now at 0x48-0x4F).
+- `kernel/timer.c` and `drivers/keyboard.c` register against `IRQ_TIMER` /
+  `IRQ_KEYBOARD` from `vectors.h`, dropping their local `IRQ0_INTERRUPT` /
+  `IRQ1_INTERRUPT` defines.
+- `docs/reference/idt.md` updated for the new vector map and the `vectors.h`
+  pointer; `learnings/03-interrupts.md` carries a note that its 32-47 numbering
+  is superseded, pointing at ADR 0005.
+
 ## [0.1.0] - 2026-07-17
 
 First booting version. MiniOS builds, links, and boots to an interactive shell

@@ -11,6 +11,12 @@
 > actually runs today, see [../docs/reference/idt.md](../docs/reference/idt.md).
 > This chapter is kept as personal learning material and is intentionally not
 > rewritten.
+>
+> **The IRQ vectors below (32–47) are also out of date.** MiniOS now delivers
+> hardware IRQs at **0x40–0x4F** under a self-describing vector map, so the timer
+> is at 0x40 and the keyboard at 0x41, not 32 and 33. The reasoning is in
+> [../docs/decisions/0005-self-describing-vector-map.md](../docs/decisions/0005-self-describing-vector-map.md);
+> the single source of truth is `include/vectors.h`.
 
 If you learn only one thing about operating systems, learn this chapter.
 Interrupts are the mechanism by which an OS stops being a program that *runs* and

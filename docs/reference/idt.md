@@ -23,18 +23,33 @@ first timer tick cannot jump to an empty gate.
 
 ## Vector table
 
+MiniOS uses a **self-describing vector map**: the high nibble of a vector names
+its category. This is a deliberate deviation from the conventional 0x20 IRQ base;
+the reasoning and its costs are in
+[../decisions/0005-self-describing-vector-map.md](../decisions/0005-self-describing-vector-map.md).
+Every vector number is defined once in `include/vectors.h`, the single source of
+truth; no bare vector number appears elsewhere in the tree.
+
 | vectors | source | meaning |
 |---------|--------|---------|
-| 0 to 31 | CPU | exceptions (divide error, page fault, general protection, ...) reserved by Intel |
-| 32 to 47 | PIC | hardware IRQs 0 to 15, remapped off the reserved range |
-| 48 to 255 | unused | present in the table but zeroed; no handler installed |
+| 0x00 to 0x1F | CPU | exceptions (divide error, page fault, general protection, ...) reserved by Intel |
+| 0x40 to 0x4F | PIC | hardware IRQs 0 to 15, remapped off the reserved range |
+| 0x50 to 0x5F | syscalls | reserved (`SYSCALL_VECTOR` = 0x50), not wired up yet |
+| all others | unused | present in the table but zeroed; no handler installed |
 
 IRQ remapping matters. By default the 8259 PIC delivers its IRQs as interrupt
 numbers 0 to 15, which collide with the CPU exception range. `pic_remap()` in
 `kernel/idt.c` reprograms the master and slave PICs so IRQ 0 arrives as vector
-32, IRQ 1 as 33, and so on up to IRQ 15 at vector 47. This is why the timer
-registers on vector 32 and the keyboard on vector 33 (`kernel/timer.c`,
-`drivers/keyboard.c`), not on 0 and 1.
+0x40, IRQ 1 as 0x41, and so on up to IRQ 15 at vector 0x4F (the master base is
+0x40, the slave base 0x48, both `PIC_MASTER_VECTOR_BASE` / `PIC_SLAVE_VECTOR_BASE`
+in `include/vectors.h`). This is why the timer registers on `IRQ_TIMER` (0x40)
+and the keyboard on `IRQ_KEYBOARD` (0x41) in `kernel/timer.c` and
+`drivers/keyboard.c`, not on 0 and 1. A PIC base must be a multiple of 8 (ICW2
+latches only the upper five bits); 0x40 and 0x48 both satisfy this.
+
+`kernel/isr_stubs.asm` cannot include the C header, so it duplicates the master
+base as a NASM `equ` and derives each IRQ vector from it. That `equ` and
+`vectors.h` must be kept in sync by hand; nothing checks it.
 
 ## Gate format (16 bytes)
 
@@ -76,7 +91,7 @@ of each stub restores the saved flags, re-enabling interrupts on return.
 The DPL in the flags byte is the lowest privilege level allowed to reach the gate
 through a software `int N` instruction. All 48 gates are DPL 0. A DPL 3 gate
 would let ring-3 user code execute, say, `int 14` to forge a page fault or
-`int 32` to fake a timer tick, corrupting kernel state at will. Hardware
+`int 0x40` to fake a timer tick, corrupting kernel state at will. Hardware
 interrupts and CPU exceptions ignore the DPL, so DPL 0 costs nothing. Only a
 future syscall vector would deliberately want DPL 3, so user code could enter the
 kernel through that one gate on purpose.
@@ -117,16 +132,28 @@ they must change together.
 ## Dispatch and EOI
 
 `isr.c` keeps a `interrupt_handlers[256]` table of callbacks.
-`register_interrupt_handler(n, fn)` installs one; `isr_handler` / `irq_handler`
-look up the slot and call it. A driver never touches the IDT or the stubs; the
-timer just calls `register_interrupt_handler(32, ...)` and the keyboard
-`register_interrupt_handler(33, ...)`.
+`register_interrupt_handler(n, fn)` installs one; `irq_handler` looks up the slot
+and calls it. A driver never touches the IDT or the stubs; the timer just calls
+`register_interrupt_handler(IRQ_TIMER, ...)` and the keyboard
+`register_interrupt_handler(IRQ_KEYBOARD, ...)`, both names from `vectors.h`.
 
 Hardware IRQs additionally require an **End Of Interrupt** signal to the PIC, or
 that line goes dead after one interrupt. `irq_handler` sends EOI to the master
-PIC always, and to the slave PIC as well when the vector is 40 or higher (IRQ 8
-to 15 come through the slave). Exceptions get no EOI because they come from the
-CPU, not the PIC, which is why `isr_handler` and `irq_handler` are separate.
+PIC always, and to the slave PIC as well when the vector is at or above
+`PIC_SLAVE_VECTOR_BASE` (0x48), since IRQ 8 to 15 come through the slave. That
+comparison is symbolic on purpose: it used to be a hardcoded 40 (32 + 8) against
+the old base, which would silently stop acking the slave now that the base is
+0x40. Exceptions get no EOI because they come from the CPU, not the PIC, which is
+why `isr_handler` and `irq_handler` are separate.
+
+Exceptions (vectors 0x00 to 0x1F) do not use the callback table at all.
+`isr_handler` is reached only by the `isr0` to `isr31` stubs, and it decodes the
+exception directly: a named table gives each a one-line plain-English
+description, and page faults, general protection faults, and double faults get
+dedicated diagnostics (the faulting CR2 address and decoded error-code bits for a
+page fault, the offending selector for a GP fault). Every exception prints its
+vector, name, and the RIP/CS/RFLAGS from the frame, then halts with `cli; hlt`,
+because there is no scheduler and nothing to kill.
 
 ## Related
 
