@@ -11,9 +11,13 @@ limitations. It is a factual snapshot, not a roadmap.
   first 8MB, PAE, EFER.LME, paging, a bootstrap GDT, and the far jump into 64-bit
   code that calls `kernel_main`.
 - The kernel GDT and 64-bit TSS (`kernel/gdt.c`, `kernel/gdt_flush.asm`).
-- The IDT and the full interrupt path: 256-entry table, PIC remap to vectors
-  32-47, all 48 entry points in `kernel/isr_stubs.asm`, and the C dispatch in
-  `kernel/isr.c`. See [reference/idt.md](reference/idt.md).
+- The IDT and the full interrupt path: 256-entry table, PIC remap to the
+  self-describing vector map (hardware IRQs at 0x40-0x4F, every vector defined in
+  `include/vectors.h`), all 48 entry points in `kernel/isr_stubs.asm`, and the C
+  dispatch in `kernel/isr.c`. Exceptions are decoded into plain-English
+  diagnostics (page-fault CR2 and error-code bits, GP-fault selector, double
+  fault) rather than a bare vector number. See [reference/idt.md](reference/idt.md)
+  and [decisions/0005-self-describing-vector-map.md](decisions/0005-self-describing-vector-map.md).
 - The PIT timer on IRQ 0 (`kernel/timer.c`) and the PS/2 keyboard on IRQ 1
   (`drivers/keyboard.c`).
 - VGA text output with scrolling and a cursor (`drivers/screen.c`).

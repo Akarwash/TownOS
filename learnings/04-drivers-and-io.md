@@ -3,6 +3,14 @@
 **Source files:** `drivers/ports.c`, `drivers/screen.c`, `drivers/keyboard.c`,
 `kernel/timer.c`
 
+> **Note: the IRQ vector numbers below are out of date.** This chapter says the
+> keyboard is on interrupt 33 and the timer on 32. MiniOS now uses a
+> self-describing vector map, so hardware IRQs arrive at 0x40–0x4F: the timer is
+> `IRQ_TIMER` (0x40) and the keyboard `IRQ_KEYBOARD` (0x41), both from
+> `include/vectors.h`. The drivers register against those names, not raw numbers.
+> See [../docs/decisions/0005-self-describing-vector-map.md](../docs/decisions/0005-self-describing-vector-map.md).
+> The concepts below are unchanged; only the numbers moved.
+
 A **device driver** is just code that knows the private language of one piece of
 hardware. This chapter covers how software physically talks to devices, then walks
 through MiniOS's three drivers: the screen (output), the keyboard (input), and the

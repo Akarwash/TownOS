@@ -2,6 +2,14 @@
 
 A learning guide that explains not just what every piece does, but why it exists, who designed it, and what their reasoning was. Read this alongside the code.
 
+> **Note: this guide describes the original 32-bit design and is kept as personal
+> material, not rewritten.** Two facts have since changed in the running kernel:
+> MiniOS is now x86-64 long mode, and hardware IRQs use a self-describing vector
+> map at 0x40–0x4F (the timer at 0x40, the keyboard at 0x41), not the 32–47 this
+> guide mentions. Every vector number now lives in `include/vectors.h`; the
+> reasoning is in `docs/decisions/0005-self-describing-vector-map.md`. Where this
+> guide and `../docs/` disagree, `../docs/` is the current truth.
+
 ---
 
 ## Part 1: The Machine Wakes Up

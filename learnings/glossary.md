@@ -73,9 +73,11 @@ brackets is where the term is explained in depth.
 - **Gate** — an IDT entry; an *interrupt gate* auto-disables interrupts while its
   handler runs. [ch.3]
 - **PIC (Programmable Interrupt Controller, 8259)** — the chip(s) that route device
-  IRQs to the CPU. MiniOS remaps them to interrupts 32–47. [ch.3]
-- **PIC remapping** — reprogramming the PIC so its IRQs arrive as interrupts 32–47,
-  avoiding collision with CPU exceptions 0–31. [ch.3]
+  IRQs to the CPU. MiniOS remaps them to vectors 0x40–0x4F (chapter 3 says 32–47;
+  the vector map has since changed, see `docs/decisions/0005`). [ch.3]
+- **PIC remapping** — reprogramming the PIC so its IRQs arrive as vectors 0x40–0x4F,
+  avoiding collision with CPU exceptions 0–31. The single source of truth for
+  every vector number is `include/vectors.h`. [ch.3]
 - **APIC / IO-APIC** — the modern multicore replacement for the 8259 PIC. [ch.3]
 - **ISR (Interrupt Service Routine)** — the handler code that runs on an interrupt.
   In MiniOS, `isr_stubs.asm` (assembly entry points) + `isr.c` (C handlers). [ch.3]
