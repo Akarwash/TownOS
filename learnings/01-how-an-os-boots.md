@@ -2,6 +2,14 @@
 
 **Source files:** `boot/boot.asm`, `linker.ld`, `kernel/kernel.c`
 
+> **Note: this chapter describes the original 32-bit design.** MiniOS is now an
+> x86-64 long-mode kernel. The concepts below still hold, but some specifics no
+> longer match the source: in particular the `_start` shown here predates the
+> 32-to-64 long-mode climb that `boot/boot.asm` now performs before calling
+> `kernel_main`. For what actually runs today, see
+> [../docs/reference/boot-sequence.md](../docs/reference/boot-sequence.md). This
+> chapter is kept as personal learning material and is intentionally not rewritten.
+
 The boot process is the answer to a deceptively hard question: *when the CPU has
 literally nothing loaded, how does the first useful instruction get to run?*
 

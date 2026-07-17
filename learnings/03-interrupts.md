@@ -3,6 +3,15 @@
 **Source files:** `kernel/idt.c`, `kernel/idt.h`, `kernel/isr.c`, `kernel/isr.h`,
 `kernel/isr_stubs.asm`
 
+> **Note: this chapter describes the original 32-bit design.** MiniOS is now an
+> x86-64 long-mode kernel. The concepts below still hold, but the mechanics have
+> changed: gates are 16 bytes (not 8) and split the handler address three ways,
+> the stubs push each register individually (there is no `pusha` in 64-bit) and
+> return with `iretq`, and handlers receive `registers_t*` in `RDI`. For what
+> actually runs today, see [../docs/reference/idt.md](../docs/reference/idt.md).
+> This chapter is kept as personal learning material and is intentionally not
+> rewritten.
+
 If you learn only one thing about operating systems, learn this chapter.
 Interrupts are the mechanism by which an OS stops being a program that *runs* and
 becomes a program that *reacts*. Almost every other OS feature — multitasking,

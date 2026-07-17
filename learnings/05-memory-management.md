@@ -2,6 +2,16 @@
 
 **Source files:** `kernel/memory.c`, `kernel/memory.h`, `libc/mem.c`
 
+> **Note: this chapter describes the original 32-bit design.** MiniOS is now an
+> x86-64 long-mode kernel. The physical bitmap allocator idea is unchanged, but two
+> paging specifics below no longer match: long mode uses a multi-level table with
+> 2MB pages (not the two-level 32-bit tree shown here), and MiniOS *does* set up a
+> minimal identity map in `boot/boot.asm` to enter long mode, so "MiniOS does not
+> set up paging" is now only true of per-process paging. For the actual memory
+> layout, see [../docs/reference/memory-map.md](../docs/reference/memory-map.md).
+> This chapter is kept as personal learning material and is intentionally not
+> rewritten.
+
 Memory management is where operating systems get genuinely deep. This chapter
 builds the mental model from the ground up, shows what MiniOS implements (a
 physical allocator), and clearly marks where MiniOS *stops* and real kernels keep
