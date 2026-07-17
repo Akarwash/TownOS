@@ -13,16 +13,17 @@
 #   # (see https://wiki.osdev.org/GCC_Cross-Compiler) targeting --target=x86_64-elf,
 #   # or on 64-bit hosts the native gcc/ld can be used with the flags below.
 #
-# NOTE: the build will NOT link successfully until the hand-written GDT / IDT /
-# ISR stubs are filled in. boot/boot.asm's long-mode climb is now implemented, so
-# the remaining undefined symbols are the ISR/IRQ entry points in
-# kernel/isr_stubs.asm. That link failure is expected — see CONVERSION_NOTES.md.
+# The kernel links and boots. `make` produces two artifacts:
+#   minios.elf  the linked ELF64 image, with 64-bit symbols for gdb
+#   minios.bin  the same image repackaged as a 32-bit ELF, which is what QEMU's
+#               Multiboot -kernel loader accepts (see the minios.bin rule below)
 # ============================================================================
 
 # Compilers and tools
 CC = x86_64-elf-gcc
 LD = x86_64-elf-ld
 ASM = nasm
+OBJCOPY = x86_64-elf-objcopy
 QEMU = qemu-system-x86_64
 
 # Compiler flags
@@ -49,9 +50,19 @@ ALL_OBJECTS = $(ASM_OBJECTS) $(C_OBJECTS)
 # Default target
 all: minios.bin
 
-# Link everything into the final binary
-minios.bin: $(ALL_OBJECTS)
+# Link everything into the ELF64 image. This keeps the 64-bit symbols gdb needs.
+minios.elf: $(ALL_OBJECTS)
 	$(LD) $(LDFLAGS) -o $@ $^
+
+# Repackage the ELF64 as a 32-bit ELF for booting.
+#   QEMU's built-in Multiboot -kernel loader rejects an ELF64 image ("Cannot load
+#   x86-64 image, give a 32bit one"). Our entry code (boot/boot.asm) starts in
+#   32-bit protected mode and climbs to long mode itself, and every address in the
+#   image lives in low memory, so relabelling the container as elf32-i386 is
+#   accepted by the loader and boots correctly. The code is unchanged; only the
+#   ELF header class differs. gdb should point at minios.elf for symbols.
+minios.bin: minios.elf
+	$(OBJCOPY) -O elf32-i386 $< $@
 
 # Compile C files
 %.o: %.c
@@ -67,4 +78,4 @@ run: minios.bin
 
 # Clean build files
 clean:
-	rm -f $(ALL_OBJECTS) minios.bin
+	rm -f $(ALL_OBJECTS) minios.bin minios.elf
