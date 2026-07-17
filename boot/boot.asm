@@ -23,6 +23,7 @@ section .multiboot
 ; prose. Each bit is explained where it is used.
 PG_PRESENT      equ 1 << 0      ; page-structure entry: mapping is present
 PG_WRITABLE     equ 1 << 1      ; page-structure entry: writes allowed
+PG_USER         equ 1 << 2      ; page-structure entry: ring-3 (CPL 3) access allowed
 PG_HUGE         equ 1 << 7      ; PD entry: this IS the page (2MB), stop the walk
 CR4_PAE         equ 1 << 5      ; CR4.PAE: Physical Address Extension (required for long mode)
 EFER_MSR        equ 0xC0000080  ; Extended Feature Enable Register MSR number
@@ -73,32 +74,43 @@ _start:
 
     ; --- Step 2: PML4[0] -> PDPT ---
     ; The top-level table's first entry points at the next level down and marks
-    ; it present + writable. We only ever touch entry 0: the identity map lives
-    ; entirely in the low 512GB the first PML4 entry covers.
+    ; it present + writable + USER. We only ever touch entry 0: the identity map
+    ; lives entirely in the low 512GB the first PML4 entry covers.
+    ;
+    ; Why user here? The x86 page walk ANDs the user bit at EVERY level: ring-3
+    ; access is only permitted if PML4, PDPT, AND the PD leaf all set it. So we
+    ; make the two upper levels PERMISSIVE (user allowed) and gate real access at
+    ; the leaves below. PD[0]/PD[1] omit user -> the kernel's own pages stay
+    ; ring-0-only even though the branch above them says "user may pass."
     mov eax, pdpt_table
-    or eax, PG_PRESENT | PG_WRITABLE
+    or eax, PG_PRESENT | PG_WRITABLE | PG_USER
     mov [pml4_table], eax
 
     ; --- Step 3: PDPT[0] -> PD ---
-    ; Same idea one level down: the first PDPT entry points at the page directory.
+    ; Same idea one level down: the first PDPT entry points at the page directory,
+    ; also permissive (user) so the branch stays open to the user leaves below.
     mov eax, pd_table
-    or eax, PG_PRESENT | PG_WRITABLE
+    or eax, PG_PRESENT | PG_WRITABLE | PG_USER
     mov [pdpt_table], eax
 
     ; --- Step 4: PD[0..3] = identity-map the first 8 MB with 2MB pages ---
     ; Entry N maps virtual (N * 2MB) straight to physical (N * 2MB): fake address
-    ; == real address. Four entries cover 0x000000..0x7FFFFF, which includes the
-    ; VGA text buffer at 0xB8000 and the kernel loaded at 1M. The PG_HUGE bit is
+    ; == real address. Four entries cover 0x000000..0x7FFFFF. The PG_HUGE bit is
     ; MANDATORY: it tells the CPU "this entry is a 2MB page, do not walk to a PT."
     ; Omit it and the CPU chases a fourth level that does not exist.
-    mov eax, PG_PRESENT | PG_WRITABLE | PG_HUGE   ; flags for the 0x000000 frame
-    mov ecx, 0                                    ; PD entry index
-.map_pd:
-    mov [pd_table + ecx * 8], eax                 ; low dword: frame address | flags
-    add eax, 0x200000                             ; advance to the next 2MB frame
-    inc ecx
-    cmp ecx, 4
-    jne .map_pd
+    ;
+    ; The leaf is where privilege is really decided (permission ANDs down the
+    ; walk, so this is the gate that matters):
+    ;   PD[0] 0x000000-0x1FFFFF : kernel  (no user) - kernel code/data, VGA, stack
+    ;   PD[1] 0x200000-0x3FFFFF : kernel  (no user)
+    ;   PD[2] 0x400000-0x5FFFFF : USER    - the ring-3 program's code lives here
+    ;   PD[3] 0x600000-0x7FFFFF : USER    - the ring-3 program's stack lives here
+    ; Written out explicitly (not a loop) so the privilege of each 2MB region is
+    ; visible on its own line.
+    mov dword [pd_table + 0 * 8], 0x000000 | PG_PRESENT | PG_WRITABLE | PG_HUGE
+    mov dword [pd_table + 1 * 8], 0x200000 | PG_PRESENT | PG_WRITABLE | PG_HUGE
+    mov dword [pd_table + 2 * 8], 0x400000 | PG_PRESENT | PG_WRITABLE | PG_HUGE | PG_USER
+    mov dword [pd_table + 3 * 8], 0x600000 | PG_PRESENT | PG_WRITABLE | PG_HUGE | PG_USER
 
     ; --- Step 5: enable PAE (CR4.PAE) ---
     ; Long mode requires Physical Address Extension; without it CR0.PG below just

@@ -38,6 +38,17 @@
 #define GDT_FLAGS_KCODE   (GDT_FLAG_LONG)   // L=1, D/B=0
 #define GDT_FLAGS_KDATA   (0)
 
+// --- Segment selectors (index * 8, low 2 bits = requested privilege level) ---
+// These are the values loaded into segment registers / used in far returns. The
+// user selectors carry RPL 3 (the low 3 = 0b011), which is why they are not a
+// clean multiple of 8. Kept here as the single source of truth so gdt.c, the
+// TSS load, and the ring-3 entry code all agree.
+#define GDT_SELECTOR_KERNEL_CODE  0x08   // index 1, RPL 0
+#define GDT_SELECTOR_KERNEL_DATA  0x10   // index 2, RPL 0
+#define GDT_SELECTOR_USER_CODE    0x1B   // index 3, RPL 3  (0x18 | 3)
+#define GDT_SELECTOR_USER_DATA    0x23   // index 4, RPL 3  (0x20 | 3)
+#define GDT_SELECTOR_TSS          0x28   // indices 5+6, the 16-byte system descriptor
+
 // --- Standard 8-byte descriptor ---
 // The base/limit fields are dead weight in long mode for code/data, but the
 // layout is fixed by hardware so they must be present. They ARE meaningful for

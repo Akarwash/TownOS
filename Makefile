@@ -36,9 +36,11 @@ LDFLAGS = -T linker.ld -nostdlib
 
 # Source files
 C_SOURCES = kernel/kernel.c kernel/gdt.c kernel/idt.c kernel/isr.c kernel/timer.c kernel/memory.c \
+            kernel/usermode.c \
             drivers/screen.c drivers/ports.c drivers/keyboard.c \
             libc/mem.c libc/string.c \
-            shell/shell.c
+            shell/shell.c \
+            user/user_program.c
 ASM_SOURCES = boot/boot.asm kernel/gdt_flush.asm kernel/isr_stubs.asm
 
 # Object files (replace .c with .o and .asm with .o)

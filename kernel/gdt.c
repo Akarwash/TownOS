@@ -90,10 +90,10 @@ void gdt_init(void) {
     // Load the GDT and reload every segment register (see gdt_flush.asm).
     gdt_flush((uint64_t)&gdt_ptr);
 
-    // Load the task register with the TSS selector (0x28). Done here as a one-
+    // Load the task register with the TSS selector. Done here as a one-
     // instruction inline asm rather than in gdt_flush.asm: it is trivial and
     // keeps the assembly file focused on the non-obvious CS-reload trick.
-    __asm__ __volatile__("ltr %0" : : "r"((uint16_t)0x28));
+    __asm__ __volatile__("ltr %0" : : "r"((uint16_t)GDT_SELECTOR_TSS));
 
     // NOTE: the TSS is inert for now. Everything runs at CPL 0, so no interrupt
     // changes privilege level, so the CPU never consults tss.rsp0. It exists so
