@@ -4,12 +4,25 @@
 idt_entry_t idt[256];
 idt_ptr_t idt_ptr;
 
+// No Interrupt Stack Table stack: a value of 0 in the gate's ist field tells the
+// CPU to keep using the current stack rather than switching to a preset IST
+// stack. We never cross privilege levels (everything runs at ring 0), so the
+// running stack is always a valid kernel stack and a dedicated IST is unneeded.
+#define IDT_IST_NONE   0
+
+// Pack a 64-bit handler address into one 16-byte long-mode gate. The address is
+// scattered across three fields by hardware decree: low 16 bits, middle 16 bits,
+// then the upper 32 bits. selector picks the code segment the handler runs in
+// (the kernel code selector 0x08, passed in by isr.c); flags carries the
+// present bit, DPL, and gate type (0x8E, see isr.c's GATE constant).
 void idt_set_entry(int index, uint64_t base, uint16_t selector, uint8_t flags) {
-    // TODO(long-mode): pack a 64-bit handler address into the 16-byte gate.
-    //   The 64-bit gate splits the address across offset_low/offset_mid/
-    //   offset_high, sets selector/flags, and zeroes ist + reserved. Writing
-    //   this out (and getting the flags right) is being done by hand.
-    (void)index; (void)base; (void)selector; (void)flags;
+    idt[index].offset_low  = (uint16_t)(base & 0xFFFF);
+    idt[index].offset_mid  = (uint16_t)((base >> 16) & 0xFFFF);
+    idt[index].offset_high = (uint32_t)((base >> 32) & 0xFFFFFFFF);
+    idt[index].selector    = selector;
+    idt[index].ist         = IDT_IST_NONE;
+    idt[index].flags       = flags;
+    idt[index].zero        = 0;
 }
 
 static void pic_remap(void) {
@@ -52,8 +65,16 @@ void idt_init(void) {
     // Remap the PIC (portable port I/O, unchanged in 64-bit).
     pic_remap();
 
-    // TODO(long-mode): load the IDT register (lidt). The instruction is the
-    //   same mnemonic but the whole install path is being brought up by hand
-    //   alongside the 64-bit gate format, so it is left as a stub for now.
-    // __asm__ __volatile__("lidt (%0)" : : "r" (&idt_ptr));
+    // Load the IDT register. This must happen AFTER the kernel GDT is installed
+    // (gdt_init runs first in kernel_main): a gate names a code selector, and the
+    // CPU resolves that selector against the current GDT the moment an interrupt
+    // fires, so the GDT has to be the real one by then.
+    //
+    // Every gate installed by isr.c is DPL 0. The DPL controls the LOWEST
+    // privilege level allowed to reach the gate via a software `int N`. A DPL 3
+    // gate would let ring-3 user code execute `int 14` to forge a page fault or
+    // `int 32` to fake a timer tick, corrupting kernel state at will. Hardware
+    // interrupts and CPU exceptions ignore the DPL, so DPL 0 costs us nothing;
+    // only a future syscall vector would deliberately want DPL 3.
+    __asm__ __volatile__("lidt %0" : : "m"(idt_ptr));
 }
