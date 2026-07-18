@@ -7,6 +7,32 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- A kernel heap, `kmalloc`/`kfree` (`kernel/heap.c`, `kernel/heap.h`), ported from
+  the CMSC216 p5 `el_malloc`: an explicit free list with header/footer boundary
+  tags, first-fit allocation, block splitting, and coalescing with the free
+  neighbours above and below. The algorithm is the original, unchanged; only the
+  OS seams differ. The slab comes from a new `alloc_frames_contiguous(n)` in
+  `kernel/memory.c` (a run of consecutive clear bits in the linear bitmap is
+  contiguous, identity-mapped RAM) instead of `mmap`, so the p5 single-contiguous
+  -slab assumption holds; `el_ctl` is a static `.bss` struct rather than an
+  `mmap`'d page, and the fixed target addresses and their asserts are gone.
+  `printf`/`fprintf` become the VGA `print_string` (with kernel-native decimal and
+  hex printers for the stats helpers); `assert` and the `mmap`-return checks are
+  dropped. `kmalloc`/`kfree` wrap their critical section in a save-and-restore
+  interrupt guard (`pushfq`/`cli` ... `popfq`), because the free list is shared
+  mutable state and the 100 Hz timer IRQ could otherwise land mid-relink and
+  corrupt it; restore, not an unconditional `sti`, so a call from inside an
+  interrupt handler stays safe. The heap builds a 16-page (64KB) initial slab in
+  `heap_init()` (called from `kernel_main` after `memory_init`) and grows on
+  demand; growth requires the new run to be adjacent to `heap_end` (guaranteed
+  because the heap is the sole frame consumer and the bitmap is scanned
+  bottom-up), and a non-adjacent run is refused and reclaimed rather than spliced
+  into the single-heap boundary-tag walk. Verified under QEMU with a temporary
+  self-test (removed after): allocation with sentinel readback, free-and-reuse,
+  full coalesce, and the growth path all pass, with zero page/GP faults and the
+  timer and syscall vectors still firing. See
+  `docs/decisions/0010-kernel-heap-ported-from-p5.md` and
+  `docs/reference/heap.md`.
 - Reading the real amount of RAM from the Multiboot memory map and extending the
   identity map to cover it. `boot/boot.asm` now identity-maps a fixed 32MB (up
   from 8MB, 16 2MB PD entries; 4-8M stays `PG_USER`, the rest kernel-only),

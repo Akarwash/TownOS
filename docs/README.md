@@ -17,6 +17,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 | [reference/memory-map.md](reference/memory-map.md) | Physical memory layout: load address, VGA buffer, identity-mapped region, page tables, stacks |
 | [reference/gdt.md](reference/gdt.md) | The kernel GDT and TSS: selector table, descriptor layouts, and the bootstrap-vs-kernel GDT split |
 | [reference/idt.md](reference/idt.md) | The IDT and interrupt entry path: gate format, PIC remap, the 48 stubs, dispatch, and EOI |
+| [reference/heap.md](reference/heap.md) | The kernel heap: header/footer boundary tags, split/coalesce, the frame-allocator seam, and interrupt safety |
 | [project-status.md](project-status.md) | What works, what was never built, and the natural next steps |
 | [decisions/](decisions/) | Architecture decision records (ADRs) for the load-bearing choices |
 
@@ -31,6 +32,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 - [0007 — System calls via a single `int 0x50` gate](decisions/0007-syscalls-via-int-0x50.md) — Route every syscall through one DPL 3 `int 0x50` gate (the only user-reachable gate); RAX carries the call number.
 - [0008 — A round-robin preemptive scheduler](decisions/0008-round-robin-preemptive-scheduler.md) — Preempt on the timer tick by overwriting the interrupt frame in place, with a fixed `.bss` task table of four.
 - [0009 — Read the Multiboot memory map and extend the identity map](decisions/0009-read-multiboot-map-extend-identity-map.md) — Read the Multiboot map, extend the identity map to real RAM (capped at 1GB), and size the frame pool from it.
+- [0010 — Port the p5 explicit-free-list allocator as the kernel heap](decisions/0010-kernel-heap-ported-from-p5.md) — Port the CMSC216 p5 `el_malloc` (boundary tags, coalescing) as `kmalloc`/`kfree`, swapping `mmap` for `alloc_frames_contiguous` and adding an interrupt guard.
 
 ## Status
 

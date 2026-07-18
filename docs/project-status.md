@@ -50,6 +50,16 @@ limitations. It is a factual snapshot, not a roadmap.
   "A" and "B" on screen forever. No address-space isolation and a fixed table of
   four (see limitations below). See [reference/scheduling.md](reference/scheduling.md)
   and [decisions/0008-round-robin-preemptive-scheduler.md](decisions/0008-round-robin-preemptive-scheduler.md).
+- A kernel heap (`kernel/heap.c`), `kmalloc`/`kfree`: an explicit free list with
+  boundary tags and coalescing, ported from the CMSC216 p5 `el_malloc`. It draws
+  its slab from `alloc_frames_contiguous` (a new multi-page frame helper in
+  `kernel/memory.c`), grows on demand, and guards its critical section with a
+  save-and-restore interrupt disable so the timer IRQ cannot corrupt the free
+  list mid-relink. This is the layer that would implement `mmap`. It is present
+  and working but has no caller yet on the boot path; it exists to unblock the
+  next steps (a dynamic task table, per-process page-table structures). See
+  [reference/heap.md](reference/heap.md) and
+  [decisions/0010-kernel-heap-ported-from-p5.md](decisions/0010-kernel-heap-ported-from-p5.md).
 
 The kernel builds, links into `minios.elf`, is repackaged as `minios.bin`, and
 boots under QEMU. In the current build `kernel_main` hands off to the scheduler as
@@ -124,12 +134,15 @@ one silently corrupts the other.
   length, needs per-process address spaces that do not exist yet. Recorded as a
   TODO in `kernel/syscall.c`. Do not read the region check as real pointer
   safety. See [reference/syscalls.md](reference/syscalls.md).
-- **No dynamic memory beyond the frame allocator.** `kernel/memory.c` hands out
-  whole 4KB frames. There is no `kmalloc`/`kfree` heap for arbitrary-size
-  objects, so kernel data structures are statically sized.
+- **The heap has no caller on the boot path yet.** `kernel/heap.c` now provides
+  `kmalloc`/`kfree` for arbitrary-size objects (see What works), but nothing on
+  the current boot path allocates from it: the scheduler's task table and the
+  other kernel data structures are still statically sized. The heap exists to
+  unblock making them dynamic, not because anything uses it today.
 - **The scheduler is fixed and unisolated.** The task table is a fixed `.bss`
-  array of four (`MAX_TASKS`), because there is no kernel heap to allocate tasks
-  dynamically. The two tasks share a single 2MB user stack page split in half by
+  array of four (`MAX_TASKS`); it has not been made dynamic yet, though the kernel
+  heap that would allocate tasks now exists (`kmalloc`, see above) and unblocks
+  it. The two tasks share a single 2MB user stack page split in half by
   hand, with no guard page between them, so a stack overflow in one corrupts the
   other. There is no per-task address space, no blocking or sleeping (a task
   yields only by being preempted), and no task exit that returns anywhere. See

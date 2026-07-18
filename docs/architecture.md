@@ -22,7 +22,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | Directory | Responsibility |
 |-----------|----------------|
 | `boot/` | Multiboot header and the hand-written 32 to 64 long-mode climb (assembly). |
-| `kernel/` | Core kernel: GDT/TSS, IDT, interrupt dispatch, syscall dispatch, timer, physical memory allocator, ring-3 entry, the scheduler, and `kernel_main`. |
+| `kernel/` | Core kernel: GDT/TSS, IDT, interrupt dispatch, syscall dispatch, timer, physical frame allocator, the kernel heap, ring-3 entry, the scheduler, and `kernel_main`. |
 | `drivers/` | Hardware drivers: VGA text screen, PS/2 keyboard, port I/O helpers. |
 | `libc/` | Minimal freestanding C library: `string` and `mem` routines. |
 | `shell/` | The interactive command shell. |
@@ -45,7 +45,8 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `kernel/isr.c`, `kernel/isr.h` | C-side interrupt dispatch: `isr_install`, `isr_handler`, `irq_handler`, handler registration. | Implemented |
 | `kernel/isr_stubs.asm` | `isr0`-`isr31`, `irq0`-`irq15` entry points and the common save/restore stubs. | Implemented |
 | `kernel/timer.c`, `kernel/timer.h` | PIT driver: program channel 0, count ticks on IRQ 0, call `schedule` each tick. | Implemented |
-| `kernel/memory.c`, `kernel/memory.h` | Bitmap physical frame allocator. | Implemented |
+| `kernel/memory.c`, `kernel/memory.h` | Bitmap physical frame allocator, plus `alloc_frames_contiguous` for multi-page runs. | Implemented |
+| `kernel/heap.c`, `kernel/heap.h` | Kernel heap (`kmalloc`/`kfree`): explicit free list with boundary tags and coalescing, ported from p5, on top of the frame allocator. | Implemented |
 | `drivers/screen.c`, `drivers/screen.h` | VGA text output: `print_char`/`print_string`/`print_int`, scrolling, cursor. | Implemented |
 | `drivers/keyboard.c`, `drivers/keyboard.h` | PS/2 keyboard driver on IRQ 1, scancode to ASCII. | Implemented |
 | `drivers/ports.c`, `drivers/ports.h` | `in`/`out` port I/O wrappers. | Implemented |
@@ -123,4 +124,5 @@ task and drive the switch.
 - Ring 3 and syscalls: [reference/user-mode.md](reference/user-mode.md), [reference/syscalls.md](reference/syscalls.md)
 - The scheduler: [reference/scheduling.md](reference/scheduling.md)
 - Memory layout: [reference/memory-map.md](reference/memory-map.md)
+- The kernel heap: [reference/heap.md](reference/heap.md)
 - Concepts (the why): [`../learnings/`](../learnings/README.md)
