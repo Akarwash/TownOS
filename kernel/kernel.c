@@ -4,6 +4,7 @@
 #include "isr.h"
 #include "timer.h"
 #include "memory.h"
+#include "heap.h"
 #include "scheduler.h"
 
 // The two ring-3 programs, linked into .user_text at 0x400000 (see
@@ -29,6 +30,8 @@ void kernel_main(uint64_t multiboot_info_addr) {
     print_int((uint32_t)(top_of_ram >> 20));   // 0 means the no-map fallback ran
     print_string(" MB\n");
     memory_init(multiboot_info_addr);          // size the frame pool from real RAM
+
+    heap_init();        // build the kernel heap on top of the frame allocator
 
     print_string("Starting scheduler with two ring-3 tasks...\n");
 
