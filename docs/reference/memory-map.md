@@ -15,7 +15,7 @@ physical address.
 | Ring-3 program code (`.user_text`) | `0x400000` (4M) | ~29 bytes | `linker.ld`, `user/user_program.c` | User-accessible (PD[2], user bit set). Its own `PT_LOAD` segment so the gap from the kernel is not padded into the file. |
 | Ring-3 program stack | `0x600000` - `0x7FFFFF` | 2 MB page | `boot/boot.asm` (PD[3]), `USER_STACK_TOP` = `0x800000` | User-accessible (PD[3], user bit set). Stack grows down from `0x800000`. |
 | Identity-mapped region | `0x000000` - `0x7FFFFF` | 8 MB | `boot/boot.asm` (4 x 2MB PD entries) | The only mapped region. PD[0]/PD[1] kernel-only; PD[2]/PD[3] user-accessible. Covers the VGA buffer, the kernel, and the ring-3 pages. |
-| Frame allocator pool | `0x400000` (4M) - `0x8400000` (132M) | 128 MB | `kernel/memory.c` (`MEMORY_START`, `MAX_FRAMES`) | Bitmap tracks 32768 x 4KB frames starting at 4M. Overlaps the ring-3 region — see caveats below. |
+| Frame allocator pool | `0x400000` (4M) - `0x8400000` (132M) | 128 MB | `kernel/memory.c` (`MEMORY_START`, `MAX_FRAMES`) | Bitmap tracks 32768 x 4KB frames starting at 4M. The 4-8M frames are reserved at init (see caveats below), so the first free frame is at 8M. |
 
 ## Objects in `.bss` (addresses determined at link time)
 
@@ -50,16 +50,30 @@ would fault until a real virtual-memory system maps it. Per-process address spac
 and a proper VM layer are future work (see
 [decision 0002](../decisions/0002-2mb-pages-and-8mb-identity-map.md)).
 
-## Caveat: the frame pool overlaps the ring-3 region
+## Caveat: the ring-3 region is reserved, and the pool is not usable yet
 
-The frame allocator's pool starts at exactly `0x400000` (4M) — the same address
-where the ring-3 program's code and stack live (PD[2]/PD[3], 4-8M). So the
-allocator would hand out frames that sit on top of the running user program. This
-is latent, not active: in the current demo `kernel_main` drops to ring 3
-immediately after `memory_init()` and nothing allocates a frame, and the
-allocator only returns addresses without writing them. A real user/VM layer must
-resolve the collision (move the pool, or reserve the user region in the bitmap).
-See [decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
+The frame allocator's pool starts at exactly `0x400000` (4M), the same address
+where the ring-3 program's code and stack live (PD[2]/PD[3], 4-8M). To stop the
+allocator from handing out frames that sit on top of the running user program,
+`memory_init()` marks the frames covering 4-8M (`USER_REGION_START` to
+`USER_REGION_END`) as used at init. See
+[decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
+
+Be clear about what this does and does not fix:
+
+- The pool is 32768 frames of 4096 bytes, so it spans 4M to 132M.
+- The identity map (`boot/boot.asm`) covers 8M. Every frame above 8M has no page
+  table entry.
+- After the reservation, the first free frame is at 8M, which is unmapped. So
+  `alloc_frame()` returns an address that page-faults on first touch, every time.
+- This change fixes "do not hand out frames something else is already using." It
+  does not fix "the frames handed out are not mapped." The allocator remains
+  unusable in practice until the identity map is extended.
+
+Both the 8M identity map and the 128M pool are invented numbers, not measured.
+The real fix is to read the Multiboot memory map (which the kernel currently
+discards, since `kernel_main` takes no arguments) and size both from actual RAM.
+That is future work, not a small oversight.
 
 ## Related
 

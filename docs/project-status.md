@@ -100,11 +100,22 @@ kernel into something that can safely run untrusted programs.
   APIC/IO-APIC, and has no per-core state or locking.
 - **8MB identity map.** `boot/boot.asm` identity-maps only the first 8MB. Any
   physical address above 8MB is unmapped and would fault on access.
-- **Frame pool overlaps the ring-3 region.** The frame allocator's pool starts
-  at 4M, the same region the ring-3 program's code and stack occupy (4-8M). It is
-  latent, not active — nothing allocates a frame before the drop — but a real
-  user/VM layer must move the pool or reserve the region. See
+- **The frame allocator is not usable in practice.** `memory_init()` now reserves
+  the 4-8M frames the ring-3 program occupies (its code and stack), so the
+  allocator no longer hands out memory that the running user program lives on.
+  But that is the only fix: the first free frame is now at 8M, above the identity
+  map, so `alloc_frame()` returns an address that page-faults on first touch,
+  every time. Reserving the region fixes "do not hand out frames something else
+  is using"; it does not fix "the frames handed out are not mapped." The pool
+  stays unusable until the identity map is extended. See
   [reference/memory-map.md](reference/memory-map.md).
+- **Memory sizes are invented, not measured.** Both the 8MB identity map
+  (`boot/boot.asm`) and the 128MB frame pool (`kernel/memory.c`) are hardcoded
+  numbers. Multiboot hands the kernel a memory map describing how much RAM the
+  machine actually has, but `kernel_main` takes no arguments, so the Multiboot
+  info pointer is discarded at boot and the map is ignored. The proper fix is to
+  read that map and size both the identity map and the frame pool from it. This
+  is recorded so it is not mistaken for a small oversight.
 - **QEMU only.** The kernel has been built and booted under
   `qemu-system-x86_64`. It has not been run on real hardware or other emulators,
   and the `minios.bin` boot path relies on QEMU's built-in Multiboot `-kernel`

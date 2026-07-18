@@ -43,6 +43,15 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Changed
 
+- `memory_init` now reserves the frames covering the ring-3 region (4-8M,
+  `USER_REGION_START`/`USER_REGION_END`) so the frame allocator never hands out
+  memory the running user program's code or stack already occupy. This resolves
+  the pool/ring-3 overlap but does not make the allocator usable: the first free
+  frame is now at 8M, above the 8M identity map, so `alloc_frame()` returns an
+  address that page-faults on first touch until the map is extended. Both the 8M
+  identity map and the 128M pool size remain invented numbers; sizing them from
+  the (currently discarded) Multiboot memory map is recorded as future work.
+  `docs/reference/memory-map.md` and `docs/project-status.md` updated.
 - `kernel_main` now hands off to ring 3 (`enter_user_mode`) as its last act
   instead of calling `shell_init`; the shell is still compiled and working but is
   off the boot path (the ring-3 program faults and the kernel halts before the
