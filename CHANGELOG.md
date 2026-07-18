@@ -7,6 +7,31 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- A round-robin preemptive scheduler (`kernel/scheduler.c`, `kernel/scheduler.h`).
+  The timer IRQ handler now switches between ring-3 tasks by overwriting the
+  interrupt frame on the kernel stack in place: the `registers_t` the stub pushed
+  is the task's whole context, so `schedule()` saves `*r` into the current task's
+  slot, picks the next `TASK_READY` task round-robin, and copies its saved frame
+  back over `*r`, so the stub's `iretq` resumes a different task. `task_create`
+  forges a never-run task's frame (the `enter_user_mode` trick generalised: `rip`
+  = entry, `user_rsp` = stack top, `cs`/`ss` = user selectors, `rflags` = 0x202
+  with IF set, GPRs zero) and marks it `TASK_READY`. Tasks live in a fixed `.bss`
+  array `tasks[MAX_TASKS]` (no kernel heap yet). `scheduler_start()` enters task 0
+  by reusing `enter_user_mode`; a `scheduler_running` guard plus a `cli` in
+  `scheduler_start` close the startup race where early timer ticks fire in kernel
+  context. EOI stays before the switch (already sent by `irq_handler`), or the
+  timer line would freeze after one switch.
+- A second ring-3 program in `user/user_program.c`: `user_program_a` and
+  `user_program_b` each loop forever calling `SYS_WRITE` with "A"/"B" and a crude
+  busy-wait delay, neither calling `SYS_EXIT`, so the scheduler's switching stays
+  visible. `SYS_EXIT` stays implemented but unused.
+- `TASK0_STACK_TOP` (0x700000) / `TASK1_STACK_TOP` (0x800000) in
+  `kernel/scheduler.h`: the single 6-8M PG_USER stack page (PD[3]) split in half,
+  one 1MB stack per task (no guard page between them).
+- `docs/decisions/0008-round-robin-preemptive-scheduler.md` and
+  `docs/reference/scheduling.md` documenting the frame-swap switch, forging a
+  never-run task, the two traps (overwrite in place, EOI before switch), task
+  states, the startup race, and the stack split.
 - System calls through a single `int 0x50` gate. `kernel/isr.c` installs one
   DPL 3 IDT gate at `SYSCALL_VECTOR` (0x50) with a new `GATE_USER` (0xEE) flags
   byte; every other gate stays DPL 0, so this is the only vector ring-3 code can
@@ -59,6 +84,14 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Changed
 
+- `kernel_main` now creates two ring-3 tasks and starts the scheduler
+  (`scheduler_start`) as its last act instead of calling `enter_user_mode`
+  directly; the tasks run forever, so the machine no longer halts on `SYS_EXIT`.
+  `kernel/timer.c`'s `timer_callback` now calls `schedule(regs)` on every tick
+  instead of only counting. `enter_user_mode` is still used, now by
+  `scheduler_start` to enter task 0. `docs/architecture.md`,
+  `docs/project-status.md`, and `docs/reference/memory-map.md` updated for the two
+  tasks and the split stack page.
 - `memory_init` now reserves the frames covering the ring-3 region (4-8M,
   `USER_REGION_START`/`USER_REGION_END`) so the frame allocator never hands out
   memory the running user program's code or stack already occupy. This resolves

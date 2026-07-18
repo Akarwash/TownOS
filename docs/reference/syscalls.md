@@ -99,19 +99,21 @@ the bounds check above and fault a ring-3 read.
 
 ## What a run looks like
 
-The demo program calls `SYS_WRITE` twice with different strings, then `SYS_EXIT`.
-Booted under QEMU with `-d int`, vector `0x50` fires three times, each at `cpl=3`,
-with no `#GP` (0x0D) and no `#PF` (0x0E). On screen:
+The two ring-3 tasks each call `SYS_WRITE` in a loop with a single-letter string,
+"A" and "B" (neither calls `SYS_EXIT`; the scheduler switches between them, see
+[scheduling.md](scheduling.md)). Booted under QEMU with `-d int`, vector `0x50`
+fires repeatedly from both tasks (two distinct RIPs, `IP=001b:0040002b` and
+`IP=001b:00400083`, on the two half-page stacks), each at `cpl=3`, with no `#GP`
+(0x0D) and no `#PF` (0x0E). On screen the letters interleave:
 
 ```
-user: hello from ring 3, via int 0x50
-user: and a second syscall, still in ring 3
-syscall: SYS_EXIT, halting.
+ABABABABABABABAB...
 ```
 
 Passing a kernel address (for example `0x100000`) to `SYS_WRITE` instead prints
 `syscall: SYS_WRITE rejected an out-of-bounds pointer` and returns `-1`, printing
-nothing from kernel memory, confirming the stopgap check fires.
+nothing from kernel memory, confirming the stopgap check fires. (`SYS_EXIT` stays
+implemented; it halts with `cli; hlt`, but the shipped tasks never call it.)
 
 ## Related
 

@@ -1,7 +1,8 @@
 # Project status
 
-MiniOS is a learning kernel that reached its intended stopping point: it boots
-x86-64 long mode and runs an interrupt-driven shell. This page records what works
+MiniOS is a learning kernel: it boots x86-64 long mode, drops to ring 3, and now
+preempts between two ring-3 tasks on the timer tick. (An interrupt-driven shell is
+still compiled and working but off the boot path.) This page records what works
 today, what was deliberately never built, the natural next steps, and the known
 limitations. It is a factual snapshot, not a roadmap.
 
@@ -31,35 +32,42 @@ limitations. It is a factual snapshot, not a roadmap.
   pages stay ring-0-only. This activates the previously inert user GDT
   descriptors and `tss.rsp0`. See [reference/user-mode.md](reference/user-mode.md)
   and [decisions/0006-user-mode-with-separate-pages.md](decisions/0006-user-mode-with-separate-pages.md).
-- System calls (`kernel/syscall.c`, `include/syscalls.h`): the ring-3 program
-  calls back into the kernel through one `int 0x50` gate, the only DPL 3 gate in
+- System calls (`kernel/syscall.c`, `include/syscalls.h`): the ring-3 programs
+  call back into the kernel through one `int 0x50` gate, the only DPL 3 gate in
   the IDT. `SYS_WRITE` prints a string; `SYS_EXIT` halts. The dispatcher switches
   on RAX and returns its result in RAX; an unknown number is rejected, not fatal.
   The `SYS_WRITE` pointer check is a stopgap (see limitations below). See
   [reference/syscalls.md](reference/syscalls.md) and
   [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
+- A round-robin preemptive scheduler (`kernel/scheduler.c`): the timer tick
+  switches between two ring-3 tasks by overwriting the interrupt frame on the
+  kernel stack in place, so the stub's `iretq` resumes a different task.
+  `task_create` forges a never-run task (the ring-3 drop generalised), a fixed
+  `.bss` table holds them, and the two `user_program_a`/`_b` programs interleave
+  "A" and "B" on screen forever. No address-space isolation and a fixed table of
+  four (see limitations below). See [reference/scheduling.md](reference/scheduling.md)
+  and [decisions/0008-round-robin-preemptive-scheduler.md](decisions/0008-round-robin-preemptive-scheduler.md).
 
 The kernel builds, links into `minios.elf`, is repackaged as `minios.bin`, and
-boots under QEMU. In the current build `kernel_main` hands off to ring 3 as its
-last act (the ring-3 program prints via `SYS_WRITE` and then `SYS_EXIT` halts the
-machine), so the interactive shell — though compiled and working — is not
-reached. Swapping the `enter_user_mode` call back for `shell_init` restores the
-shell. See [building.md](building.md).
+boots under QEMU. In the current build `kernel_main` hands off to the scheduler as
+its last act (it creates two ring-3 tasks and enters task 0; the timer then
+switches between them, and they print "A"/"B" forever), so the interactive shell,
+though compiled and working, is not reached. Swapping the scheduler handoff back
+for `shell_init` restores the shell. See [building.md](building.md).
 
 ## What was never built
 
 These are absent by design; MiniOS stops at a single-address-space kernel that
-demonstrates a ring-3 drop but does not manage processes.
+preempts between two hard-coded ring-3 tasks but does not manage processes.
 
-- **Processes.** The ring-3 drop runs one hard-coded program. There is a
-  `SYS_EXIT` syscall, but with no scheduler and no parent it can only halt the
-  machine, not return to anything. There is no notion of a process, no loading,
-  and no way to run a second user program.
-- **A scheduler.** There is one thread of control: `kernel_main` and the shell.
-  The timer counts ticks but never switches tasks.
+- **Processes.** The scheduler runs two hard-coded programs baked into the kernel
+  image, not loaded programs. There is a `SYS_EXIT` syscall, but with no parent to
+  return to it can only halt the machine. There is no notion of a process, no
+  loading, and no way to add a third program without editing the kernel.
 - **Per-process paging.** Paging is on (it is required for long mode), but there
-  is a single identity-mapped address space shared by everything. There are no
-  per-process page tables and no address-space isolation.
+  is a single identity-mapped address space shared by everything, tasks included.
+  There are no per-process page tables and no address-space isolation, so one
+  task can scribble on the other's stack (the two share one page, split in half).
 - **A filesystem.** There is no block device, no disk driver, and no filesystem.
 - **Program loading.** There is no ELF loader and no way to run a separate
   program; the shell dispatches to compiled-in command functions.
@@ -82,18 +90,24 @@ What remains for a real syscall layer is safe argument validation (see the
 untrusted-pointer limitation below) and more calls, both of which wait on
 processes and address spaces.
 
-**A scheduler.** With more than one thread of control worth running, the timer
-interrupt becomes a preemption point. Save the interrupted `registers_t`, pick
-another task, and restore its saved frame. The machinery is already present: the
-timer ticks and the ISR stubs already build a complete register frame on the
-stack. A scheduler turns that tick into a context switch.
+**A scheduler.** Done. The timer interrupt is now a preemption point: the tick
+saves the interrupted `registers_t` into the current task's slot, picks the next
+runnable task round-robin, and copies its saved frame back over the on-stack frame
+in place, so the ISR stub's `iretq` resumes a different task. Two ring-3 tasks run
+this way. See
+[decisions/0008-round-robin-preemptive-scheduler.md](decisions/0008-round-robin-preemptive-scheduler.md).
+What remains is everything isolation buys (below) and lifting the fixed
+four-task, single-stack-page limits, both of which wait on an allocator and
+address spaces.
 
 **Per-process paging.** Real isolation needs a separate address space per
 process. Give each process its own top-level page table, switch `CR3` on context
 switch, and handle the page fault (vector 14, which already has a gate and a stub)
 to implement demand paging and to kill a process that touches memory it does not
 own. This is the largest step and the one that turns MiniOS from a single-image
-kernel into something that can safely run untrusted programs.
+kernel into something that can safely run untrusted programs. Today the two tasks
+share one address space and one stack page (split by hand), so a stack overflow in
+one silently corrupts the other.
 
 ## Known limitations
 
@@ -110,6 +124,13 @@ kernel into something that can safely run untrusted programs.
 - **No dynamic memory beyond the frame allocator.** `kernel/memory.c` hands out
   whole 4KB frames. There is no `kmalloc`/`kfree` heap for arbitrary-size
   objects, so kernel data structures are statically sized.
+- **The scheduler is fixed and unisolated.** The task table is a fixed `.bss`
+  array of four (`MAX_TASKS`), because there is no kernel heap to allocate tasks
+  dynamically. The two tasks share a single 2MB user stack page split in half by
+  hand, with no guard page between them, so a stack overflow in one corrupts the
+  other. There is no per-task address space, no blocking or sleeping (a task
+  yields only by being preempted), and no task exit that returns anywhere. See
+  [reference/scheduling.md](reference/scheduling.md).
 - **No SMP.** MiniOS assumes a single CPU. It uses the legacy 8259 PIC, not the
   APIC/IO-APIC, and has no per-core state or locking.
 - **8MB identity map.** `boot/boot.asm` identity-maps only the first 8MB. Any
