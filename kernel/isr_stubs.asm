@@ -18,6 +18,7 @@
 
 extern isr_handler
 extern irq_handler
+extern syscall_handler
 
 ; ============================================================================
 ; MANUAL COUPLING, NO COMPILER CHECK. KEEP IN SYNC WITH include/vectors.h.
@@ -30,6 +31,11 @@ extern irq_handler
 ; This is the same class of invisible coupling as the registers_t push order.
 ; ============================================================================
 PIC_MASTER_VECTOR_BASE equ 0x40
+
+; Same manual coupling for the syscall vector: SYSCALL_VECTOR is 0x50 in
+; include/vectors.h, duplicated here because NASM cannot include the C header.
+; Keep the two in sync; nothing checks it.
+SYSCALL_VECTOR equ 0x50
 
 ; --- Per-vector entry macros --------------------------------------------------
 ; For most vectors the CPU pushes no error code. For a handful of exceptions it
@@ -118,6 +124,17 @@ IRQ 13
 IRQ 14
 IRQ 15
 
+; --- Syscall entry point (vector 0x50, raised by ring 3 via `int 0x50`) --------
+; A software interrupt, so the CPU pushes NO error code. Mirror ISR_NOERR: push a
+; dummy 0 into the error-code slot then the vector number, keeping the stack frame
+; identical to every other stub so the same registers_t layout fits. Then funnel
+; into the syscall tail, which calls the C dispatcher.
+global syscall_stub
+syscall_stub:
+    push 0                      ; dummy error code, keeps the frame uniform
+    push SYSCALL_VECTOR         ; this stub's vector (0x50), like ISR_NOERR
+    jmp syscall_common_stub
+
 ; --- Register save / restore --------------------------------------------------
 ; `pusha` does not exist in 64-bit, so every general-purpose register is pushed
 ; by hand. The push order is the REVERSE of the field order in `registers_t`:
@@ -183,6 +200,17 @@ irq_common_stub:
     PUSH_GPRS
     mov rdi, rsp                ; registers_t* -> first argument
     call irq_handler
+    POP_GPRS
+    add rsp, 16                 ; discard pushed vector number + error code
+    iretq
+
+; Syscall tail: identical shape to the two above. The C handler may write a
+; return value into the saved RAX slot of the registers_t frame; POP_GPRS then
+; restores that value into RAX, so iretq delivers it to the ring-3 caller.
+syscall_common_stub:
+    PUSH_GPRS
+    mov rdi, rsp                ; registers_t* -> first argument
+    call syscall_handler
     POP_GPRS
     add rsp, 16                 ; discard pushed vector number + error code
     iretq

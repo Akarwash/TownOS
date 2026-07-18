@@ -92,8 +92,10 @@
 #define IRQ_15           (PIC_SLAVE_VECTOR_BASE  + 7)   // 0x4F  secondary ATA
 
 // --- Syscalls (vectors 0x50 - 0x5F) -----------------------------------------
-// Reserved now, wired up later. Nothing installs a gate here yet; defining the
-// vector claims the number so a future syscall path has a name to grow into.
+// SYSCALL_VECTOR is the live syscall doorbell: kernel/isr.c installs the one
+// DPL 3 IDT gate here so ring-3 code can trap in with `int 0x50`, and the stub
+// (kernel/isr_stubs.asm) and dispatcher (kernel/syscall.c) handle it. The rest
+// of the 0x50-0x5F block stays reserved for future syscall entry points.
 #define SYSCALL_VECTOR           0x50
 
 #endif
