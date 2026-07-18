@@ -14,7 +14,17 @@
 #define USER_REGION_START  0x400000         // 4 MB, ring-3 code (PD[2])
 #define USER_REGION_END    0x800000         // 8 MB, top of ring-3 stack (PD[3])
 
-void memory_init(void);
+// Read the Multiboot memory map, extend the identity map to cover real RAM (up
+// to a 1GB ceiling), and flush the TLB. Returns the detected top-of-RAM in bytes
+// (uncapped, for reporting); 0 means no map was provided and the safe fixed
+// fallback was used. Must run before memory_init so the frames it manages are
+// mapped. mbi_addr is the physical Multiboot info pointer boot.asm passed in.
+uint64_t memory_detect_and_map(uint64_t mbi_addr);
+
+// Size the frame pool from the detected RAM and reserve the ranges that are not
+// free (the ring-3 region and every non-usable range the map reported).
+void memory_init(uint64_t mbi_addr);
+
 uint64_t alloc_frame(void);        // returns a free physical frame address, or 0 if none
 void free_frame(uint64_t addr);
 uint32_t frames_used(void);

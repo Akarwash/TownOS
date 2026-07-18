@@ -12,15 +12,24 @@
 extern void user_program_a(void);
 extern void user_program_b(void);
 
-void kernel_main(void) {
+void kernel_main(uint64_t multiboot_info_addr) {
     gdt_init();          // describe memory (flat segments) + load the TSS
     isr_install();       // install interrupt handlers, remap PIC, enable interrupts
     timer_init(100);     // 100 Hz heartbeat on IRQ0
     keyboard_init();     // listen for keypresses on IRQ1
-    memory_init();       // physical frame allocator
 
     screen_clear();
     print_string("Welcome to MiniOS!\n");
+
+    // Read the real amount of RAM from the Multiboot map, extend the identity map
+    // to cover it (capped at 1GB), and flush the TLB. This must happen before
+    // memory_init so every frame the allocator manages is actually mapped.
+    uint64_t top_of_ram = memory_detect_and_map(multiboot_info_addr);
+    print_string("Detected RAM: ");
+    print_int((uint32_t)(top_of_ram >> 20));   // 0 means the no-map fallback ran
+    print_string(" MB\n");
+    memory_init(multiboot_info_addr);          // size the frame pool from real RAM
+
     print_string("Starting scheduler with two ring-3 tasks...\n");
 
     // Create the two ring-3 tasks (each gets its own half of the 6-8M stack page)
