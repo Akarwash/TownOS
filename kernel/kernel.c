@@ -7,11 +7,12 @@
 #include "heap.h"
 #include "scheduler.h"
 
-// The two ring-3 programs, linked into .user_text at 0x400000 (see
+// The three ring-3 programs, linked into .user_text at 0x400000 (see
 // user/user_program.c and linker.ld). Each loops forever printing its own
 // letter; the scheduler switches between them on each timer tick.
 extern void user_program_a(void);
 extern void user_program_b(void);
+extern void user_program_c(void);
 
 void kernel_main(uint64_t multiboot_info_addr) {
     gdt_init();          // describe memory (flat segments) + load the TSS
@@ -33,15 +34,17 @@ void kernel_main(uint64_t multiboot_info_addr) {
 
     heap_init();        // build the kernel heap on top of the frame allocator
 
-    print_string("Starting scheduler with two ring-3 tasks...\n");
+    print_string("Starting scheduler with three ring-3 tasks...\n");
 
-    // Create the two ring-3 tasks (each gets its own half of the 6-8M stack page)
-    // and hand off to the scheduler. This is the LAST thing kernel_main does:
-    // scheduler_start enters task 0 and never returns; from here on the timer
-    // interrupt switches between the two tasks. If we ever reach the loop below,
-    // the handoff silently failed.
-    task_create((uint64_t)&user_program_a, TASK0_STACK_TOP);
-    task_create((uint64_t)&user_program_b, TASK1_STACK_TOP);
+    // Create three ring-3 tasks and hand off to the scheduler. Each task_create
+    // now heap-allocates its task_t and asks the user-stack allocator for its own
+    // stack slice (no more hardcoded stack tops). This is the LAST thing
+    // kernel_main does: scheduler_start enters task 0 and never returns; from here
+    // on the timer interrupt switches between the three tasks. If we ever reach
+    // the loop below, the handoff silently failed.
+    task_create((uint64_t)&user_program_a);
+    task_create((uint64_t)&user_program_b);
+    task_create((uint64_t)&user_program_c);
     scheduler_start();
 
     while (1) {

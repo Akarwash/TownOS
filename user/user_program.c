@@ -4,19 +4,21 @@
 // This code is linked into the .user_text section, which the linker places at
 // 0x400000 (4MB). That address lives inside PD[2], the one 2MB page boot.asm
 // marks PG_USER, so the CPU will actually let ring-3 code fetch instructions
-// from here. The stacks live in PD[3] (0x600000-0x7FFFFF), also PG_USER, split
-// in half by the scheduler (TASK0_STACK_TOP / TASK1_STACK_TOP).
+// from here. The stacks live in PD[3] (0x600000-0x7FFFFF), also PG_USER; the
+// scheduler's user-stack allocator (kernel/scheduler.c) hands each task a
+// distinct slice of that region.
 //
 // These programs reference NOTHING in the kernel: they cannot call a kernel
 // function (those pages are not PG_USER, the call would fault) and cannot read a
 // kernel address (same reason). The ONLY channel across the ring boundary is
 // `int 0x50`, the syscall gate. Everything else is inline.
 //
-// There are TWO programs now, user_program_a and user_program_b. Each loops
-// FOREVER, printing its own letter through SYS_WRITE with a crude delay between
-// writes so the interleaving is readable on screen. Neither calls SYS_EXIT: they
-// run until the timer preempts one and the scheduler hands the CPU to the other.
-// Seeing both letters interleave forever is the proof the scheduler works.
+// There are THREE programs now, user_program_a/_b/_c. Each loops FOREVER,
+// printing its own letter through SYS_WRITE with a crude delay between writes so
+// the interleaving is readable on screen. None calls SYS_EXIT: they run until the
+// timer preempts one and the scheduler hands the CPU to the next. Seeing all
+// three letters interleave forever is the proof the scheduler now runs more than
+// the old hardcoded two, each on its own dynamically-allocated stack.
 //
 // The two headers below are the ONLY things a user program is allowed to lean
 // on, and both are deliberately standalone (numbers only, no kernel code):
@@ -98,6 +100,9 @@ static const char msg_a[] = "A";
 __attribute__((section(".user_rodata")))
 static const char msg_b[] = "B";
 
+__attribute__((section(".user_rodata")))
+static const char msg_c[] = "C";
+
 // Task 0: print "A" forever.
 __attribute__((section(".user_text")))
 void user_program_a(void) {
@@ -112,6 +117,17 @@ __attribute__((section(".user_text")))
 void user_program_b(void) {
     for (;;) {
         sys_write(msg_b);
+        user_delay();
+    }
+}
+
+// Task 2: print "C" forever. Same shape as A and B; it exists to prove the
+// scheduler now runs more than the old hardcoded two, each on its own
+// dynamically-allocated stack.
+__attribute__((section(".user_text")))
+void user_program_c(void) {
+    for (;;) {
+        sys_write(msg_c);
         user_delay();
     }
 }
