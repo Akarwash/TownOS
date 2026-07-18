@@ -190,6 +190,34 @@ uint64_t alloc_frame(void) {
     return 0;   // out of memory
 }
 
+// Allocate `count` physically contiguous frames and return the base address, or
+// 0 if no run that long is free. The bitmap is linear and frame index i maps to
+// MEMORY_START + i*FRAME_SIZE, and the whole pool is identity-mapped as one
+// stretch, so a run of consecutive clear bits IS contiguous, mapped physical RAM.
+// The kernel heap (kernel/heap.c) needs this: its boundary-tag block walk assumes
+// one contiguous slab, which single-frame alloc_frame() cannot guarantee.
+uint64_t alloc_frames_contiguous(uint32_t count) {
+    if (count == 0) {
+        return 0;
+    }
+    uint32_t run = 0;
+    for (uint32_t i = 0; i < num_frames; i++) {
+        if (!test_bit(i)) {
+            run++;
+            if (run == count) {
+                uint32_t start = i - count + 1;   // run spans [start, i]
+                for (uint32_t j = start; j <= i; j++) {
+                    set_bit(j);
+                }
+                return MEMORY_START + (uint64_t)start * FRAME_SIZE;
+            }
+        } else {
+            run = 0;   // gap: a used frame breaks the run, start over
+        }
+    }
+    return 0;   // no contiguous run of the requested length
+}
+
 void free_frame(uint64_t addr) {
     if (addr < MEMORY_START) {
         return;

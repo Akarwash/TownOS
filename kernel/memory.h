@@ -26,6 +26,12 @@ uint64_t memory_detect_and_map(uint64_t mbi_addr);
 void memory_init(uint64_t mbi_addr);
 
 uint64_t alloc_frame(void);        // returns a free physical frame address, or 0 if none
+
+// Allocate `count` physically contiguous frames; returns the base address, or 0
+// if no run that long is free. Used by the kernel heap, which needs a single
+// contiguous slab for its boundary-tag block walk (see kernel/heap.c).
+uint64_t alloc_frames_contiguous(uint32_t count);
+
 void free_frame(uint64_t addr);
 uint32_t frames_used(void);
 
