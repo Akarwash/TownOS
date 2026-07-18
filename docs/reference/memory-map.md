@@ -15,8 +15,9 @@ physical address.
 | Ring-3 program code (`.user_text`) | `0x400000` (4M) | two small functions | `linker.ld`, `user/user_program.c` | User-accessible (PD[2], user bit set). Holds both `user_program_a` and `user_program_b`. Its own `PT_LOAD` segment so the gap from the kernel is not padded into the file. |
 | Task 0 stack (`user_program_a`) | `0x600000` - `0x6FFFFF` | 1 MB | `kernel/scheduler.h` (`TASK0_STACK_TOP` = `0x700000`) | Lower half of PD[3]. Grows down from `0x700000`. |
 | Task 1 stack (`user_program_b`) | `0x700000` - `0x7FFFFF` | 1 MB | `kernel/scheduler.h` (`TASK1_STACK_TOP` = `0x800000`) | Upper half of PD[3]. Grows down from `0x800000`. |
-| Identity-mapped region | `0x000000` - `0x7FFFFF` | 8 MB | `boot/boot.asm` (4 x 2MB PD entries) | The only mapped region. PD[0]/PD[1] kernel-only; PD[2]/PD[3] user-accessible. Covers the VGA buffer, the kernel, and the ring-3 pages. |
-| Frame allocator pool | `0x400000` (4M) - `0x8400000` (132M) | 128 MB | `kernel/memory.c` (`MEMORY_START`, `MAX_FRAMES`) | Bitmap tracks 32768 x 4KB frames starting at 4M. The 4-8M frames are reserved at init (see caveats below), so the first free frame is at 8M. |
+| Boot identity map (fixed) | `0x000000` - `0x1FFFFFF` | 32 MB | `boot/boot.asm` (16 x 2MB PD entries) | Built by the boot climb with no dependency on the memory map. PD[0]/PD[1] and PD[4]/PD[15] kernel-only; PD[2]/PD[3] (4-8M) user-accessible. Covers the VGA buffer, the kernel, and the ring-3 pages, with headroom for C to extend. |
+| Identity map extension (C) | `0x2000000` (32M) - top of RAM | up to 1 GB | `kernel/memory.c` (`memory_detect_and_map`) | Filled from the Multiboot map: entries from 32M up to the real top of usable RAM, rounded to 2MB, capped at 1GB (the single PD page's reach). Kernel-only. CR3 is reloaded afterwards to flush the TLB. |
+| Frame allocator pool | `0x400000` (4M) - top of RAM | up to ~1 GB | `kernel/memory.c` (`MEMORY_START`, real top of RAM) | Bitmap tracks 4KB frames from 4M to the measured top of RAM (capped at 1GB). The 4-8M frames and every non-usable range the map reports are reserved at init, so the first free frame is real, mapped RAM. |
 
 ## Objects in `.bss` (addresses determined at link time)
 
@@ -41,40 +42,54 @@ the CPU switches to on a ring-3 to ring-0 transition (`tss.rsp0` points at its
 top). See [gdt.md](gdt.md) and
 [decision 0004](../decisions/0004-build-tss-before-user-mode.md).
 
-## Caveat: the frame pool extends past the identity map
+## How memory is sized: the boot map, the C extension, and the 1GB ceiling
 
-The bitmap frame allocator (`kernel/memory.c`) hands out physical addresses from
-4M up to 132M, but only the first 8M is identity-mapped by the boot page tables.
-The allocator only returns addresses and does not itself touch that memory, so
-this is not a bug today, but any code that actually dereferences a frame above 8M
-would fault until a real virtual-memory system maps it. Per-process address spaces
-and a proper VM layer are future work (see
-[decision 0002](../decisions/0002-2mb-pages-and-8mb-identity-map.md)).
+Memory sizes are read from the machine, not invented. There are two stages.
 
-## Caveat: the ring-3 region is reserved, and the pool is not usable yet
+**The fixed boot map (32MB).** The boot climb (`boot/boot.asm`) must build valid
+page tables before it can enter long mode, and it has not read the memory map at
+that point, so it maps a fixed, safe 32MB with 16 2MB PD entries. This is
+deliberately larger than the kernel needs, to give the C code room to work in
+before it extends the map. Only 4-8M (PD[2]/PD[3]) is user-accessible; the rest is
+kernel-only.
 
-The frame allocator's pool starts at exactly `0x400000` (4M), the same address
-where the ring-3 program's code and stack live (PD[2]/PD[3], 4-8M). To stop the
-allocator from handing out frames that sit on top of the running user program,
-`memory_init()` marks the frames covering 4-8M (`USER_REGION_START` to
-`USER_REGION_END`) as used at init. See
-[decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
+**The C extension (up to real RAM, capped at 1GB).** Once in C,
+`memory_detect_and_map()` (`kernel/memory.c`) reads the Multiboot map, finds the
+highest usable (type 1) physical address, and fills `pd_table` entries from 32M up
+to that address rounded to a 2MB boundary, or to entry 511, whichever is smaller.
+The single `pd_table` is one 4KB page: 512 entries of 2MB reach exactly 1GB, so
+1GB is a hard ceiling. RAM above 1GB is ignored; covering it would need more page
+directories, which is out of scope. See
+[decision 0009](../decisions/0009-read-multiboot-map-extend-identity-map.md).
 
-Be clear about what this does and does not fix:
+**The CR3 flush is mandatory.** The CPU caches address translations in the TLB, so
+the PD entries the extension writes do not take effect until the cache is
+invalidated. `memory_detect_and_map()` reloads CR3 (`mov cr3, cr3`) after writing
+them. This is invisible and easy to miss: skip it and the new high frames read
+back as not-present and fault.
 
-- The pool is 32768 frames of 4096 bytes, so it spans 4M to 132M.
-- The identity map (`boot/boot.asm`) covers 8M. Every frame above 8M has no page
-  table entry.
-- After the reservation, the first free frame is at 8M, which is unmapped. So
-  `alloc_frame()` returns an address that page-faults on first touch, every time.
-- This change fixes "do not hand out frames something else is already using." It
-  does not fix "the frames handed out are not mapped." The allocator remains
-  unusable in practice until the identity map is extended.
+**The extension edits live page tables.** It is safe only because it touches high
+entries (32M and up) exclusively, never the low entries that map the running
+kernel. Modifying a low entry would move the ground under the CPU's own
+instruction fetch.
 
-Both the 8M identity map and the 128M pool are invented numbers, not measured.
-The real fix is to read the Multiboot memory map (which the kernel currently
-discards, since `kernel_main` takes no arguments) and size both from actual RAM.
-That is future work, not a small oversight.
+**The mmap-entry stride gotcha.** Walking the map, the stride between entries is
+`entry->size + sizeof(entry->size)`, not `sizeof(entry)`: the `size` field does
+not count itself. Both walks in `memory.c` (top-of-RAM and reserved-range) advance
+this way. Getting it wrong is a classic Multiboot bug that reads into garbage.
+
+**The pool is sized to match.** The frame pool spans 4M to the measured top of RAM
+(capped at 1GB). `memory_init()` reserves the 4-8M ring-3 region
+(`USER_REGION_START` to `USER_REGION_END`, see
+[decision 0006](../decisions/0006-user-mode-with-separate-pages.md)) and every
+non-usable range the map reports, by walking the map. Because the pool never
+exceeds what the identity map covers, the first free frame `alloc_frame()` returns
+is real, mapped, writable RAM.
+
+**No-map fallback.** If the bootloader provides no memory map (info flags bit 6
+clear), the kernel does not read garbage: it falls back to the fixed 32MB the boot
+map already covers and prints a warning. Under QEMU's built-in Multiboot loader
+the map is always present, so this path does not trigger in practice.
 
 ## Caveat: the two task stacks share one page, with no guard
 

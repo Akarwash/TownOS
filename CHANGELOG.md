@@ -7,6 +7,25 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- Reading the real amount of RAM from the Multiboot memory map and extending the
+  identity map to cover it. `boot/boot.asm` now identity-maps a fixed 32MB (up
+  from 8MB, 16 2MB PD entries; 4-8M stays `PG_USER`, the rest kernel-only),
+  exposes `pd_table` as `global`, and forwards the Multiboot info pointer (left in
+  EBX by the bootloader) to `kernel_main` in RDI. `kernel_main` now takes
+  `uint64_t multiboot_info_addr`. `kernel/multiboot.h` defines the Multiboot 1
+  info and mmap-entry structures (packed; the entry stride is
+  `size + sizeof(size)`, since `size` does not count itself). `kernel/memory.c`
+  (`memory_detect_and_map`) walks the map for the highest usable physical address,
+  fills `pd_table` from 32M up to that address (rounded to 2MB, capped at 1GB, the
+  single PD page's reach), and reloads CR3 to flush the TLB. The frame pool is
+  sized from the same measured RAM, and every non-usable range the map reports is
+  reserved by walking the map, so `alloc_frame()` now returns real, mapped,
+  writable memory. This retires the invented 8MB map and 128MB pool constants and
+  the "allocator returns unmapped addresses" limitation. If the map is absent
+  (flags bit 6 clear), the kernel falls back to the fixed 32MB and warns rather
+  than reading garbage. The boot banner prints the detected RAM. See
+  `docs/decisions/0009-read-multiboot-map-extend-identity-map.md` and
+  `docs/reference/memory-map.md`.
 - A round-robin preemptive scheduler (`kernel/scheduler.c`, `kernel/scheduler.h`).
   The timer IRQ handler now switches between ring-3 tasks by overwriting the
   interrupt frame on the kernel stack in place: the `registers_t` the stub pushed

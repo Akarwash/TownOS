@@ -91,8 +91,12 @@ From power-on to the idle loop:
    [reference/boot-sequence.md](reference/boot-sequence.md).
 3. The 64-bit entry sets `RSP = stack_top` and calls `kernel_main`.
 4. `kernel_main` (`kernel/kernel.c`) runs the init sequence in order:
-   `gdt_init()`, `isr_install()`, `timer_init(100)`, `keyboard_init()`,
-   `memory_init()`, then clears the screen and prints the banner.
+   `gdt_init()`, `isr_install()`, `timer_init(100)`, `keyboard_init()`, clears
+   the screen and prints the banner, then `memory_detect_and_map()` (reads the
+   Multiboot map, extends the identity map to real RAM, flushes the TLB) and
+   `memory_init()` (sizes the frame pool from the detected RAM). The banner
+   reports the detected RAM. See
+   [reference/memory-map.md](reference/memory-map.md).
 5. `kernel_main` calls `task_create` for each of `user_program_a` and
    `user_program_b` (forging a ring-3 `iretq` frame per task), then
    `scheduler_start()`, which enters task 0 via `enter_user_mode`. From here the
@@ -106,9 +110,10 @@ From power-on to the idle loop:
    [reference/user-mode.md](reference/user-mode.md), and
    [reference/syscalls.md](reference/syscalls.md).
 
-`kernel_main` takes no arguments and is not expected to return. Interrupts stay
-enabled across the drop (each task's forged RFLAGS keeps IF set), which is what
-lets the timer preempt a running task and drive the switch.
+`kernel_main` takes the Multiboot info pointer (`boot/boot.asm` forwards EBX in
+RDI) and is not expected to return. Interrupts stay enabled across the drop (each
+task's forged RFLAGS keeps IF set), which is what lets the timer preempt a running
+task and drive the switch.
 
 ## Where to read more
 

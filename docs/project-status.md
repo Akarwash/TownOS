@@ -22,7 +22,10 @@ limitations. It is a factual snapshot, not a roadmap.
 - The PIT timer on IRQ 0 (`kernel/timer.c`) and the PS/2 keyboard on IRQ 1
   (`drivers/keyboard.c`).
 - VGA text output with scrolling and a cursor (`drivers/screen.c`).
-- A bitmap physical frame allocator (`kernel/memory.c`).
+- A bitmap physical frame allocator (`kernel/memory.c`), sized from the real RAM
+  the Multiboot map reports (identity map extended to cover it, up to a 1GB cap),
+  so it hands out real, mapped frames. See
+  [reference/memory-map.md](reference/memory-map.md).
 - The interactive shell (`shell/shell.c`) with `help`, `clear`, `hello`, `tick`.
   (Present and working, but not on the current boot path — see below.)
 - A minimal freestanding libc (`libc/string.c`, `libc/mem.c`).
@@ -133,24 +136,16 @@ one silently corrupts the other.
   [reference/scheduling.md](reference/scheduling.md).
 - **No SMP.** MiniOS assumes a single CPU. It uses the legacy 8259 PIC, not the
   APIC/IO-APIC, and has no per-core state or locking.
-- **8MB identity map.** `boot/boot.asm` identity-maps only the first 8MB. Any
-  physical address above 8MB is unmapped and would fault on access.
-- **The frame allocator is not usable in practice.** `memory_init()` now reserves
-  the 4-8M frames the ring-3 program occupies (its code and stack), so the
-  allocator no longer hands out memory that the running user program lives on.
-  But that is the only fix: the first free frame is now at 8M, above the identity
-  map, so `alloc_frame()` returns an address that page-faults on first touch,
-  every time. Reserving the region fixes "do not hand out frames something else
-  is using"; it does not fix "the frames handed out are not mapped." The pool
-  stays unusable until the identity map is extended. See
-  [reference/memory-map.md](reference/memory-map.md).
-- **Memory sizes are invented, not measured.** Both the 8MB identity map
-  (`boot/boot.asm`) and the 128MB frame pool (`kernel/memory.c`) are hardcoded
-  numbers. Multiboot hands the kernel a memory map describing how much RAM the
-  machine actually has, but `kernel_main` takes no arguments, so the Multiboot
-  info pointer is discarded at boot and the map is ignored. The proper fix is to
-  read that map and size both the identity map and the frame pool from it. This
-  is recorded so it is not mistaken for a small oversight.
+- **1GB identity-map ceiling.** The boot climb (`boot/boot.asm`) maps a fixed
+  32MB, then `kernel/memory.c` reads the Multiboot map and extends the identity
+  map to cover real RAM, capped at 1GB. The cap is real: the single `pd_table` is
+  one 4KB page (512 x 2MB = 1GB), so physical RAM above 1GB is not mapped and is
+  ignored. Lifting it needs more page directories, which is out of scope. The
+  frame pool is sized from the same detected RAM, so `alloc_frame()` now returns
+  real, mapped, writable memory (the old "invented sizes" and "allocator returns
+  unmapped addresses" problems are gone). See
+  [reference/memory-map.md](reference/memory-map.md) and
+  [decisions/0009-read-multiboot-map-extend-identity-map.md](decisions/0009-read-multiboot-map-extend-identity-map.md).
 - **QEMU only.** The kernel has been built and booted under
   `qemu-system-x86_64`. It has not been run on real hardware or other emulators,
   and the `minios.bin` boot path relies on QEMU's built-in Multiboot `-kernel`
