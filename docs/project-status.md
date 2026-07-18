@@ -28,31 +28,33 @@ limitations. It is a factual snapshot, not a roadmap.
 - A drop to ring 3 (`kernel/usermode.c`, `user/user_program.c`): after init,
   `kernel_main` forges an `iretq` frame and runs a small program at CPL 3 in its
   own user-accessible pages (code at 4M, stack at 6-8M), while the kernel's own
-  pages stay ring-0-only. The program executes a privileged instruction and the
-  resulting #GP proves the drop is real. This activates the previously inert user
-  GDT descriptors and `tss.rsp0`. See
-  [reference/user-mode.md](reference/user-mode.md) and
-  [decisions/0006-user-mode-with-separate-pages.md](decisions/0006-user-mode-with-separate-pages.md).
+  pages stay ring-0-only. This activates the previously inert user GDT
+  descriptors and `tss.rsp0`. See [reference/user-mode.md](reference/user-mode.md)
+  and [decisions/0006-user-mode-with-separate-pages.md](decisions/0006-user-mode-with-separate-pages.md).
+- System calls (`kernel/syscall.c`, `include/syscalls.h`): the ring-3 program
+  calls back into the kernel through one `int 0x50` gate, the only DPL 3 gate in
+  the IDT. `SYS_WRITE` prints a string; `SYS_EXIT` halts. The dispatcher switches
+  on RAX and returns its result in RAX; an unknown number is rejected, not fatal.
+  The `SYS_WRITE` pointer check is a stopgap (see limitations below). See
+  [reference/syscalls.md](reference/syscalls.md) and
+  [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
 
 The kernel builds, links into `minios.elf`, is repackaged as `minios.bin`, and
 boots under QEMU. In the current build `kernel_main` hands off to ring 3 as its
-last act (the ring-3 program faults and the kernel halts), so the interactive
-shell — though compiled and working — is not reached. Swapping the
-`enter_user_mode` call back for `shell_init` restores the shell.
-See [building.md](building.md).
+last act (the ring-3 program prints via `SYS_WRITE` and then `SYS_EXIT` halts the
+machine), so the interactive shell — though compiled and working — is not
+reached. Swapping the `enter_user_mode` call back for `shell_init` restores the
+shell. See [building.md](building.md).
 
 ## What was never built
 
 These are absent by design; MiniOS stops at a single-address-space kernel that
 demonstrates a ring-3 drop but does not manage processes.
 
-- **A way back from ring 3.** The kernel can enter ring 3, but the only path
-  back into the kernel is a fault. There is no syscall entry: every IDT gate is
-  DPL 0, so `int N` from ring 3 would itself fault, and no `syscall`/`sysret`
-  MSRs are programmed. Ring-3 code cannot yet *request* anything of the kernel.
-- **Processes.** The ring-3 drop runs one hard-coded program and never returns.
-  There is no notion of a process, no loading, no exit, and no way to run a
-  second user program.
+- **Processes.** The ring-3 drop runs one hard-coded program. There is a
+  `SYS_EXIT` syscall, but with no scheduler and no parent it can only halt the
+  machine, not return to anything. There is no notion of a process, no loading,
+  and no way to run a second user program.
 - **A scheduler.** There is one thread of control: `kernel_main` and the shell.
   The timer counts ticks but never switches tasks.
 - **Per-process paging.** Paging is on (it is required for long mode), but there
@@ -71,12 +73,14 @@ pages; the user GDT descriptors and `tss.rsp0` are now load-bearing. See
 [decisions/0006-user-mode-with-separate-pages.md](decisions/0006-user-mode-with-separate-pages.md).
 The remaining steps build on it.
 
-**System calls.** Ring-3 code runs but can only re-enter the kernel by faulting.
-It needs a controlled doorway. Install one IDT gate at DPL 3 (or wire up the
-`syscall`/`sysret` instructions and the associated MSRs) so user code can request
-kernel services. The dispatch reuses the same registry pattern the interrupt
-handlers already use: a call number selects a handler. This is the point where
-the DPL-0-everywhere policy in the IDT gets its first deliberate exception.
+**System calls.** Done. Ring-3 code re-enters the kernel through one DPL 3 IDT
+gate at `int 0x50` (`kernel/syscall.c`), the first and only deliberate exception
+to the DPL-0-everywhere IDT policy. A call number in RAX selects a handler
+(`SYS_WRITE`, `SYS_EXIT`). See
+[decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
+What remains for a real syscall layer is safe argument validation (see the
+untrusted-pointer limitation below) and more calls, both of which wait on
+processes and address spaces.
 
 **A scheduler.** With more than one thread of control worth running, the timer
 interrupt becomes a preemption point. Save the interrupted `registers_t`, pick
@@ -93,6 +97,16 @@ kernel into something that can safely run untrusted programs.
 
 ## Known limitations
 
+- **Syscall pointer validation is a stopgap, not real.** `SYS_WRITE` takes a
+  pointer from ring 3, which is untrusted (the confused-deputy problem). The
+  current check confirms only that the *start* pointer lies in the ring-3 region
+  (`USER_REGION_START`..`USER_REGION_END`); it does **not** bound the string's
+  length, so a string starting just below `USER_REGION_END` with no NUL still
+  walks off the region into kernel pages. Real validation, checking the whole
+  `[ptr, ptr+len)` range against the caller's mapped pages and capping the
+  length, needs per-process address spaces that do not exist yet. Recorded as a
+  TODO in `kernel/syscall.c`. Do not read the region check as real pointer
+  safety. See [reference/syscalls.md](reference/syscalls.md).
 - **No dynamic memory beyond the frame allocator.** `kernel/memory.c` hands out
   whole 4KB frames. There is no `kmalloc`/`kfree` heap for arbitrary-size
   objects, so kernel data structures are statically sized.

@@ -70,46 +70,28 @@ any level denies ring-3 access. The leaf is the real gate.
 
 ## How it is proven
 
-The ring-3 program (`user/user_program.c`) does two things:
+The drop was first proven by making the ring-3 program execute `cli`, a
+CPL-0-only instruction, and observing the #GP it raises at `cpl=3` with
+`CS=0x1B`; an isolation cross-check pointing a ring-3 write at the kernel page
+`0x100000` produced a #PF with the user error-code bit set and `CR2=0x100000`.
+That verification, with the exact QEMU `-d int` output, is recorded in
+[decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
 
-1. Writes a marker to a local variable, which lands on its ring-3 stack. This
-   proves it is executing in its own pages.
-2. Executes `cli`. That instruction is legal only at CPL 0; from ring 3 it
-   raises a general protection fault (#GP, vector 0x0D). **The fault is the
-   success signal** — a correct run never returns from `cli`.
-
-Under QEMU with `-d int`, a correct run logs exactly:
-
-```
-v=0d e=0000 i=0 cpl=3 IP=001b:0000000000400019 ... env->regs[R_EAX]=0000000000001234
-```
-
-Reading it: `v=0d` is the #GP, `e=0000` its (empty) error code, `cpl=3` proves
-ring 3, `IP=001b:...` shows CS = 0x1B with RIP inside `user_program`, and
-`EAX=0x1234` is the stack marker, so the write happened. `check_exception old:
-0xffffffff new 0xd` confirms it is a single fault, not a double/triple cascade.
-
-### Isolation cross-check
-
-Temporarily pointing the program's write at the kernel page `0x100000` instead
-produces:
-
-```
-v=0e e=0007 i=0 cpl=3 ... CR2=0000000000100000
-```
-
-`v=0e` is a page fault; error code `0x7` decodes as present + write + **user**
-(bit 2), and `CR2` is the kernel address the ring-3 write was denied. This is the
-leaf-level user bit doing its job. The check is not part of the shipped program;
-it is reverted to the `cli` test after confirming the behaviour.
+The shipped program (`user/user_program.c`) no longer faults on purpose. Now that
+a syscall gate exists, it demonstrates the drop the constructive way: it runs at
+CPL 3, calls the kernel twice through `int 0x50` (`SYS_WRITE`), and asks the
+kernel to halt (`SYS_EXIT`). Under QEMU with `-d int`, vector `0x50` fires three
+times, each at `cpl=3`, with no #GP and no #PF; the two strings appear on screen,
+printed by the kernel on the ring-3 program's behalf. That a ring-3 pointer into
+`.user_rodata` (4-8M) is accepted while a kernel address is rejected is the same
+leaf-level user-bit boundary, now exercised through the syscall path instead of a
+fault. See [syscalls.md](syscalls.md).
 
 ## What this is not
 
-- **Not a syscall path.** There is no controlled way back into the kernel yet;
-  ring 3 re-enters the kernel only by faulting. A syscall gate (one DPL-3 IDT
-  entry, or `syscall`/`sysret`) is the next step.
-- **Not multitasking.** One ring-3 program runs, faults, and the kernel halts.
-  Running a shell *and* user programs needs a scheduler.
+- **Not multitasking.** One ring-3 program runs, calls a couple of syscalls, and
+  `SYS_EXIT` halts the machine. Running a shell *and* user programs needs a
+  scheduler.
 - **Not per-process isolation.** There is a single shared address space. Every
   process would need its own page tables and a `CR3` switch on context switch.
 

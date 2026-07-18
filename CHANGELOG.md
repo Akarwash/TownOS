@@ -7,13 +7,29 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- System calls through a single `int 0x50` gate. `kernel/isr.c` installs one
+  DPL 3 IDT gate at `SYSCALL_VECTOR` (0x50) with a new `GATE_USER` (0xEE) flags
+  byte; every other gate stays DPL 0, so this is the only vector ring-3 code can
+  raise on purpose. `kernel/isr_stubs.asm` adds `syscall_stub` (mirrors
+  `ISR_NOERR`: dummy error code + vector, then a shared tail that calls the C
+  dispatcher). `kernel/syscall.c` (`syscall_handler`) switches on RAX and returns
+  its result in RAX: `SYS_WRITE` prints a NUL-terminated string, `SYS_EXIT` halts;
+  an unknown number is reported and rejected with `-1` rather than faulting. The
+  ABI numbers live in a deliberately standalone `include/syscalls.h` (numbers
+  only, no kernel code) so a ring-3 program can compile against them.
+- `.user_rodata` section in `linker.ld`, placed in the `:user` `PT_LOAD` segment
+  (4-8M) so the ring-3 program's string literals land in user-accessible pages
+  instead of `.rodata` at 1M (kernel pages).
+- `docs/decisions/0007-syscalls-via-int-0x50.md` and `docs/reference/syscalls.md`
+  documenting the gate, the calling convention, the two calls, and the stopgap
+  pointer check.
 - Ring-3 (CPL 3) user mode. `kernel/usermode.c` (`enter_user_mode`) forges the
   five-value `iretq` frame (SS, RSP, RFLAGS, CS, RIP) and returns into ring 3
   with the user selectors (`GDT_SELECTOR_USER_CODE` 0x1B, `GDT_SELECTOR_USER_DATA`
   0x23) and IF kept set. `user/user_program.c` is a self-contained ring-3 program
-  in a new `.user_text` section that writes its stack, then runs `cli` to force a
-  #GP as proof it is really CPL 3. `kernel/kernel.c` drops to it after init. This
-  activates the previously inert user GDT descriptors and `tss.rsp0`.
+  in a new `.user_text` section (it calls the kernel through `int 0x50`, see the
+  syscall entry above). `kernel/kernel.c` drops to it after init. This activates
+  the previously inert user GDT descriptors and `tss.rsp0`.
 - `GDT_SELECTOR_*` constants in `kernel/gdt.h` (kernel/user code/data, TSS) as the
   single source of truth for selector values; `kernel/gdt.c` loads the TSS by name.
 - `PG_USER` (page user/US bit) in `boot/boot.asm`. `PML4[0]`/`PDPT[0]` are made
@@ -30,7 +46,7 @@ All notable changes to MiniOS are recorded here. The format is based on
   number: all 32 named CPU exceptions, `PIC_MASTER_VECTOR_BASE` (0x40) and
   `PIC_SLAVE_VECTOR_BASE` (0x48), every IRQ vector derived from the base
   (`IRQ_TIMER` = 0x40, `IRQ_KEYBOARD` = 0x41, through `IRQ_15`), and
-  `SYSCALL_VECTOR` (0x50, reserved, not wired up).
+  `SYSCALL_VECTOR` (0x50, now the live syscall gate).
 - Diagnostic exception handlers in `kernel/isr.c`: `isr_handler` now decodes the
   fault instead of printing a bare number. Page faults print the faulting CR2
   address and decoded error-code bits (read/write, present, user/kernel,
@@ -54,10 +70,10 @@ All notable changes to MiniOS are recorded here. The format is based on
   `docs/reference/memory-map.md` and `docs/project-status.md` updated.
 - `kernel_main` now hands off to ring 3 (`enter_user_mode`) as its last act
   instead of calling `shell_init`; the shell is still compiled and working but is
-  off the boot path (the ring-3 program faults and the kernel halts before the
-  idle loop). `docs/architecture.md`, `docs/project-status.md`, and
-  `docs/reference/memory-map.md` updated for the ring-3 region (and its overlap
-  with the frame allocator pool at 4M).
+  off the boot path (the ring-3 program prints via `SYS_WRITE` and then `SYS_EXIT`
+  halts the machine before the idle loop). `docs/architecture.md`,
+  `docs/project-status.md`, and `docs/reference/memory-map.md` updated for the
+  ring-3 region (and its overlap with the frame allocator pool at 4M).
 - Moved hardware IRQs off the conventional 0x20 base to a self-describing map:
   CPU exceptions at 0x00-0x1F, hardware IRQs at 0x40-0x4F, syscalls reserved at
   0x50-0x5F, so the high nibble names the category in a fault log. `pic_remap()`
