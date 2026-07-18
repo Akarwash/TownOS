@@ -22,10 +22,15 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 
 ## Decisions
 
-- [0001 — Target x86-64 rather than i686](decisions/0001-target-x86-64.md)
-- [0002 — Use 2MB pages and identity-map the first 8MB](decisions/0002-2mb-pages-and-8mb-identity-map.md)
-- [0003 — Bootstrap GDT separate from the kernel GDT](decisions/0003-bootstrap-gdt-separate-from-kernel-gdt.md)
-- [0004 — Build the TSS before user mode exists](decisions/0004-build-tss-before-user-mode.md)
+- [0001 — Target x86-64 rather than i686](decisions/0001-target-x86-64.md) — Build for 64-bit long mode from the start rather than 32-bit i686.
+- [0002 — Use 2MB pages and identity-map the first 8MB](decisions/0002-2mb-pages-and-8mb-identity-map.md) — Identity-map the first 8MB with 2MB pages, so only three page-table levels are needed (no PT).
+- [0003 — Bootstrap GDT in boot.asm is separate from the kernel GDT](decisions/0003-bootstrap-gdt-separate-from-kernel-gdt.md) — A throwaway bootstrap GDT makes the far jump legal; C installs the real kernel GDT later, and the two stay separate.
+- [0004 — Build the TSS now, before user mode exists](decisions/0004-build-tss-before-user-mode.md) — Build the TSS (descriptor, ring-0 stack, `ltr`) now, before user mode needs it.
+- [0005 — A self-describing interrupt vector map](decisions/0005-self-describing-vector-map.md) — Assign vectors by category (exceptions 0x00-0x1F, IRQs 0x40-0x4F, syscalls 0x50-0x5F), with `include/vectors.h` the single source of truth.
+- [0006 — Enter ring 3 with a separate user page region](decisions/0006-user-mode-with-separate-pages.md) — Drop to ring 3 through a forged `iretq` frame, marking the 4-8M pages user while kernel pages stay ring-0-only.
+- [0007 — System calls via a single `int 0x50` gate](decisions/0007-syscalls-via-int-0x50.md) — Route every syscall through one DPL 3 `int 0x50` gate (the only user-reachable gate); RAX carries the call number.
+- [0008 — A round-robin preemptive scheduler](decisions/0008-round-robin-preemptive-scheduler.md) — Preempt on the timer tick by overwriting the interrupt frame in place, with a fixed `.bss` task table of four.
+- [0009 — Read the Multiboot memory map and extend the identity map](decisions/0009-read-multiboot-map-extend-identity-map.md) — Read the Multiboot map, extend the identity map to real RAM (capped at 1GB), and size the frame pool from it.
 
 ## Status
 
