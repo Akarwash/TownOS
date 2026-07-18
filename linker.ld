@@ -47,4 +47,16 @@ SECTIONS {
         *(.user_text)
         _user_text_end = .;
     } :user
+
+    /* Read-only data the ring-3 program needs to reach (its string literals).
+     * Kept in the :user segment so it lands in the 4-8M user region, inside the
+     * PG_USER pages, where a ring-3 pointer is allowed to point. If these bytes
+     * fell into the kernel's .rodata at 1M instead, the syscall bounds check
+     * would reject any pointer into them, and the CPU would fault a ring-3 read
+     * of them anyway. */
+    .user_rodata : {
+        _user_rodata_start = .;
+        *(.user_rodata)
+        _user_rodata_end = .;
+    } :user
 }

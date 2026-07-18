@@ -18,10 +18,15 @@ extern void irq4(void);  extern void irq5(void);  extern void irq6(void);  exter
 extern void irq8(void);  extern void irq9(void);  extern void irq10(void); extern void irq11(void);
 extern void irq12(void); extern void irq13(void); extern void irq14(void); extern void irq15(void);
 
+// The single syscall entry point (kernel/isr_stubs.asm), named by the lone DPL 3
+// gate installed below at SYSCALL_VECTOR.
+extern void syscall_stub(void);
+
 static isr_handler_t interrupt_handlers[256];
 
-#define KCODE 0x08      // kernel code segment selector
-#define GATE  0x8E      // present, ring 0, 64-bit interrupt gate
+#define KCODE     0x08  // kernel code segment selector
+#define GATE      0x8E  // present, ring 0, 64-bit interrupt gate
+#define GATE_USER 0xEE  // present, ring 3, 64-bit interrupt gate (0x8E | DPL 3)
 
 void isr_install(void) {
     // Zero the IDT, remap the PIC, and load the IDT register first.
@@ -79,6 +84,17 @@ void isr_install(void) {
     idt_set_entry(PIC_MASTER_VECTOR_BASE + 13, (uint64_t)irq13, KCODE, GATE);
     idt_set_entry(PIC_MASTER_VECTOR_BASE + 14, (uint64_t)irq14, KCODE, GATE);
     idt_set_entry(PIC_MASTER_VECTOR_BASE + 15, (uint64_t)irq15, KCODE, GATE);
+
+    // The one and only DPL 3 gate. DPL on a gate is the lowest privilege level
+    // allowed to reach it through `int N`; every gate above is DPL 0, so ring 3
+    // cannot forge a fault or an IRQ. Only SYSCALL_VECTOR (0x50) is opened to
+    // ring 3, and deliberately: a DPL 3 gate on vector 0x0E would let a user
+    // program raise `int $0x0E` and fake a page fault, and one on 0x40 would let
+    // it fake a timer tick, both feeding the kernel lies about hardware state.
+    // The syscall gate stays an interrupt gate (GATE_USER carries gate type 0x0E,
+    // not the trap type 0x0F), so the CPU clears IF on entry and a syscall cannot
+    // be interrupted, including by another syscall; they do not nest.
+    idt_set_entry(SYSCALL_VECTOR, (uint64_t)syscall_stub, KCODE, GATE_USER);
 
     // Handlers are in place; now enable hardware interrupts.
     __asm__ __volatile__("sti");

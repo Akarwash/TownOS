@@ -12,8 +12,9 @@ physical address.
 | Real-mode / low memory | `0x000000` | up to 1M | (hardware) | Not used by MiniOS, but inside the identity map. |
 | VGA text buffer | `0x0B8000` | 4000 bytes (80x25x2) | `drivers/screen.h` (`VIDEO_ADDRESS`) | Memory-mapped text output. Inside the identity map. |
 | Kernel image load address | `0x100000` (1M) | image size | `linker.ld` (`. = 1M`) | Sections load here in order: `.multiboot`, `.text`, `.rodata`, `.data`, `.bss`. Ring-0 only (PD[0]/PD[1] have no user bit). |
-| Ring-3 program code (`.user_text`) | `0x400000` (4M) | ~29 bytes | `linker.ld`, `user/user_program.c` | User-accessible (PD[2], user bit set). Its own `PT_LOAD` segment so the gap from the kernel is not padded into the file. |
-| Ring-3 program stack | `0x600000` - `0x7FFFFF` | 2 MB page | `boot/boot.asm` (PD[3]), `USER_STACK_TOP` = `0x800000` | User-accessible (PD[3], user bit set). Stack grows down from `0x800000`. |
+| Ring-3 program code (`.user_text`) | `0x400000` (4M) | two small functions | `linker.ld`, `user/user_program.c` | User-accessible (PD[2], user bit set). Holds both `user_program_a` and `user_program_b`. Its own `PT_LOAD` segment so the gap from the kernel is not padded into the file. |
+| Task 0 stack (`user_program_a`) | `0x600000` - `0x6FFFFF` | 1 MB | `kernel/scheduler.h` (`TASK0_STACK_TOP` = `0x700000`) | Lower half of PD[3]. Grows down from `0x700000`. |
+| Task 1 stack (`user_program_b`) | `0x700000` - `0x7FFFFF` | 1 MB | `kernel/scheduler.h` (`TASK1_STACK_TOP` = `0x800000`) | Upper half of PD[3]. Grows down from `0x800000`. |
 | Identity-mapped region | `0x000000` - `0x7FFFFF` | 8 MB | `boot/boot.asm` (4 x 2MB PD entries) | The only mapped region. PD[0]/PD[1] kernel-only; PD[2]/PD[3] user-accessible. Covers the VGA buffer, the kernel, and the ring-3 pages. |
 | Frame allocator pool | `0x400000` (4M) - `0x8400000` (132M) | 128 MB | `kernel/memory.c` (`MEMORY_START`, `MAX_FRAMES`) | Bitmap tracks 32768 x 4KB frames starting at 4M. The 4-8M frames are reserved at init (see caveats below), so the first free frame is at 8M. |
 
@@ -74,6 +75,18 @@ Both the 8M identity map and the 128M pool are invented numbers, not measured.
 The real fix is to read the Multiboot memory map (which the kernel currently
 discards, since `kernel_main` takes no arguments) and size both from actual RAM.
 That is future work, not a small oversight.
+
+## Caveat: the two task stacks share one page, with no guard
+
+The scheduler runs two ring-3 tasks (see [scheduling.md](scheduling.md)), and
+each needs its own stack, but there is only one PG_USER stack page: the 2MB at
+6-8M (PD[3]). It is split in half by hand, `TASK0_STACK_TOP` = `0x700000` (task 0
+gets 6-7M) and `TASK1_STACK_TOP` = `0x800000` (task 1 gets 7-8M), each growing
+down from its top. There is no guard page between the halves at `0x700000`: a task
+that overflows its 1MB stack scribbles straight into the other task's stack, and
+nothing catches it. This is a stopgap, hard-coded because there is no allocator to
+hand out a stack per task. See
+[decision 0008](../decisions/0008-round-robin-preemptive-scheduler.md).
 
 ## Related
 

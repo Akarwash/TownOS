@@ -13,7 +13,8 @@ documents what is actually installed and why.
 
 1. calls `idt_init()` (`kernel/idt.c`), which zeroes the table, remaps the PIC,
    and loads the IDT register with `lidt`,
-2. installs all 48 gates with `idt_set_entry()`,
+2. installs the 48 exception and IRQ gates with `idt_set_entry()`, then the one
+   syscall gate at `SYSCALL_VECTOR` (0x50),
 3. runs `sti` to enable hardware interrupts.
 
 The GDT must be installed before the IDT: a gate names a code selector, and the
@@ -34,7 +35,8 @@ truth; no bare vector number appears elsewhere in the tree.
 |---------|--------|---------|
 | 0x00 to 0x1F | CPU | exceptions (divide error, page fault, general protection, ...) reserved by Intel |
 | 0x40 to 0x4F | PIC | hardware IRQs 0 to 15, remapped off the reserved range |
-| 0x50 to 0x5F | syscalls | reserved (`SYSCALL_VECTOR` = 0x50), not wired up yet |
+| 0x50 | syscalls | `SYSCALL_VECTOR`, the one DPL 3 gate, ring-3 syscall doorway (see [syscalls.md](syscalls.md)) |
+| 0x51 to 0x5F | syscalls | reserved for future syscall entry points, not wired up yet |
 | all others | unused | present in the table but zeroed; no handler installed |
 
 IRQ remapping matters. By default the 8259 PIC delivers its IRQs as interrupt
@@ -86,15 +88,21 @@ gates everywhere so a handler is never interrupted mid-way, which keeps the
 handler and the shared dispatch state simple. The counterpart `iretq` at the end
 of each stub restores the saved flags, re-enabling interrupts on return.
 
-## Why every gate is DPL 0
+## Why every gate is DPL 0, except one
 
 The DPL in the flags byte is the lowest privilege level allowed to reach the gate
-through a software `int N` instruction. All 48 gates are DPL 0. A DPL 3 gate
-would let ring-3 user code execute, say, `int 14` to forge a page fault or
-`int 0x40` to fake a timer tick, corrupting kernel state at will. Hardware
-interrupts and CPU exceptions ignore the DPL, so DPL 0 costs nothing. Only a
-future syscall vector would deliberately want DPL 3, so user code could enter the
-kernel through that one gate on purpose.
+through a software `int N` instruction. All 48 exception and IRQ gates are DPL 0.
+A DPL 3 gate would let ring-3 user code execute, say, `int 14` to forge a page
+fault or `int 0x40` to fake a timer tick, corrupting kernel state at will.
+Hardware interrupts and CPU exceptions ignore the DPL, so DPL 0 costs nothing.
+
+The single deliberate exception is `SYSCALL_VECTOR` (0x50), installed with
+`GATE_USER` (0xEE) = present, **DPL 3**, 64-bit interrupt gate. That is the whole
+point of it: ring-3 code enters the kernel through that one gate on purpose, with
+`int 0x50`. It stays an *interrupt* gate (not a trap gate), so IF is still cleared
+on entry and a syscall does not nest. Every other vector stays DPL 0 so a user
+program cannot forge a fault or an IRQ. See [syscalls.md](syscalls.md) and
+[decision 0007](../decisions/0007-syscalls-via-int-0x50.md).
 
 ## Error-code vectors
 
@@ -128,6 +136,12 @@ so that after the final `push rdi` the stack pointer is a valid `registers_t*`.
 This coupling between the assembly and the struct is invisible to the compiler,
 so both `kernel/isr_stubs.asm` and `kernel/isr.h` carry a comment warning that
 they must change together.
+
+The syscall path adds a 49th entry point, `syscall_stub`, with the identical
+shape: because a software `int 0x50` pushes no error code, it mirrors `ISR_NOERR`
+(dummy 0 then the vector number), then its own tail calls `syscall_handler`. No
+new stack layout is introduced; the same `registers_t` frame describes it. See
+[syscalls.md](syscalls.md).
 
 ## Dispatch and EOI
 

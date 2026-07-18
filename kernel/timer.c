@@ -1,5 +1,6 @@
 #include "timer.h"
 #include "isr.h"
+#include "scheduler.h"
 #include "../drivers/ports.h"
 #include "../include/vectors.h"
 
@@ -10,8 +11,10 @@
 static volatile uint32_t tick = 0;
 
 static void timer_callback(registers_t *regs) {
-    (void)regs;
     tick++;
+    // Every tick is a preemption point. schedule() may overwrite *regs in place
+    // to redirect the stub's iretq into a different task (see kernel/scheduler.c).
+    schedule(regs);
 }
 
 uint32_t get_tick(void) {

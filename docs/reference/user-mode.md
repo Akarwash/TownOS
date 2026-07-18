@@ -43,12 +43,15 @@ segment registers (DS/ES/FS/GS) are pointed at the ring-3 data selector first;
 long mode largely ignores them for addressing, but leaving ring-0 selectors
 loaded across the drop is untidy.
 
-`RFLAGS = 0x202` keeps the interrupt flag set. This is not optional: MiniOS has
-no scheduler, so if ring 3 ran with interrupts masked the timer and keyboard
-would go dead and the machine would look wedged.
+`RFLAGS = 0x202` keeps the interrupt flag set. This is not optional: if ring 3 ran
+with interrupts masked the timer and keyboard would go dead, and (now that a
+scheduler exists) the running task would never be preempted, owning the machine
+forever. The same 0x202 is what `task_create` forges into every task's saved
+frame. See [scheduling.md](scheduling.md).
 
-`enter_user_mode` does not return. In the current build it is the last thing
-`kernel_main` does.
+`enter_user_mode` does not return. It is still the path into ring 3, now invoked
+by `scheduler_start` (`kernel/scheduler.c`) to enter task 0; every later entry
+into a task goes through the scheduler restoring its saved frame instead.
 
 ## Why the isolation holds
 
@@ -70,48 +73,33 @@ any level denies ring-3 access. The leaf is the real gate.
 
 ## How it is proven
 
-The ring-3 program (`user/user_program.c`) does two things:
+The drop was first proven by making the ring-3 program execute `cli`, a
+CPL-0-only instruction, and observing the #GP it raises at `cpl=3` with
+`CS=0x1B`; an isolation cross-check pointing a ring-3 write at the kernel page
+`0x100000` produced a #PF with the user error-code bit set and `CR2=0x100000`.
+That verification, with the exact QEMU `-d int` output, is recorded in
+[decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
 
-1. Writes a marker to a local variable, which lands on its ring-3 stack. This
-   proves it is executing in its own pages.
-2. Executes `cli`. That instruction is legal only at CPL 0; from ring 3 it
-   raises a general protection fault (#GP, vector 0x0D). **The fault is the
-   success signal** — a correct run never returns from `cli`.
-
-Under QEMU with `-d int`, a correct run logs exactly:
-
-```
-v=0d e=0000 i=0 cpl=3 IP=001b:0000000000400019 ... env->regs[R_EAX]=0000000000001234
-```
-
-Reading it: `v=0d` is the #GP, `e=0000` its (empty) error code, `cpl=3` proves
-ring 3, `IP=001b:...` shows CS = 0x1B with RIP inside `user_program`, and
-`EAX=0x1234` is the stack marker, so the write happened. `check_exception old:
-0xffffffff new 0xd` confirms it is a single fault, not a double/triple cascade.
-
-### Isolation cross-check
-
-Temporarily pointing the program's write at the kernel page `0x100000` instead
-produces:
-
-```
-v=0e e=0007 i=0 cpl=3 ... CR2=0000000000100000
-```
-
-`v=0e` is a page fault; error code `0x7` decodes as present + write + **user**
-(bit 2), and `CR2` is the kernel address the ring-3 write was denied. This is the
-leaf-level user bit doing its job. The check is not part of the shipped program;
-it is reverted to the `cli` test after confirming the behaviour.
+The shipped programs (`user/user_program.c`) no longer fault on purpose. Now that
+a syscall gate and a scheduler exist, they demonstrate the drop the constructive
+way: two of them run at CPL 3 and call the kernel through `int 0x50` (`SYS_WRITE`)
+in a loop, and the scheduler switches between them on the timer tick. Under QEMU
+with `-d int`, vector `0x50` fires from both tasks (two distinct RIPs on two
+distinct stacks), each at `cpl=3`, with no #GP and no #PF; the two strings
+interleave on screen, printed by the kernel on the ring-3 programs' behalf. That a
+ring-3 pointer into `.user_rodata` (4-8M) is accepted while a kernel address is
+rejected is the same leaf-level user-bit boundary, now exercised through the
+syscall path instead of a fault. See [syscalls.md](syscalls.md) and
+[scheduling.md](scheduling.md).
 
 ## What this is not
 
-- **Not a syscall path.** There is no controlled way back into the kernel yet;
-  ring 3 re-enters the kernel only by faulting. A syscall gate (one DPL-3 IDT
-  entry, or `syscall`/`sysret`) is the next step.
-- **Not multitasking.** One ring-3 program runs, faults, and the kernel halts.
-  Running a shell *and* user programs needs a scheduler.
-- **Not per-process isolation.** There is a single shared address space. Every
-  process would need its own page tables and a `CR3` switch on context switch.
+- **Not full multitasking.** Two hard-coded ring-3 tasks are preempted round-robin
+  by the timer (see [scheduling.md](scheduling.md)), but there is no process, no
+  program loading, and a fixed table of four tasks.
+- **Not per-process isolation.** There is a single shared address space; the two
+  tasks even share one stack page, split in half. Real isolation needs per-process
+  page tables and a `CR3` switch on context switch.
 
 ## Related
 
