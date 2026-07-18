@@ -12,9 +12,8 @@ physical address.
 | Real-mode / low memory | `0x000000` | up to 1M | (hardware) | Not used by MiniOS, but inside the identity map. |
 | VGA text buffer | `0x0B8000` | 4000 bytes (80x25x2) | `drivers/screen.h` (`VIDEO_ADDRESS`) | Memory-mapped text output. Inside the identity map. |
 | Kernel image load address | `0x100000` (1M) | image size | `linker.ld` (`. = 1M`) | Sections load here in order: `.multiboot`, `.text`, `.rodata`, `.data`, `.bss`. Ring-0 only (PD[0]/PD[1] have no user bit). |
-| Ring-3 program code (`.user_text`) | `0x400000` (4M) | two small functions | `linker.ld`, `user/user_program.c` | User-accessible (PD[2], user bit set). Holds both `user_program_a` and `user_program_b`. Its own `PT_LOAD` segment so the gap from the kernel is not padded into the file. |
-| Task 0 stack (`user_program_a`) | `0x600000` - `0x6FFFFF` | 1 MB | `kernel/scheduler.h` (`TASK0_STACK_TOP` = `0x700000`) | Lower half of PD[3]. Grows down from `0x700000`. |
-| Task 1 stack (`user_program_b`) | `0x700000` - `0x7FFFFF` | 1 MB | `kernel/scheduler.h` (`TASK1_STACK_TOP` = `0x800000`) | Upper half of PD[3]. Grows down from `0x800000`. |
+| Ring-3 program code (`.user_text`) | `0x400000` (4M) | three small functions | `linker.ld`, `user/user_program.c` | User-accessible (PD[2], user bit set). Holds `user_program_a`, `_b`, and `_c`. Its own `PT_LOAD` segment so the gap from the kernel is not padded into the file. |
+| User stack region (sub-allocated) | `0x600000` - `0x7FFFFF` | 2 MB | `kernel/scheduler.c` (`USER_STACK_REGION_START`/`_END`, `USER_STACK_SIZE`) | All of PD[3]. A bump allocator hands out 256KB (`USER_STACK_SIZE`) slices, one per task, each growing down from its top. 8 slices fit; today's three tasks take the first three (tops `0x640000`, `0x680000`, `0x6c0000`). No guard pages between slices. |
 | Boot identity map (fixed) | `0x000000` - `0x1FFFFFF` | 32 MB | `boot/boot.asm` (16 x 2MB PD entries) | Built by the boot climb with no dependency on the memory map. PD[0]/PD[1] and PD[4]/PD[15] kernel-only; PD[2]/PD[3] (4-8M) user-accessible. Covers the VGA buffer, the kernel, and the ring-3 pages, with headroom for C to extend. |
 | Identity map extension (C) | `0x2000000` (32M) - top of RAM | up to 1 GB | `kernel/memory.c` (`memory_detect_and_map`) | Filled from the Multiboot map: entries from 32M up to the real top of usable RAM, rounded to 2MB, capped at 1GB (the single PD page's reach). Kernel-only. CR3 is reloaded afterwards to flush the TLB. |
 | Frame allocator pool | `0x400000` (4M) - top of RAM | up to ~1 GB | `kernel/memory.c` (`MEMORY_START`, real top of RAM) | Bitmap tracks 4KB frames from 4M to the measured top of RAM (capped at 1GB). The 4-8M frames and every non-usable range the map reports are reserved at init, so the first free frame is real, mapped RAM. |
@@ -91,16 +90,21 @@ clear), the kernel does not read garbage: it falls back to the fixed 32MB the bo
 map already covers and prints a warning. Under QEMU's built-in Multiboot loader
 the map is always present, so this path does not trigger in practice.
 
-## Caveat: the two task stacks share one page, with no guard
+## Caveat: all task stacks share one page, with no guard
 
-The scheduler runs two ring-3 tasks (see [scheduling.md](scheduling.md)), and
+The scheduler runs several ring-3 tasks (see [scheduling.md](scheduling.md)), and
 each needs its own stack, but there is only one PG_USER stack page: the 2MB at
-6-8M (PD[3]). It is split in half by hand, `TASK0_STACK_TOP` = `0x700000` (task 0
-gets 6-7M) and `TASK1_STACK_TOP` = `0x800000` (task 1 gets 7-8M), each growing
-down from its top. There is no guard page between the halves at `0x700000`: a task
-that overflows its 1MB stack scribbles straight into the other task's stack, and
-nothing catches it. This is a stopgap, hard-coded because there is no allocator to
-hand out a stack per task. See
+6-8M (PD[3]). A bump allocator (`alloc_user_stack` in `kernel/scheduler.c`) hands
+out 256KB (`USER_STACK_SIZE`) slices of it, one per task, each growing down from
+its top, so 8 stacks fit. This replaced the earlier hand-carved split into two
+1MB halves, but the underlying limit is the same and unchanged in kind: every
+stack still shares this one fixed region, and there are no guard pages between
+slices, so a task that overflows its 256KB stack scribbles straight into a
+neighbour's, and nothing catches it. The stacks cannot move to the kernel heap:
+`kmalloc` returns frame-pool pages with no PG_USER bit, so a ring-3 push there
+would fault. The real fix (each process getting its own address space) needs
+per-process paging. See
+[decision 0011](../decisions/0011-dynamic-tasks-and-stacks.md) and
 [decision 0008](../decisions/0008-round-robin-preemptive-scheduler.md).
 
 ## Related

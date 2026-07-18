@@ -7,6 +7,29 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- Dynamic tasks and per-task user stacks in the scheduler (`kernel/scheduler.c`,
+  `kernel/scheduler.h`). Task structs are now heap-allocated: `task_create` calls
+  `kmalloc(sizeof(task_t))` and stores the pointer in `task_t *tasks[MAX_TASKS_LIMIT]`
+  (a flat pointer array, cap 64, arbitrary), retiring the fixed `.bss`
+  `task_t[MAX_TASKS]` array of four that existed only for lack of a heap. User
+  stacks are handed out by a new bump allocator (`alloc_user_stack`) that carves
+  fixed 256KB (`USER_STACK_SIZE`) slices from the one PG_USER stack region
+  (`0x600000`-`0x800000`, 8 slices), replacing the two hardcoded stack tops
+  (`TASK0_STACK_TOP`/`TASK1_STACK_TOP`); `task_create` no longer takes a
+  `stack_top` argument. User stacks deliberately do NOT come from the kernel heap:
+  `kmalloc` returns frame-pool pages with no PG_USER bit, so a ring-3 push there
+  would fault. A third ring-3 program (`user_program_c`, prints "C") was added and
+  all three are created in `kernel_main` to exercise the dynamic path. The
+  switching logic in `schedule()` is unchanged (only indexing: `tasks[i].regs`
+  became `tasks[i]->regs`, and the round-robin walk is bounded by `num_tasks`).
+  The task-struct ceiling is gone; the user-stack region remains a hard ceiling
+  (no guard pages, one shared region) until per-process paging, marked
+  `TODO(per-process-paging)`. Verified under QEMU with `-d int`: the syscall
+  vector fires from three distinct user RIPs (`0x40002b`, `0x400083`, `0x4000db`),
+  each at `cpl=3` on a distinct stack, with the timer still firing and zero page
+  or GP faults; the three programs interleave "ABC" on screen forever. See
+  `docs/decisions/0011-dynamic-tasks-and-stacks.md`,
+  `docs/reference/scheduling.md`, and `docs/reference/memory-map.md`.
 - A kernel heap, `kmalloc`/`kfree` (`kernel/heap.c`, `kernel/heap.h`), ported from
   the CMSC216 p5 `el_malloc`: an explicit free list with header/footer boundary
   tags, first-fit allocation, block splitting, and coalescing with the free

@@ -33,6 +33,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 - [0008 — A round-robin preemptive scheduler](decisions/0008-round-robin-preemptive-scheduler.md) — Preempt on the timer tick by overwriting the interrupt frame in place, with a fixed `.bss` task table of four.
 - [0009 — Read the Multiboot memory map and extend the identity map](decisions/0009-read-multiboot-map-extend-identity-map.md) — Read the Multiboot map, extend the identity map to real RAM (capped at 1GB), and size the frame pool from it.
 - [0010 — Port the p5 explicit-free-list allocator as the kernel heap](decisions/0010-kernel-heap-ported-from-p5.md) — Port the CMSC216 p5 `el_malloc` (boundary tags, coalescing) as `kmalloc`/`kfree`, swapping `mmap` for `alloc_frames_contiguous` and adding an interrupt guard.
+- [0011 — Heap-allocate task structs and bump-allocate user stacks](decisions/0011-dynamic-tasks-and-stacks.md) — Retire the fixed four-task array (`kmalloc` each `task_t`) and the two hardcoded stacks (bump-allocate 256KB slices of the user region); the stack ceiling remains until per-process paging.
 
 ## Status
 
