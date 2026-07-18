@@ -7,12 +7,9 @@
 #define MEMORY_START  0x400000              // 4 MB
 #define MAX_FRAMES    32768                 // covers 128 MB from MEMORY_START
 
-// The ring-3 program's code (4-6M) and stack (6-8M) physically occupy the low
-// end of the pool. See boot/boot.asm (PD[2]/PD[3]) and user/user_program.c.
-// These frames must be reserved at init so the allocator never hands out memory
-// that the running user program already lives on.
-#define USER_REGION_START  0x400000         // 4 MB, ring-3 code (PD[2])
-#define USER_REGION_END    0x800000         // 8 MB, top of ring-3 stack (PD[3])
+// USER_REGION_START / USER_REGION_END (the 4-8M ring-3 code+stack region the
+// loop in memory_init reserves) now live in memory.h, so the syscall layer can
+// reuse them to bound-check untrusted ring-3 pointers.
 
 // TODO: both the 8M identity map (boot/boot.asm) and the 128M pool size above
 // are invented constants, not measured. Multiboot hands the kernel a memory map
