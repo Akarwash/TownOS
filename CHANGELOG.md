@@ -175,7 +175,7 @@ under QEMU, with the timer and keyboard driving interrupts.
   `qemu-system-x86_64` 11.0.0).
 - Project documentation under `docs/`: architecture, building, reference pages
   (boot sequence, memory map, GDT/TSS), and architecture decision records.
-- Root `CHANGELOG.md` and `CONTRIBUTING.md`.
+- Root `CHANGELOG.md`.
 
 ### Changed
 
