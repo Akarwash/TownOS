@@ -2,19 +2,19 @@
 
 MiniOS is a small x86-64 hobby kernel that boots via Multiboot, climbs into
 64-bit long mode, and runs an interrupt-driven interactive shell. It is a
-learning kernel: single address space and no filesystem. It drops to ring 3
-(CPL 3) to run small demonstration programs in their own user-accessible pages,
-and those programs call back into the kernel through a single `int 0x50` syscall
-gate (`SYS_WRITE`, `SYS_EXIT`) rather than faulting. A round-robin preemptive
-scheduler switches between several ring-3 tasks (three today) on every timer tick
-by overwriting the interrupt frame in place, so they run concurrently. Each task
-is a heap-allocated `task_t` with its own stack carved from the user region by a
-bump allocator, so the old fixed two-task ceiling is gone. There is still no
-address-space isolation, so this is cooperative-in-spirit multitasking in a
-single shared space, not process isolation. See
-[reference/user-mode.md](reference/user-mode.md),
-[reference/syscalls.md](reference/syscalls.md), and
-[reference/scheduling.md](reference/scheduling.md).
+learning kernel with no filesystem. It drops to ring 3 (CPL 3) to run small
+demonstration programs in their own user-accessible pages, and those programs
+call back into the kernel through a single `int 0x50` syscall gate (`SYS_WRITE`,
+`SYS_EXIT`) rather than faulting. A round-robin preemptive scheduler switches
+between several ring-3 tasks (three today) on every timer tick by overwriting the
+interrupt frame in place, so they run concurrently. Each task is a heap-allocated
+`task_t` with its OWN page-table tree (per-process paging): the scheduler loads
+that task's CR3 on every switch, so two tasks share virtual addresses but not
+physical memory. That is real address-space isolation, not a single shared space.
+See [reference/user-mode.md](reference/user-mode.md),
+[reference/syscalls.md](reference/syscalls.md),
+[reference/scheduling.md](reference/scheduling.md), and
+[reference/paging.md](reference/paging.md).
 
 This page is a map, not a tutorial. For the concepts behind each subsystem, see
 [`../learnings/`](../learnings/README.md) and follow the cross-links.
@@ -24,7 +24,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | Directory | Responsibility |
 |-----------|----------------|
 | `boot/` | Multiboot header and the hand-written 32 to 64 long-mode climb (assembly). |
-| `kernel/` | Core kernel: GDT/TSS, IDT, interrupt dispatch, syscall dispatch, timer, physical frame allocator, the kernel heap, ring-3 entry, the scheduler, and `kernel_main`. |
+| `kernel/` | Core kernel: GDT/TSS, IDT, interrupt dispatch, syscall dispatch, timer, physical frame allocator, the kernel heap, per-process paging, ring-3 entry, the scheduler, and `kernel_main`. |
 | `drivers/` | Hardware drivers: VGA text screen, PS/2 keyboard, port I/O helpers. |
 | `libc/` | Minimal freestanding C library: `string` and `mem` routines. |
 | `shell/` | The interactive command shell. |
@@ -40,7 +40,8 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `kernel/gdt.c`, `kernel/gdt.h` | Kernel GDT (null, kernel code/data, user code/data) and 64-bit TSS; selector constants. | Implemented |
 | `kernel/usermode.c`, `kernel/usermode.h` | `enter_user_mode`: forge the `iretq` frame and drop to ring 3. | Implemented |
 | `kernel/syscall.c`, `kernel/syscall.h` | Syscall dispatcher: `syscall_handler` switches on RAX (`SYS_WRITE`, `SYS_EXIT`). | Implemented |
-| `kernel/scheduler.c`, `kernel/scheduler.h` | Round-robin scheduler: `task_create` heap-allocates and forges a task and bump-allocates its user stack, `schedule` swaps the interrupt frame, `scheduler_start` enters task 0. | Implemented |
+| `kernel/scheduler.c`, `kernel/scheduler.h` | Round-robin scheduler: `task_create` heap-allocates and forges a task and builds its private address space, `schedule` swaps the interrupt frame and loads the next task's CR3, `scheduler_start` enters task 0. | Implemented |
+| `kernel/paging.c`, `kernel/paging.h` | Per-process paging: `paging_create_address_space` (private tree, kernel half cloned by value), `paging_map_page` (4KB user mappings), `paging_switch` (load CR3). | Implemented |
 | `user/user_program.c` | The three ring-3 demo programs in `.user_text` (`user_program_a`/`_b`/`_c`); each loops calling the kernel via `int 0x50`. | Implemented |
 | `kernel/gdt_flush.asm` | `lgdt`, reload data segments, reload CS via far return, `ltr`. | Implemented |
 | `kernel/idt.c`, `kernel/idt.h` | IDT table, `idt_set_entry`, PIC remap, IDT zeroing, `lidt`. | Implemented |
@@ -72,10 +73,10 @@ boot (boot.asm) ............ long-mode climb, hands off to kernel_main
   -> ISR stubs (isr_stubs)   isr0-31 / irq0-15 entry points, common save/restore
   -> drivers .............. screen, keyboard, timer, ports
   -> heap_init ............ build the kernel heap (heap.c)
-  -> task_create x3 ....... kmalloc + forge a ring-3 task, bump-allocate its stack (scheduler.c)
-  -> scheduler_start ...... enter task 0 via enter_user_mode (usermode.c)
-  -> user_program_a/_b/_c . run at CPL 3, call the kernel via int 0x50
-  -> timer tick ........... schedule() swaps the interrupt frame in place
+  -> task_create x3 ....... kmalloc + forge a ring-3 task, build its private address space (scheduler.c, paging.c)
+  -> scheduler_start ...... load task 0's CR3, enter task 0 via enter_user_mode (usermode.c)
+  -> user_program_a/_b/_c . run at CPL 3 in their own trees, call the kernel via int 0x50
+  -> timer tick ........... schedule() swaps the interrupt frame and loads the next task's CR3
   -> syscall_handler ...... SYS_WRITE prints (syscall.c)
 ```
 
@@ -102,16 +103,18 @@ From power-on to the idle loop:
    reports the detected RAM. See
    [reference/memory-map.md](reference/memory-map.md).
 5. `kernel_main` calls `heap_init()`, then `task_create` for each of
-   `user_program_a`, `_b`, and `_c` (each `kmalloc`s a `task_t`, forges its ring-3
-   `iretq` frame, and bump-allocates a user stack), then `scheduler_start()`,
-   which enters task 0 via `enter_user_mode`. From here the timer tick is a
-   preemption point: `schedule()` saves the interrupted task's register frame and
-   copies the next task's frame over it in place, so `iretq` resumes a different
-   task. The three programs loop, each calling `SYS_WRITE` through the `int 0x50`
-   gate, and interleave "A", "B", and "C" on screen forever (none calls
-   `SYS_EXIT`). `scheduler_start` does not return, so the `hlt` idle loop below it
-   is unreachable in this build. See
+   `user_program_a`, `_b`, and `_c` (each `kmalloc`s a `task_t`, builds a private
+   page-table tree with its own copy of the ring-3 image and stack, and forges its
+   ring-3 `iretq` frame), then `scheduler_start()`, which loads task 0's CR3 and
+   enters task 0 via `enter_user_mode`. From here the timer tick is a preemption
+   point: `schedule()` saves the interrupted task's register frame, copies the
+   next task's frame over it in place, and loads the next task's CR3, so `iretq`
+   resumes a different task in its own address space. The three programs loop, each
+   calling `SYS_WRITE` through the `int 0x50` gate, and interleave "A", "B", and
+   "C" on screen forever (none calls `SYS_EXIT`). `scheduler_start` does not
+   return, so the `hlt` idle loop below it is unreachable in this build. See
    [reference/scheduling.md](reference/scheduling.md),
+   [reference/paging.md](reference/paging.md),
    [reference/user-mode.md](reference/user-mode.md), and
    [reference/syscalls.md](reference/syscalls.md).
 
@@ -127,6 +130,7 @@ task and drive the switch.
 - Interrupts and the IDT: [reference/idt.md](reference/idt.md)
 - Ring 3 and syscalls: [reference/user-mode.md](reference/user-mode.md), [reference/syscalls.md](reference/syscalls.md)
 - The scheduler: [reference/scheduling.md](reference/scheduling.md)
+- Per-process paging: [reference/paging.md](reference/paging.md)
 - Memory layout: [reference/memory-map.md](reference/memory-map.md)
 - The kernel heap: [reference/heap.md](reference/heap.md)
 - Concepts (the why): [`../learnings/`](../learnings/README.md)

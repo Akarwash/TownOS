@@ -15,6 +15,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 | [building.md](building.md) | Toolchain and versions, install commands, how to build and run, and how to debug |
 | [reference/boot-sequence.md](reference/boot-sequence.md) | The 32 to 64 long-mode climb in `boot/boot.asm`, step by step |
 | [reference/memory-map.md](reference/memory-map.md) | Physical memory layout: load address, VGA buffer, identity-mapped region, page tables, stacks |
+| [reference/paging.md](reference/paging.md) | Per-process paging: the private-user/shared-kernel two-halves model, the by-value kernel clone, the CR3 switch, and the frozen-mappings invariant |
 | [reference/gdt.md](reference/gdt.md) | The kernel GDT and TSS: selector table, descriptor layouts, and the bootstrap-vs-kernel GDT split |
 | [reference/idt.md](reference/idt.md) | The IDT and interrupt entry path: gate format, PIC remap, the 48 stubs, dispatch, and EOI |
 | [reference/heap.md](reference/heap.md) | The kernel heap: header/footer boundary tags, split/coalesce, the frame-allocator seam, and interrupt safety |
@@ -34,6 +35,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 - [0009 — Read the Multiboot memory map and extend the identity map](decisions/0009-read-multiboot-map-extend-identity-map.md) — Read the Multiboot map, extend the identity map to real RAM (capped at 1GB), and size the frame pool from it.
 - [0010 — Port the p5 explicit-free-list allocator as the kernel heap](decisions/0010-kernel-heap-ported-from-p5.md) — Port the CMSC216 p5 `el_malloc` (boundary tags, coalescing) as `kmalloc`/`kfree`, swapping `mmap` for `alloc_frames_contiguous` and adding an interrupt guard.
 - [0011 — Heap-allocate task structs and bump-allocate user stacks](decisions/0011-dynamic-tasks-and-stacks.md) — Retire the fixed four-task array (`kmalloc` each `task_t`) and the two hardcoded stacks (bump-allocate 256KB slices of the user region); the stack ceiling remains until per-process paging.
+- [0012 — Per-process paging: a private address space per task](decisions/0012-per-process-paging.md) — Give each task its own page-table tree (private 4KB user half, kernel half cloned by value), switch CR3 on context switch, so tasks share virtual addresses but not physical memory.
 
 ## Status
 
@@ -46,8 +48,8 @@ MiniOS **builds, links, and boots to an interactive shell** under QEMU.
   timer ticks on IRQ 0, the keyboard delivers keypresses on IRQ 1, and the shell
   runs `help`, `clear`, `hello`, and `tick`.
 
-The full feature list, the things that were deliberately never built (user mode,
-syscalls, a scheduler, per-process paging, a filesystem), and the natural next
-steps are in [project-status.md](project-status.md).
+The full feature list, the things that were deliberately never built (a
+filesystem, program loading), and the natural next steps are in
+[project-status.md](project-status.md).
 
 For the exact build, run, and debug commands, see [building.md](building.md).

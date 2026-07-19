@@ -41,14 +41,20 @@ stack_top:
 ; Three levels only (PML4 -> PDPT -> PD): we use 2MB pages, so the walk stops at
 ; the PD and there is no PT level. Each table is exactly one 4KB page and MUST be
 ; 4096-aligned (the CPU ignores the low 12 bits of a table's physical address).
+;
+; All THREE tables are now exposed to C (global). kernel/paging.c needs them to
+; clone the kernel half of the address space into every per-task page tree: a new
+; tree copies the boot PML4's entry so it points at the SAME pdpt_table/pd_table,
+; sharing the kernel mapping by reference (see docs/reference/paging.md). pd_table
+; was already global for kernel/memory.c, which extends the identity map past the
+; fixed boot window once it has read the real RAM size from the Multiboot map.
     align 4096
+global pml4_table
 pml4_table:
     resb 4096
+global pdpt_table
 pdpt_table:
     resb 4096
-; pd_table is exposed to C (global) so kernel/memory.c can extend the identity
-; map past the fixed boot window once it has read the real amount of RAM from the
-; Multiboot map. The boot climb fills only the low entries; C fills the rest.
 global pd_table
 pd_table:
     resb 4096

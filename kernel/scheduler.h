@@ -2,6 +2,7 @@
 #define SCHEDULER_H
 
 #include "isr.h"
+#include "paging.h"
 #include "../include/types.h"
 
 // ============================================================================
@@ -29,20 +30,25 @@ typedef enum {
 } task_state_t;
 
 // One task is its saved register pile plus a little bookkeeping. The pile is the
-// whole context; there is nothing else to a task in this kernel (no address
-// space of its own, no kernel stack of its own; see the limitations in the ADR).
+// context to restore; the address space is the memory the task runs in. Each task
+// now owns a private page-table tree (per-process paging), so two tasks can use
+// the same virtual address for different physical memory. It still has no kernel
+// stack of its own (see the limitations in the ADR).
 typedef struct {
-    registers_t regs;    // the saved/forged interrupt frame: IS the task
+    registers_t regs;         // the saved/forged interrupt frame: IS the task
+    address_space_t *aspace;  // this task's private page-table tree
+    uint64_t cr3;             // physical PML4 base to load on switch (== aspace->pml4_phys)
     task_state_t state;
     uint32_t id;
 } task_t;
 
-// Forge a never-run task: heap-allocate its task_t, ask the user-stack allocator
-// (scheduler.c) for a stack, fill its saved pile so it looks like it was
-// interrupted at its first instruction, mark it TASK_READY. task_create no longer
-// takes a stack: it hands out one from the PG_USER stack region itself, because a
-// ring-3 stack cannot live on the kernel heap (see scheduler.c). Returns the task
-// id, or -1 if the heap is out of memory or the user-stack region is exhausted.
+// Forge a never-run task: heap-allocate its task_t, build a private address space
+// (copy the ring-3 image to fresh frames mapped at its link address, map a fresh
+// stack at the fixed stack VA), fill its saved pile so it looks like it was
+// interrupted at its first instruction, mark it TASK_READY. Because the address
+// space is private, every task's stack sits at the SAME virtual address on
+// different physical frames. Returns the task id, or -1 if the heap or the frame
+// pool is out of memory. Implemented in scheduler.c.
 int task_create(uint64_t entry);
 
 // Pick task 0 and enter it. Does not return (control only ever comes back into

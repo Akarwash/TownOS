@@ -82,24 +82,29 @@ That verification, with the exact QEMU `-d int` output, is recorded in
 
 The shipped programs (`user/user_program.c`) no longer fault on purpose. Now that
 a syscall gate and a scheduler exist, they demonstrate the drop the constructive
-way: two of them run at CPL 3 and call the kernel through `int 0x50` (`SYS_WRITE`)
-in a loop, and the scheduler switches between them on the timer tick. Under QEMU
-with `-d int`, vector `0x50` fires from both tasks (two distinct RIPs on two
-distinct stacks), each at `cpl=3`, with no #GP and no #PF; the two strings
-interleave on screen, printed by the kernel on the ring-3 programs' behalf. That a
-ring-3 pointer into `.user_rodata` (4-8M) is accepted while a kernel address is
-rejected is the same leaf-level user-bit boundary, now exercised through the
-syscall path instead of a fault. See [syscalls.md](syscalls.md) and
-[scheduling.md](scheduling.md).
+way: three of them run at CPL 3 and call the kernel through `int 0x50` (`SYS_WRITE`)
+in a loop, and the scheduler switches between them on the timer tick. Each task
+runs in its OWN page-table tree (per-process paging), so they share the same user
+virtual addresses but not the same physical memory. Under QEMU with `-d int`,
+vector `0x50` fires from all three tasks (three distinct RIPs, each in its own
+address space with its own `CR3`), each at `cpl=3`, with no #GP and no #PF; the
+three strings interleave on screen, printed by the kernel on the ring-3 programs'
+behalf. That a ring-3 pointer into `.user_rodata` (4-8M) is accepted while a kernel
+address is rejected is the same leaf-level user-bit boundary, now exercised through
+the syscall path instead of a fault. See [syscalls.md](syscalls.md),
+[scheduling.md](scheduling.md), and [paging.md](paging.md).
 
 ## What this is not
 
-- **Not full multitasking.** Two hard-coded ring-3 tasks are preempted round-robin
-  by the timer (see [scheduling.md](scheduling.md)), but there is no process, no
-  program loading, and a fixed table of four tasks.
-- **Not per-process isolation.** There is a single shared address space; the two
-  tasks even share one stack page, split in half. Real isolation needs per-process
-  page tables and a `CR3` switch on context switch.
+- **Not full multitasking.** Three hard-coded ring-3 tasks are preempted
+  round-robin by the timer (see [scheduling.md](scheduling.md)), but there is no
+  process abstraction and no program loading: the tasks are compiled into the
+  kernel image, not loaded from a filesystem.
+- **Not demand paging.** Each task now has real per-process isolation: its own
+  page-table tree and a `CR3` switch on every context switch, so tasks share
+  virtual addresses but not physical frames (see [paging.md](paging.md)). What is
+  still missing is laziness: every page is mapped eagerly at `task_create`, with no
+  page-fault-driven demand paging, copy-on-write, or swapping.
 
 ## Related
 

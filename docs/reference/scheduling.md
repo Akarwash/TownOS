@@ -6,8 +6,10 @@ the two things that are easy to get wrong. Read from `kernel/scheduler.c`,
 `kernel/scheduler.h`, `kernel/timer.c`, `kernel/isr.c`, and `kernel/usermode.c`.
 For the rationale and the trade-offs, see
 [decision 0008](../decisions/0008-round-robin-preemptive-scheduler.md) (the
-switch) and [decision 0011](../decisions/0011-dynamic-tasks-and-stacks.md)
-(dynamic tasks and stacks).
+switch), [decision 0011](../decisions/0011-dynamic-tasks-and-stacks.md)
+(dynamic tasks and stacks), and
+[decision 0012](../decisions/0012-per-process-paging.md) (the per-task address
+space the switch now also loads).
 
 ## The pile is the program
 
@@ -38,17 +40,27 @@ The scheduler never touches the CPU's registers directly. It edits the frame on
 the stack and lets the interrupt path it did not write do the save and the
 restore for it.
 
-## A task is a saved frame
+## A task is a saved frame plus an address space
 
-`task_t` (`kernel/scheduler.h`) is a saved `registers_t` plus a state and an id:
+`task_t` (`kernel/scheduler.h`) is a saved `registers_t` plus the address space
+it runs in, a state, and an id:
 
 ```c
 typedef struct {
-    registers_t regs;    // the saved/forged interrupt frame: IS the task
-    task_state_t state;  // TASK_UNUSED / TASK_READY / TASK_RUNNING
+    registers_t regs;         // the saved/forged interrupt frame: IS the task
+    address_space_t *aspace;  // this task's private page-table tree
+    uint64_t cr3;             // physical PML4 base to load on switch
+    task_state_t state;       // TASK_UNUSED / TASK_READY / TASK_RUNNING
     uint32_t id;
 } task_t;
 ```
+
+The `aspace` handle and its cached `cr3` are new: each task now owns a private
+page-table tree, so two tasks can use the same virtual address for different
+physical memory. The `cr3` field caches `aspace->pml4_phys` so the hot switch
+path in `schedule()` need not chase the pointer. See
+[paging.md](paging.md) and
+[decision 0012](../decisions/0012-per-process-paging.md).
 
 Each `task_t` is heap-allocated. `task_create` calls `kmalloc(sizeof(task_t))`
 and stores the pointer in `task_t *tasks[MAX_TASKS_LIMIT]`, a flat pointer array
@@ -71,8 +83,8 @@ one that looks as if the task were interrupted at its first instruction:
 
 ```c
 memset(&t->regs, 0, sizeof(t->regs));   // all GPRs 0
-t->regs.rip      = entry;               // first instruction
-t->regs.user_rsp = stack_top;           // top of this task's stack
+t->regs.rip      = entry;               // first instruction (0x400000 region)
+t->regs.user_rsp = USER_STACK_TOP;      // fixed stack top, same VA in every task
 t->regs.cs       = GDT_SELECTOR_USER_CODE;   // 0x1B, ring-3 code, RPL 3
 t->regs.ss       = GDT_SELECTOR_USER_DATA;   // 0x23, ring-3 data, RPL 3
 t->regs.rflags   = USER_MODE_RFLAGS;         // 0x202, IF set
@@ -83,6 +95,14 @@ This is exactly the trick `enter_user_mode` (`kernel/usermode.c`) uses to drop t
 ring 3, generalised into a table entry. The first time `schedule()` picks this
 task, it copies this frame onto the stack and `iretq` "returns" into a program
 that never actually ran.
+
+`user_rsp` is now the SAME fixed address (`USER_STACK_TOP`, `0x800000`) for every
+task, not a per-task stack top handed out by an allocator. That works because
+each task has a private address space in which that one virtual address maps to
+its own physical frames. Before `task_create` forges the frame it builds that
+address space (a private tree with the ring-3 image copied to fresh frames at
+`0x400000` and a fresh stack at `USER_STACK_TOP`), and records its CR3. See
+[paging.md](paging.md).
 
 `rflags` bit 9 (the interrupt flag, IF) **must** be set. A task entered with IF
 clear runs with interrupts masked, so the timer never fires while it runs, so it
@@ -107,12 +127,26 @@ tasks[next]->state = TASK_RUNNING;
 if (next == current) return;           // only one ready: do not switch to self
 current = next;
 *r = tasks[next]->regs;                // 3. OVERWRITE THE FRAME IN PLACE
+__asm__ ("mov %0, %%cr3" :: "r"(tasks[next]->cr3));  // 4. SWITCH ADDRESS SPACES
 ```
 
-Indexing is through the pointer array now (`tasks[i]->regs`), and the round-robin
+Indexing is through the pointer array (`tasks[i]->regs`), and the round-robin
 walk is bounded by `num_tasks` (the count actually created) rather than the old
-fixed `MAX_TASKS`. That is the only change from the pre-heap version; the save,
-pick, and overwrite are identical.
+fixed `MAX_TASKS`. The save, pick, and overwrite are otherwise identical to the
+pre-heap version; the one addition is step 4, the CR3 load.
+
+**Step 4: load the incoming task's CR3.** With per-process paging, switching the
+register frame is only half the switch: the next task's code and stack live in
+ITS tree, at the same virtual addresses the outgoing task used, so its CR3 must
+be loaded too. Writing CR3 also flushes the TLB (MiniOS uses no global pages),
+dropping the outgoing task's stale user translations for free. The switch is safe
+mid-interrupt because everything the CPU still needs on the way out (the frame
+`r` on the kernel stack, the `tasks[]` array and this code, and the IDT/GDT/TSS/
+stub the next tick reaches) lives in the kernel half, which is cloned identically
+into every tree, so only the user half changes. The CR3 write MUST come after the
+scheduler finishes reading its own state and before `iretq`. See
+[paging.md](paging.md) and
+[decision 0012](../decisions/0012-per-process-paging.md).
 
 **Trap 1: the frame must be overwritten in place, through `r`.** `iretq` and the
 stub's register pops read from the *stack*, not from the `tasks` array. Copying
@@ -171,31 +205,24 @@ is touched.
 
 ## The user stacks
 
-Each task needs its own stack, and each stack must be reachable at CPL 3. The
-kernel heap is the wrong tool: it hands out frame-pool pages with no PG_USER bit,
-so a `kmalloc`'d stack would page-fault the instant a ring-3 task pushed to it.
-Stacks come instead from a tiny bump allocator, `alloc_user_stack`
-(`kernel/scheduler.c`), which carves fixed-size slices out of the one PG_USER
-stack page (2MB at 6-8M, PD[3]):
+Each task needs its own stack, reachable at CPL 3. With per-process paging every
+task's stack lives at ONE fixed virtual address, the top of PD[3]:
 
 ```c
-#define USER_STACK_REGION_START  0x600000   // PD[3] base
-#define USER_STACK_REGION_END    0x800000   // top of PD[3]
-#define USER_STACK_SIZE          0x40000    // 256 KB per stack -> 8 stacks
+#define USER_STACK_SIZE  0x40000                         // 256 KB per task
+#define USER_STACK_BASE  (USER_STACK_TOP - USER_STACK_SIZE)   // top 0x800000
 ```
 
-`task_create` no longer takes a stack top; it asks the allocator for the next
-slice and returns -1 if the region is exhausted. Today's three tasks get the
-first three slices, growing down from `0x640000`, `0x680000`, and `0x6c0000`.
-
-Heap-allocating the `task_t` (above) removed the *struct* ceiling, but this stack
-region is a separate, still-hard ceiling: all stacks share this one fixed 2MB
-region, so there are only 8, and there is no guard page between slices, so a task
-that overflows its 256KB stack scribbles into its neighbour's. The real fix is
-per-process paging (a `TODO(per-process-paging)` marks it in the source), where
-each process gets its own address space and stacks stop competing for one shared
-region. See [decision 0011](../decisions/0011-dynamic-tasks-and-stacks.md) and
-[memory-map.md](memory-map.md).
+`build_user_space` (`kernel/scheduler.c`) maps that VA range to FRESH frames in
+the task's private tree, so every task uses the same address but its own physical
+memory. This is the change that retires the old bump allocator and the shared
+2MB stack region: stacks no longer compete for one region, so the eight-stack
+ceiling and the no-guard-page corruption from
+[decision 0011](../decisions/0011-dynamic-tasks-and-stacks.md) are gone. The
+frames still cannot come from the kernel heap (`kmalloc` returns pages with no
+PG_USER bit, which a ring-3 push would fault on); they come from `alloc_frame`
+and are mapped user-accessible by `paging_map_page`. See
+[paging.md](paging.md) and [memory-map.md](memory-map.md).
 
 ## What a run looks like
 
@@ -208,17 +235,21 @@ ABCBCACBACBABCABCABCABC...
 ```
 
 Under `-d int`, timer vector `0x40` fires continuously and syscall vector `0x50`
-fires from all three tasks: entries cycle between `IP=001b:0040002b` (A) on a
-stack near `0x640000`, `IP=001b:00400083` (B) near `0x680000`, and
-`IP=001b:004000db` (C) near `0x6c0000`, each at `cpl=3`, with no `#GP` (0x0D) and
-no `#PF` (0x0E). Three distinct RIPs and three distinct stacks in the log are the
-proof the scheduler runs more than the old hardcoded two and each task keeps its
-own context on its own dynamically-allocated stack. A `#PF` on a stack push would
-mean the stack allocator handed out an address outside the PG_USER region.
+fires from all three tasks: entries cycle between `IP=001b:0040002b` (A),
+`IP=001b:00400083` (B), and `IP=001b:004000db` (C), each at `cpl=3`, but now each
+under a DIFFERENT `CR3` (one page-table tree per task), with no `#GP` (0x0D) and
+no `#PF` (0x0E). Three distinct RIPs all at the same virtual addresses, under
+three distinct CR3 values, are the proof that the tasks share virtual addresses
+but not physical memory: the isolation. All three now run their stack at the same
+VA (`0x800000` top), so the stack no longer distinguishes them in the log; the
+CR3 does. A `#PF` at a user RIP would mean that task's private user mapping is
+missing.
 
 Failure modes to recognise: if one letter repeats forever, the frame is not being
 written over `*r` (trap 1). If output stops after a single switch, the EOI is
-being sent after the switch instead of before (trap 2).
+being sent after the switch instead of before (trap 2). A triple fault right after
+the first switch means something the kernel needs is not in the cloned kernel
+half (see [paging.md](paging.md)).
 
 ## Related
 
@@ -228,7 +259,9 @@ being sent after the switch instead of before (trap 2).
   [idt.md](idt.md).
 - The ring-3 drop `task_create` generalises:
   [user-mode.md](user-mode.md).
-- The syscall gate both tasks print through:
+- The syscall gate the tasks print through:
   [syscalls.md](syscalls.md).
-- The user stack page that is split in two:
+- The per-task address space the switch loads:
+  [paging.md](paging.md).
+- The fixed user virtual layout each task's stack sits in:
   [memory-map.md](memory-map.md).
