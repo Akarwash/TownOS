@@ -7,6 +7,74 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- Dynamic tasks and per-task user stacks in the scheduler (`kernel/scheduler.c`,
+  `kernel/scheduler.h`). Task structs are now heap-allocated: `task_create` calls
+  `kmalloc(sizeof(task_t))` and stores the pointer in `task_t *tasks[MAX_TASKS_LIMIT]`
+  (a flat pointer array, cap 64, arbitrary), retiring the fixed `.bss`
+  `task_t[MAX_TASKS]` array of four that existed only for lack of a heap. User
+  stacks are handed out by a new bump allocator (`alloc_user_stack`) that carves
+  fixed 256KB (`USER_STACK_SIZE`) slices from the one PG_USER stack region
+  (`0x600000`-`0x800000`, 8 slices), replacing the two hardcoded stack tops
+  (`TASK0_STACK_TOP`/`TASK1_STACK_TOP`); `task_create` no longer takes a
+  `stack_top` argument. User stacks deliberately do NOT come from the kernel heap:
+  `kmalloc` returns frame-pool pages with no PG_USER bit, so a ring-3 push there
+  would fault. A third ring-3 program (`user_program_c`, prints "C") was added and
+  all three are created in `kernel_main` to exercise the dynamic path. The
+  switching logic in `schedule()` is unchanged (only indexing: `tasks[i].regs`
+  became `tasks[i]->regs`, and the round-robin walk is bounded by `num_tasks`).
+  The task-struct ceiling is gone; the user-stack region remains a hard ceiling
+  (no guard pages, one shared region) until per-process paging, marked
+  `TODO(per-process-paging)`. Verified under QEMU with `-d int`: the syscall
+  vector fires from three distinct user RIPs (`0x40002b`, `0x400083`, `0x4000db`),
+  each at `cpl=3` on a distinct stack, with the timer still firing and zero page
+  or GP faults; the three programs interleave "ABC" on screen forever. See
+  `docs/decisions/0011-dynamic-tasks-and-stacks.md`,
+  `docs/reference/scheduling.md`, and `docs/reference/memory-map.md`.
+- A kernel heap, `kmalloc`/`kfree` (`kernel/heap.c`, `kernel/heap.h`), ported from
+  the CMSC216 p5 `el_malloc`: an explicit free list with header/footer boundary
+  tags, first-fit allocation, block splitting, and coalescing with the free
+  neighbours above and below. The algorithm is the original, unchanged; only the
+  OS seams differ. The slab comes from a new `alloc_frames_contiguous(n)` in
+  `kernel/memory.c` (a run of consecutive clear bits in the linear bitmap is
+  contiguous, identity-mapped RAM) instead of `mmap`, so the p5 single-contiguous
+  -slab assumption holds; `el_ctl` is a static `.bss` struct rather than an
+  `mmap`'d page, and the fixed target addresses and their asserts are gone.
+  `printf`/`fprintf` become the VGA `print_string` (with kernel-native decimal and
+  hex printers for the stats helpers); `assert` and the `mmap`-return checks are
+  dropped. `kmalloc`/`kfree` wrap their critical section in a save-and-restore
+  interrupt guard (`pushfq`/`cli` ... `popfq`), because the free list is shared
+  mutable state and the 100 Hz timer IRQ could otherwise land mid-relink and
+  corrupt it; restore, not an unconditional `sti`, so a call from inside an
+  interrupt handler stays safe. The heap builds a 16-page (64KB) initial slab in
+  `heap_init()` (called from `kernel_main` after `memory_init`) and grows on
+  demand; growth requires the new run to be adjacent to `heap_end` (guaranteed
+  because the heap is the sole frame consumer and the bitmap is scanned
+  bottom-up), and a non-adjacent run is refused and reclaimed rather than spliced
+  into the single-heap boundary-tag walk. Verified under QEMU with a temporary
+  self-test (removed after): allocation with sentinel readback, free-and-reuse,
+  full coalesce, and the growth path all pass, with zero page/GP faults and the
+  timer and syscall vectors still firing. See
+  `docs/decisions/0010-kernel-heap-ported-from-p5.md` and
+  `docs/reference/heap.md`.
+- Reading the real amount of RAM from the Multiboot memory map and extending the
+  identity map to cover it. `boot/boot.asm` now identity-maps a fixed 32MB (up
+  from 8MB, 16 2MB PD entries; 4-8M stays `PG_USER`, the rest kernel-only),
+  exposes `pd_table` as `global`, and forwards the Multiboot info pointer (left in
+  EBX by the bootloader) to `kernel_main` in RDI. `kernel_main` now takes
+  `uint64_t multiboot_info_addr`. `kernel/multiboot.h` defines the Multiboot 1
+  info and mmap-entry structures (packed; the entry stride is
+  `size + sizeof(size)`, since `size` does not count itself). `kernel/memory.c`
+  (`memory_detect_and_map`) walks the map for the highest usable physical address,
+  fills `pd_table` from 32M up to that address (rounded to 2MB, capped at 1GB, the
+  single PD page's reach), and reloads CR3 to flush the TLB. The frame pool is
+  sized from the same measured RAM, and every non-usable range the map reports is
+  reserved by walking the map, so `alloc_frame()` now returns real, mapped,
+  writable memory. This retires the invented 8MB map and 128MB pool constants and
+  the "allocator returns unmapped addresses" limitation. If the map is absent
+  (flags bit 6 clear), the kernel falls back to the fixed 32MB and warns rather
+  than reading garbage. The boot banner prints the detected RAM. See
+  `docs/decisions/0009-read-multiboot-map-extend-identity-map.md` and
+  `docs/reference/memory-map.md`.
 - A round-robin preemptive scheduler (`kernel/scheduler.c`, `kernel/scheduler.h`).
   The timer IRQ handler now switches between ring-3 tasks by overwriting the
   interrupt frame on the kernel stack in place: the `registers_t` the stub pushed
@@ -156,7 +224,7 @@ under QEMU, with the timer and keyboard driving interrupts.
   `qemu-system-x86_64` 11.0.0).
 - Project documentation under `docs/`: architecture, building, reference pages
   (boot sequence, memory map, GDT/TSS), and architecture decision records.
-- Root `CHANGELOG.md` and `CONTRIBUTING.md`.
+- Root `CHANGELOG.md`.
 
 ### Changed
 

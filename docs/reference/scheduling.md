@@ -1,11 +1,13 @@
 # Scheduling reference
 
-MiniOS runs two ring-3 programs by switching between them on every timer tick.
-This page documents how that switch works, why it is safe, and the two things
-that are easy to get wrong. Read from `kernel/scheduler.c`, `kernel/scheduler.h`,
-`kernel/timer.c`, `kernel/isr.c`, and `kernel/usermode.c`. For the rationale and
-the trade-offs, see
-[decision 0008](../decisions/0008-round-robin-preemptive-scheduler.md).
+MiniOS runs several ring-3 programs (three today) by switching between them on
+every timer tick. This page documents how that switch works, why it is safe, and
+the two things that are easy to get wrong. Read from `kernel/scheduler.c`,
+`kernel/scheduler.h`, `kernel/timer.c`, `kernel/isr.c`, and `kernel/usermode.c`.
+For the rationale and the trade-offs, see
+[decision 0008](../decisions/0008-round-robin-preemptive-scheduler.md) (the
+switch) and [decision 0011](../decisions/0011-dynamic-tasks-and-stacks.md)
+(dynamic tasks and stacks).
 
 ## The pile is the program
 
@@ -48,14 +50,19 @@ typedef struct {
 } task_t;
 ```
 
-Tasks live in a fixed `.bss` array, `task_t tasks[MAX_TASKS]` (`MAX_TASKS` = 4).
-The array is static because there is no kernel heap: the frame allocator
-(`kernel/memory.c`) hands out physical addresses above the 8M identity map that
-fault on first touch, so there is nowhere to allocate task structures. This is a
-stopgap, noted as a TODO in the header.
+Each `task_t` is heap-allocated. `task_create` calls `kmalloc(sizeof(task_t))`
+and stores the pointer in `task_t *tasks[MAX_TASKS_LIMIT]`, a flat pointer array
+in creation order (`MAX_TASKS_LIMIT` = 64, an arbitrary and generous cap on the
+bookkeeping array, not a storage ceiling: the structs live on the heap). A
+pointer array rather than a linked list keeps `schedule()`'s round-robin indexing
+O(1) and mechanical. Before [decision 0010](../decisions/0010-kernel-heap-ported-from-p5.md)
+added the heap, this was a fixed `.bss` array of four (`MAX_TASKS`), the ceiling
+that has now been removed. See
+[decision 0011](../decisions/0011-dynamic-tasks-and-stacks.md).
 
-`.bss` is zero-initialised, so every slot starts `TASK_UNUSED` (== 0) with a
-zeroed frame, and no explicit table-clearing is needed.
+A `task_t` is kernel-only bookkeeping (only the scheduler reads it), never
+touched by ring-3 code, so it is safe on kernel heap pages. That is what lets the
+struct go on the heap while the stack (below) cannot.
 
 ## Forging a never-run task
 
@@ -87,24 +94,29 @@ is never preempted: it would own the machine forever and no other task would run
 `schedule(registers_t *r)` (`kernel/scheduler.c`) is the whole scheduler:
 
 ```c
-tasks[current].regs = *r;              // 1. save interrupted frame
-tasks[current].state = TASK_READY;
+tasks[current]->regs = *r;             // 1. save interrupted frame
+tasks[current]->state = TASK_READY;
 
 uint32_t next = current;               // 2. round-robin pick
-for (uint32_t i = 1; i <= MAX_TASKS; i++) {
-    uint32_t cand = (current + i) % MAX_TASKS;
-    if (tasks[cand].state == TASK_READY) { next = cand; break; }
+for (uint32_t i = 1; i <= num_tasks; i++) {
+    uint32_t cand = (current + i) % num_tasks;
+    if (tasks[cand]->state == TASK_READY) { next = cand; break; }
 }
-tasks[next].state = TASK_RUNNING;
+tasks[next]->state = TASK_RUNNING;
 
 if (next == current) return;           // only one ready: do not switch to self
 current = next;
-*r = tasks[next].regs;                 // 3. OVERWRITE THE FRAME IN PLACE
+*r = tasks[next]->regs;                // 3. OVERWRITE THE FRAME IN PLACE
 ```
+
+Indexing is through the pointer array now (`tasks[i]->regs`), and the round-robin
+walk is bounded by `num_tasks` (the count actually created) rather than the old
+fixed `MAX_TASKS`. That is the only change from the pre-heap version; the save,
+pick, and overwrite are identical.
 
 **Trap 1: the frame must be overwritten in place, through `r`.** `iretq` and the
 stub's register pops read from the *stack*, not from the `tasks` array. Copying
-`tasks[next].regs` into a local variable, or anywhere but through the pointer `r`
+`tasks[next]->regs` into a local variable, or anywhere but through the pointer `r`
 (which points at the live stack frame), would leave the on-stack frame unchanged,
 and `iretq` would return to the *same* program. The switch only happens because
 `*r = ...` writes over the frame the stub will pop.
@@ -119,7 +131,7 @@ switch. Because the ack already happened, the timer keeps firing across the
 switch. See [idt.md](idt.md) for the EOI path.
 
 The round-robin loop starts at `current + 1`, so the task just marked `READY` is
-only reconsidered at `i == MAX_TASKS`, i.e. when nothing else is runnable. If it
+only reconsidered at `i == num_tasks`, i.e. when nothing else is runnable. If it
 is the only ready task, `next == current` and the function returns without
 touching the frame, so a lone task simply resumes.
 
@@ -127,7 +139,7 @@ touching the frame, so a lone task simply resumes.
 
 | State | Meaning |
 |-------|---------|
-| `TASK_UNUSED` | Slot never filled. `.bss` zero-init lands every slot here. |
+| `TASK_UNUSED` | Value 0. A freshly `kmalloc`'d `task_t` is set straight to `TASK_READY` by `task_create`, so a live task is never seen in this state; it exists as the zero value. |
 | `TASK_READY` | Runnable, waiting for a slice. Set by `task_create` and by `schedule` when a task is preempted. |
 | `TASK_RUNNING` | Currently on the CPU. Exactly one task at a time. |
 
@@ -157,37 +169,52 @@ No locking is otherwise needed: interrupt gates clear IF on entry, so the timer
 handler cannot nest, and it is the only place the shared `tasks`/`current` state
 is touched.
 
-## The two stacks
+## The user stacks
 
-Each task needs its own stack, but there is only one PG_USER stack page (2MB at
-6-8M, PD[3]). It is split in half:
+Each task needs its own stack, and each stack must be reachable at CPL 3. The
+kernel heap is the wrong tool: it hands out frame-pool pages with no PG_USER bit,
+so a `kmalloc`'d stack would page-fault the instant a ring-3 task pushed to it.
+Stacks come instead from a tiny bump allocator, `alloc_user_stack`
+(`kernel/scheduler.c`), which carves fixed-size slices out of the one PG_USER
+stack page (2MB at 6-8M, PD[3]):
 
-| Task | Stack top | Range (grows down) |
-|------|-----------|--------------------|
-| 0 (`user_program_a`, "A") | `TASK0_STACK_TOP` = `0x700000` | 6-7M |
-| 1 (`user_program_b`, "B") | `TASK1_STACK_TOP` = `0x800000` | 7-8M |
+```c
+#define USER_STACK_REGION_START  0x600000   // PD[3] base
+#define USER_STACK_REGION_END    0x800000   // top of PD[3]
+#define USER_STACK_SIZE          0x40000    // 256 KB per stack -> 8 stacks
+```
 
-This is crude: a real system allocates a stack per task from an allocator instead
-of carving one hard-coded page in two. There is no guard page between the two
-halves, so a task that overflows its 1MB stack scribbles into the other's. See
+`task_create` no longer takes a stack top; it asks the allocator for the next
+slice and returns -1 if the region is exhausted. Today's three tasks get the
+first three slices, growing down from `0x640000`, `0x680000`, and `0x6c0000`.
+
+Heap-allocating the `task_t` (above) removed the *struct* ceiling, but this stack
+region is a separate, still-hard ceiling: all stacks share this one fixed 2MB
+region, so there are only 8, and there is no guard page between slices, so a task
+that overflows its 256KB stack scribbles into its neighbour's. The real fix is
+per-process paging (a `TODO(per-process-paging)` marks it in the source), where
+each process gets its own address space and stacks stop competing for one shared
+region. See [decision 0011](../decisions/0011-dynamic-tasks-and-stacks.md) and
 [memory-map.md](memory-map.md).
 
 ## What a run looks like
 
-Both programs loop forever calling `SYS_WRITE` with a single-letter string and a
-crude busy-wait delay between writes (neither calls `SYS_EXIT`). Booted under
-QEMU, the screen fills with interleaved letters:
+All three programs loop forever calling `SYS_WRITE` with a single-letter string
+and a crude busy-wait delay between writes (none calls `SYS_EXIT`). Booted under
+QEMU, the screen fills with interleaved letters (order varies with slice timing):
 
 ```
-ABABABABABABABAB...
+ABCBCACBACBABCABCABCABC...
 ```
 
 Under `-d int`, timer vector `0x40` fires continuously and syscall vector `0x50`
-fires from both tasks: entries alternate between one task at `IP=001b:0040002b`
-on the `0x700000` stack and the other at `IP=001b:00400083` on the `0x800000`
-stack, each at `cpl=3`, with no `#GP` (0x0D) and no `#PF` (0x0E). Two distinct
-RIPs and two distinct stacks in the log are the proof the switch is real and each
-task keeps its own context.
+fires from all three tasks: entries cycle between `IP=001b:0040002b` (A) on a
+stack near `0x640000`, `IP=001b:00400083` (B) near `0x680000`, and
+`IP=001b:004000db` (C) near `0x6c0000`, each at `cpl=3`, with no `#GP` (0x0D) and
+no `#PF` (0x0E). Three distinct RIPs and three distinct stacks in the log are the
+proof the scheduler runs more than the old hardcoded two and each task keeps its
+own context on its own dynamically-allocated stack. A `#PF` on a stack push would
+mean the stack allocator handed out an address outside the PG_USER region.
 
 Failure modes to recognise: if one letter repeats forever, the frame is not being
 written over `*r` (trap 1). If output stops after a single switch, the EOI is

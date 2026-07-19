@@ -46,6 +46,10 @@ pml4_table:
     resb 4096
 pdpt_table:
     resb 4096
+; pd_table is exposed to C (global) so kernel/memory.c can extend the identity
+; map past the fixed boot window once it has read the real amount of RAM from the
+; Multiboot map. The boot climb fills only the low entries; C fills the rest.
+global pd_table
 pd_table:
     resb 4096
 
@@ -93,24 +97,43 @@ _start:
     or eax, PG_PRESENT | PG_WRITABLE | PG_USER
     mov [pdpt_table], eax
 
-    ; --- Step 4: PD[0..3] = identity-map the first 8 MB with 2MB pages ---
+    ; --- Step 4: PD[0..15] = identity-map the first 32 MB with 2MB pages ---
     ; Entry N maps virtual (N * 2MB) straight to physical (N * 2MB): fake address
-    ; == real address. Four entries cover 0x000000..0x7FFFFF. The PG_HUGE bit is
-    ; MANDATORY: it tells the CPU "this entry is a 2MB page, do not walk to a PT."
-    ; Omit it and the CPU chases a fourth level that does not exist.
+    ; == real address. The PG_HUGE bit is MANDATORY: it tells the CPU "this entry
+    ; is a 2MB page, do not walk to a PT." Omit it and the CPU chases a fourth
+    ; level that does not exist.
     ;
-    ; The leaf is where privilege is really decided (permission ANDs down the
-    ; walk, so this is the gate that matters):
-    ;   PD[0] 0x000000-0x1FFFFF : kernel  (no user) - kernel code/data, VGA, stack
-    ;   PD[1] 0x200000-0x3FFFFF : kernel  (no user)
-    ;   PD[2] 0x400000-0x5FFFFF : USER    - the ring-3 program's code lives here
-    ;   PD[3] 0x600000-0x7FFFFF : USER    - the ring-3 program's stack lives here
-    ; Written out explicitly (not a loop) so the privilege of each 2MB region is
-    ; visible on its own line.
+    ; This is a FIXED, safe map built with no dependency on data we have not read
+    ; yet (the Multiboot memory map is parsed later, in C). 32MB is deliberately
+    ; larger than the kernel needs so C has headroom to work in before it extends
+    ; the map to cover real RAM. C only ever adds entries at 32MB and up; it never
+    ; touches these low entries that map the running kernel.
+    ;
+    ; Privilege is decided at the leaf (permission ANDs down the walk):
+    ;   PD[0]  0x000000-0x1FFFFF : kernel (no user) - kernel code/data, VGA, stack
+    ;   PD[1]  0x200000-0x3FFFFF : kernel (no user)
+    ;   PD[2]  0x400000-0x5FFFFF : USER   - the ring-3 program's code lives here
+    ;   PD[3]  0x600000-0x7FFFFF : USER   - the ring-3 program's stack lives here
+    ;   PD[4..15] 0x800000-0x1FFFFFF : kernel (no user) - spare kernel RAM
+    ; PD[0..3] are written explicitly so the privilege of the low 8MB (and the
+    ; user region in particular) is visible per line; only 4-8M is user.
     mov dword [pd_table + 0 * 8], 0x000000 | PG_PRESENT | PG_WRITABLE | PG_HUGE
     mov dword [pd_table + 1 * 8], 0x200000 | PG_PRESENT | PG_WRITABLE | PG_HUGE
     mov dword [pd_table + 2 * 8], 0x400000 | PG_PRESENT | PG_WRITABLE | PG_HUGE | PG_USER
     mov dword [pd_table + 3 * 8], 0x600000 | PG_PRESENT | PG_WRITABLE | PG_HUGE | PG_USER
+
+    ; PD[4..15] map 8MB..32MB, kernel-only. A loop is fine here: the privilege
+    ; pattern (kernel, no user bit) is uniform across all of them.
+    mov ecx, 4                  ; first entry to fill (8MB)
+    mov eax, 0x800000           ; physical base of PD[4]
+.map_fixed:
+    mov edx, eax
+    or  edx, PG_PRESENT | PG_WRITABLE | PG_HUGE
+    mov [pd_table + ecx * 8], edx   ; low dword only; high dword stays zero (rep stosd)
+    add eax, 0x200000           ; next 2MB page
+    inc ecx
+    cmp ecx, 16                 ; stop after PD[15] (32MB)
+    jb  .map_fixed
 
     ; --- Step 5: enable PAE (CR4.PAE) ---
     ; Long mode requires Physical Address Extension; without it CR0.PG below just
@@ -161,7 +184,15 @@ long_mode_start:
     mov ss, ax
 
     mov rsp, stack_top          ; establish the 64-bit stack
-    call kernel_main            ; kernel_main(void) — takes no arguments
+
+    ; Hand the Multiboot info pointer to C. The bootloader left the magic number
+    ; in EAX and a physical pointer to the info structure in EBX when it entered
+    ; _start. Nothing in the climb above touches EBX, so it is still valid here
+    ; (a low physical address, and everything is identity-mapped, so it stays
+    ; valid as a pointer). System V AMD64 passes the first integer argument in
+    ; RDI; a 32-bit mov zero-extends EBX into RDI, giving a clean 64-bit pointer.
+    mov edi, ebx
+    call kernel_main            ; kernel_main(uint64_t multiboot_info_addr)
 
     ; --- Step 11: kernel_main should never return; if it does, halt forever ---
 .hang:

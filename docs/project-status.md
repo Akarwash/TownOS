@@ -22,7 +22,10 @@ limitations. It is a factual snapshot, not a roadmap.
 - The PIT timer on IRQ 0 (`kernel/timer.c`) and the PS/2 keyboard on IRQ 1
   (`drivers/keyboard.c`).
 - VGA text output with scrolling and a cursor (`drivers/screen.c`).
-- A bitmap physical frame allocator (`kernel/memory.c`).
+- A bitmap physical frame allocator (`kernel/memory.c`), sized from the real RAM
+  the Multiboot map reports (identity map extended to cover it, up to a 1GB cap),
+  so it hands out real, mapped frames. See
+  [reference/memory-map.md](reference/memory-map.md).
 - The interactive shell (`shell/shell.c`) with `help`, `clear`, `hello`, `tick`.
   (Present and working, but not on the current boot path — see below.)
 - A minimal freestanding libc (`libc/string.c`, `libc/mem.c`).
@@ -40,13 +43,27 @@ limitations. It is a factual snapshot, not a roadmap.
   [reference/syscalls.md](reference/syscalls.md) and
   [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
 - A round-robin preemptive scheduler (`kernel/scheduler.c`): the timer tick
-  switches between two ring-3 tasks by overwriting the interrupt frame on the
-  kernel stack in place, so the stub's `iretq` resumes a different task.
-  `task_create` forges a never-run task (the ring-3 drop generalised), a fixed
-  `.bss` table holds them, and the two `user_program_a`/`_b` programs interleave
-  "A" and "B" on screen forever. No address-space isolation and a fixed table of
-  four (see limitations below). See [reference/scheduling.md](reference/scheduling.md)
-  and [decisions/0008-round-robin-preemptive-scheduler.md](decisions/0008-round-robin-preemptive-scheduler.md).
+  switches between several ring-3 tasks (three today) by overwriting the interrupt
+  frame on the kernel stack in place, so the stub's `iretq` resumes a different
+  task. `task_create` `kmalloc`s a `task_t`, forges it as a never-run task (the
+  ring-3 drop generalised), and bump-allocates its user stack from the user
+  region; a pointer array tracks the heap-allocated tasks. The three
+  `user_program_a`/`_b`/`_c` programs interleave "A", "B", and "C" on screen
+  forever. The old fixed four-task ceiling is gone; the shared user-stack region
+  and the lack of address-space isolation remain (see limitations below). See
+  [reference/scheduling.md](reference/scheduling.md),
+  [decisions/0008-round-robin-preemptive-scheduler.md](decisions/0008-round-robin-preemptive-scheduler.md),
+  and [decisions/0011-dynamic-tasks-and-stacks.md](decisions/0011-dynamic-tasks-and-stacks.md).
+- A kernel heap (`kernel/heap.c`), `kmalloc`/`kfree`: an explicit free list with
+  boundary tags and coalescing, ported from the CMSC216 p5 `el_malloc`. It draws
+  its slab from `alloc_frames_contiguous` (a new multi-page frame helper in
+  `kernel/memory.c`), grows on demand, and guards its critical section with a
+  save-and-restore interrupt disable so the timer IRQ cannot corrupt the free
+  list mid-relink. This is the layer that would implement `mmap`. It is present
+  and working but has no caller yet on the boot path; it exists to unblock the
+  next steps (a dynamic task table, per-process page-table structures). See
+  [reference/heap.md](reference/heap.md) and
+  [decisions/0010-kernel-heap-ported-from-p5.md](decisions/0010-kernel-heap-ported-from-p5.md).
 
 The kernel builds, links into `minios.elf`, is repackaged as `minios.bin`, and
 boots under QEMU. In the current build `kernel_main` hands off to the scheduler as
@@ -60,14 +77,17 @@ for `shell_init` restores the shell. See [building.md](building.md).
 These are absent by design; MiniOS stops at a single-address-space kernel that
 preempts between two hard-coded ring-3 tasks but does not manage processes.
 
-- **Processes.** The scheduler runs two hard-coded programs baked into the kernel
-  image, not loaded programs. There is a `SYS_EXIT` syscall, but with no parent to
-  return to it can only halt the machine. There is no notion of a process, no
-  loading, and no way to add a third program without editing the kernel.
+- **Processes.** The scheduler runs hard-coded programs baked into the kernel
+  image (three today), not loaded programs. There is a `SYS_EXIT` syscall, but
+  with no parent to return to it can only halt the machine. There is no notion of
+  a process, no loading, and no way to add a program without editing the kernel
+  (though tasks are now created dynamically at runtime rather than from a fixed
+  table).
 - **Per-process paging.** Paging is on (it is required for long mode), but there
   is a single identity-mapped address space shared by everything, tasks included.
   There are no per-process page tables and no address-space isolation, so one
-  task can scribble on the other's stack (the two share one page, split in half).
+  task can scribble on another's stack (all tasks share one 2MB user-stack region,
+  sub-allocated into slices with no guard pages).
 - **A filesystem.** There is no block device, no disk driver, and no filesystem.
 - **Program loading.** There is no ELF loader and no way to run a separate
   program; the shell dispatches to compiled-in command functions.
@@ -93,21 +113,23 @@ processes and address spaces.
 **A scheduler.** Done. The timer interrupt is now a preemption point: the tick
 saves the interrupted `registers_t` into the current task's slot, picks the next
 runnable task round-robin, and copies its saved frame back over the on-stack frame
-in place, so the ISR stub's `iretq` resumes a different task. Two ring-3 tasks run
-this way. See
+in place, so the ISR stub's `iretq` resumes a different task. Three ring-3 tasks
+run this way. The task structs are now heap-allocated and their stacks
+bump-allocated from the user region, so the fixed four-task ceiling is gone (see
+[decisions/0011-dynamic-tasks-and-stacks.md](decisions/0011-dynamic-tasks-and-stacks.md)).
+See also
 [decisions/0008-round-robin-preemptive-scheduler.md](decisions/0008-round-robin-preemptive-scheduler.md).
-What remains is everything isolation buys (below) and lifting the fixed
-four-task, single-stack-page limits, both of which wait on an allocator and
-address spaces.
+What remains is everything isolation buys (below) and lifting the single-stack-
+region limit, which waits on per-process address spaces.
 
 **Per-process paging.** Real isolation needs a separate address space per
 process. Give each process its own top-level page table, switch `CR3` on context
 switch, and handle the page fault (vector 14, which already has a gate and a stub)
 to implement demand paging and to kill a process that touches memory it does not
 own. This is the largest step and the one that turns MiniOS from a single-image
-kernel into something that can safely run untrusted programs. Today the two tasks
-share one address space and one stack page (split by hand), so a stack overflow in
-one silently corrupts the other.
+kernel into something that can safely run untrusted programs. Today all tasks
+share one address space and one stack region (sub-allocated into slices), so a
+stack overflow in one silently corrupts a neighbour.
 
 ## Known limitations
 
@@ -121,36 +143,31 @@ one silently corrupts the other.
   length, needs per-process address spaces that do not exist yet. Recorded as a
   TODO in `kernel/syscall.c`. Do not read the region check as real pointer
   safety. See [reference/syscalls.md](reference/syscalls.md).
-- **No dynamic memory beyond the frame allocator.** `kernel/memory.c` hands out
-  whole 4KB frames. There is no `kmalloc`/`kfree` heap for arbitrary-size
-  objects, so kernel data structures are statically sized.
-- **The scheduler is fixed and unisolated.** The task table is a fixed `.bss`
-  array of four (`MAX_TASKS`), because there is no kernel heap to allocate tasks
-  dynamically. The two tasks share a single 2MB user stack page split in half by
-  hand, with no guard page between them, so a stack overflow in one corrupts the
-  other. There is no per-task address space, no blocking or sleeping (a task
-  yields only by being preempted), and no task exit that returns anywhere. See
-  [reference/scheduling.md](reference/scheduling.md).
+- **The scheduler is unisolated, and the user-stack region is a hard ceiling.**
+  Task structs are now heap-allocated (`kmalloc` in `task_create`) and their
+  stacks bump-allocated from the user region, so the old fixed four-task ceiling
+  is gone and the heap now has a real caller on the boot path. But all user stacks
+  still share the single 2MB PG_USER region (`0x600000`-`0x800000`), carved into
+  256KB slices, so there are only 8 stacks and no guard page between slices: a
+  stack overflow in one task corrupts a neighbour. User stacks cannot move to the
+  kernel heap, because `kmalloc` hands out frame-pool pages with no PG_USER bit
+  (a ring-3 push there would fault). There is no per-task address space, no
+  blocking or sleeping (a task yields only by being preempted), and no task exit
+  that returns anywhere. Lifting the stack ceiling needs per-process paging. See
+  [reference/scheduling.md](reference/scheduling.md) and
+  [decisions/0011-dynamic-tasks-and-stacks.md](decisions/0011-dynamic-tasks-and-stacks.md).
 - **No SMP.** MiniOS assumes a single CPU. It uses the legacy 8259 PIC, not the
   APIC/IO-APIC, and has no per-core state or locking.
-- **8MB identity map.** `boot/boot.asm` identity-maps only the first 8MB. Any
-  physical address above 8MB is unmapped and would fault on access.
-- **The frame allocator is not usable in practice.** `memory_init()` now reserves
-  the 4-8M frames the ring-3 program occupies (its code and stack), so the
-  allocator no longer hands out memory that the running user program lives on.
-  But that is the only fix: the first free frame is now at 8M, above the identity
-  map, so `alloc_frame()` returns an address that page-faults on first touch,
-  every time. Reserving the region fixes "do not hand out frames something else
-  is using"; it does not fix "the frames handed out are not mapped." The pool
-  stays unusable until the identity map is extended. See
-  [reference/memory-map.md](reference/memory-map.md).
-- **Memory sizes are invented, not measured.** Both the 8MB identity map
-  (`boot/boot.asm`) and the 128MB frame pool (`kernel/memory.c`) are hardcoded
-  numbers. Multiboot hands the kernel a memory map describing how much RAM the
-  machine actually has, but `kernel_main` takes no arguments, so the Multiboot
-  info pointer is discarded at boot and the map is ignored. The proper fix is to
-  read that map and size both the identity map and the frame pool from it. This
-  is recorded so it is not mistaken for a small oversight.
+- **1GB identity-map ceiling.** The boot climb (`boot/boot.asm`) maps a fixed
+  32MB, then `kernel/memory.c` reads the Multiboot map and extends the identity
+  map to cover real RAM, capped at 1GB. The cap is real: the single `pd_table` is
+  one 4KB page (512 x 2MB = 1GB), so physical RAM above 1GB is not mapped and is
+  ignored. Lifting it needs more page directories, which is out of scope. The
+  frame pool is sized from the same detected RAM, so `alloc_frame()` now returns
+  real, mapped, writable memory (the old "invented sizes" and "allocator returns
+  unmapped addresses" problems are gone). See
+  [reference/memory-map.md](reference/memory-map.md) and
+  [decisions/0009-read-multiboot-map-extend-identity-map.md](decisions/0009-read-multiboot-map-extend-identity-map.md).
 - **QEMU only.** The kernel has been built and booted under
   `qemu-system-x86_64`. It has not been run on real hardware or other emulators,
   and the `minios.bin` boot path relies on QEMU's built-in Multiboot `-kernel`

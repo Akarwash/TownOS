@@ -6,10 +6,12 @@ learning kernel: single address space and no filesystem. It drops to ring 3
 (CPL 3) to run small demonstration programs in their own user-accessible pages,
 and those programs call back into the kernel through a single `int 0x50` syscall
 gate (`SYS_WRITE`, `SYS_EXIT`) rather than faulting. A round-robin preemptive
-scheduler now switches between two ring-3 tasks on every timer tick by
-overwriting the interrupt frame in place, so the two run concurrently. There is
-still no address-space isolation, so this is cooperative-in-spirit multitasking
-in a single shared space, not process isolation. See
+scheduler switches between several ring-3 tasks (three today) on every timer tick
+by overwriting the interrupt frame in place, so they run concurrently. Each task
+is a heap-allocated `task_t` with its own stack carved from the user region by a
+bump allocator, so the old fixed two-task ceiling is gone. There is still no
+address-space isolation, so this is cooperative-in-spirit multitasking in a
+single shared space, not process isolation. See
 [reference/user-mode.md](reference/user-mode.md),
 [reference/syscalls.md](reference/syscalls.md), and
 [reference/scheduling.md](reference/scheduling.md).
@@ -22,11 +24,11 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | Directory | Responsibility |
 |-----------|----------------|
 | `boot/` | Multiboot header and the hand-written 32 to 64 long-mode climb (assembly). |
-| `kernel/` | Core kernel: GDT/TSS, IDT, interrupt dispatch, syscall dispatch, timer, physical memory allocator, ring-3 entry, the scheduler, and `kernel_main`. |
+| `kernel/` | Core kernel: GDT/TSS, IDT, interrupt dispatch, syscall dispatch, timer, physical frame allocator, the kernel heap, ring-3 entry, the scheduler, and `kernel_main`. |
 | `drivers/` | Hardware drivers: VGA text screen, PS/2 keyboard, port I/O helpers. |
 | `libc/` | Minimal freestanding C library: `string` and `mem` routines. |
 | `shell/` | The interactive command shell. |
-| `user/` | The two ring-3 demonstration programs (`.user_text`, run at CPL 3, call the kernel via `int 0x50`; the scheduler switches between them). |
+| `user/` | The three ring-3 demonstration programs (`.user_text`, run at CPL 3, call the kernel via `int 0x50`; the scheduler switches between them). |
 | `include/` | Shared definitions (`types.h`, the vector map, the syscall ABI numbers). |
 
 ## Source files
@@ -34,18 +36,19 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | File | Responsibility | State |
 |------|----------------|-------|
 | `boot/boot.asm` | Multiboot header, page tables, PAE/EFER/paging, bootstrap GDT, far jump to 64-bit, call `kernel_main`. | Implemented |
-| `kernel/kernel.c` | `kernel_main`: the init sequence, then creates two tasks and starts the scheduler. | Implemented |
+| `kernel/kernel.c` | `kernel_main`: the init sequence, then creates three tasks and starts the scheduler. | Implemented |
 | `kernel/gdt.c`, `kernel/gdt.h` | Kernel GDT (null, kernel code/data, user code/data) and 64-bit TSS; selector constants. | Implemented |
 | `kernel/usermode.c`, `kernel/usermode.h` | `enter_user_mode`: forge the `iretq` frame and drop to ring 3. | Implemented |
 | `kernel/syscall.c`, `kernel/syscall.h` | Syscall dispatcher: `syscall_handler` switches on RAX (`SYS_WRITE`, `SYS_EXIT`). | Implemented |
-| `kernel/scheduler.c`, `kernel/scheduler.h` | Round-robin scheduler: `task_create` forges a task, `schedule` swaps the interrupt frame, `scheduler_start` enters task 0. | Implemented |
-| `user/user_program.c` | The two ring-3 demo programs in `.user_text` (`user_program_a`/`_b`); each loops calling the kernel via `int 0x50`. | Implemented |
+| `kernel/scheduler.c`, `kernel/scheduler.h` | Round-robin scheduler: `task_create` heap-allocates and forges a task and bump-allocates its user stack, `schedule` swaps the interrupt frame, `scheduler_start` enters task 0. | Implemented |
+| `user/user_program.c` | The three ring-3 demo programs in `.user_text` (`user_program_a`/`_b`/`_c`); each loops calling the kernel via `int 0x50`. | Implemented |
 | `kernel/gdt_flush.asm` | `lgdt`, reload data segments, reload CS via far return, `ltr`. | Implemented |
 | `kernel/idt.c`, `kernel/idt.h` | IDT table, `idt_set_entry`, PIC remap, IDT zeroing, `lidt`. | Implemented |
 | `kernel/isr.c`, `kernel/isr.h` | C-side interrupt dispatch: `isr_install`, `isr_handler`, `irq_handler`, handler registration. | Implemented |
 | `kernel/isr_stubs.asm` | `isr0`-`isr31`, `irq0`-`irq15` entry points and the common save/restore stubs. | Implemented |
 | `kernel/timer.c`, `kernel/timer.h` | PIT driver: program channel 0, count ticks on IRQ 0, call `schedule` each tick. | Implemented |
-| `kernel/memory.c`, `kernel/memory.h` | Bitmap physical frame allocator. | Implemented |
+| `kernel/memory.c`, `kernel/memory.h` | Bitmap physical frame allocator, plus `alloc_frames_contiguous` for multi-page runs. | Implemented |
+| `kernel/heap.c`, `kernel/heap.h` | Kernel heap (`kmalloc`/`kfree`): explicit free list with boundary tags and coalescing, ported from p5, on top of the frame allocator. | Implemented |
 | `drivers/screen.c`, `drivers/screen.h` | VGA text output: `print_char`/`print_string`/`print_int`, scrolling, cursor. | Implemented |
 | `drivers/keyboard.c`, `drivers/keyboard.h` | PS/2 keyboard driver on IRQ 1, scancode to ASCII. | Implemented |
 | `drivers/ports.c`, `drivers/ports.h` | `in`/`out` port I/O wrappers. | Implemented |
@@ -68,9 +71,10 @@ boot (boot.asm) ............ long-mode climb, hands off to kernel_main
   -> IDT (idt.c) ........... PIC remap, IDT zero, set_entry, lidt
   -> ISR stubs (isr_stubs)   isr0-31 / irq0-15 entry points, common save/restore
   -> drivers .............. screen, keyboard, timer, ports
-  -> task_create x2 ....... forge two ring-3 task frames (scheduler.c)
+  -> heap_init ............ build the kernel heap (heap.c)
+  -> task_create x3 ....... kmalloc + forge a ring-3 task, bump-allocate its stack (scheduler.c)
   -> scheduler_start ...... enter task 0 via enter_user_mode (usermode.c)
-  -> user_program_a/_b .... run at CPL 3, call the kernel via int 0x50
+  -> user_program_a/_b/_c . run at CPL 3, call the kernel via int 0x50
   -> timer tick ........... schedule() swaps the interrupt frame in place
   -> syscall_handler ...... SYS_WRITE prints (syscall.c)
 ```
@@ -91,24 +95,30 @@ From power-on to the idle loop:
    [reference/boot-sequence.md](reference/boot-sequence.md).
 3. The 64-bit entry sets `RSP = stack_top` and calls `kernel_main`.
 4. `kernel_main` (`kernel/kernel.c`) runs the init sequence in order:
-   `gdt_init()`, `isr_install()`, `timer_init(100)`, `keyboard_init()`,
-   `memory_init()`, then clears the screen and prints the banner.
-5. `kernel_main` calls `task_create` for each of `user_program_a` and
-   `user_program_b` (forging a ring-3 `iretq` frame per task), then
-   `scheduler_start()`, which enters task 0 via `enter_user_mode`. From here the
-   timer tick is a preemption point: `schedule()` saves the interrupted task's
-   register frame and copies the next task's frame over it in place, so `iretq`
-   resumes a different task. The two programs loop, each calling `SYS_WRITE`
-   through the `int 0x50` gate, and interleave "A" and "B" on screen forever
-   (neither calls `SYS_EXIT`). `scheduler_start` does not return, so the `hlt`
-   idle loop below it is unreachable in this build. See
+   `gdt_init()`, `isr_install()`, `timer_init(100)`, `keyboard_init()`, clears
+   the screen and prints the banner, then `memory_detect_and_map()` (reads the
+   Multiboot map, extends the identity map to real RAM, flushes the TLB) and
+   `memory_init()` (sizes the frame pool from the detected RAM). The banner
+   reports the detected RAM. See
+   [reference/memory-map.md](reference/memory-map.md).
+5. `kernel_main` calls `heap_init()`, then `task_create` for each of
+   `user_program_a`, `_b`, and `_c` (each `kmalloc`s a `task_t`, forges its ring-3
+   `iretq` frame, and bump-allocates a user stack), then `scheduler_start()`,
+   which enters task 0 via `enter_user_mode`. From here the timer tick is a
+   preemption point: `schedule()` saves the interrupted task's register frame and
+   copies the next task's frame over it in place, so `iretq` resumes a different
+   task. The three programs loop, each calling `SYS_WRITE` through the `int 0x50`
+   gate, and interleave "A", "B", and "C" on screen forever (none calls
+   `SYS_EXIT`). `scheduler_start` does not return, so the `hlt` idle loop below it
+   is unreachable in this build. See
    [reference/scheduling.md](reference/scheduling.md),
    [reference/user-mode.md](reference/user-mode.md), and
    [reference/syscalls.md](reference/syscalls.md).
 
-`kernel_main` takes no arguments and is not expected to return. Interrupts stay
-enabled across the drop (each task's forged RFLAGS keeps IF set), which is what
-lets the timer preempt a running task and drive the switch.
+`kernel_main` takes the Multiboot info pointer (`boot/boot.asm` forwards EBX in
+RDI) and is not expected to return. Interrupts stay enabled across the drop (each
+task's forged RFLAGS keeps IF set), which is what lets the timer preempt a running
+task and drive the switch.
 
 ## Where to read more
 
@@ -118,4 +128,5 @@ lets the timer preempt a running task and drive the switch.
 - Ring 3 and syscalls: [reference/user-mode.md](reference/user-mode.md), [reference/syscalls.md](reference/syscalls.md)
 - The scheduler: [reference/scheduling.md](reference/scheduling.md)
 - Memory layout: [reference/memory-map.md](reference/memory-map.md)
+- The kernel heap: [reference/heap.md](reference/heap.md)
 - Concepts (the why): [`../learnings/`](../learnings/README.md)

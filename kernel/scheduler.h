@@ -15,10 +15,12 @@
 // thinks is the same program but is really the next one. See schedule() and
 // docs/reference/scheduling.md.
 
-// Fixed task table: no dynamic allocation. The frame allocator (kernel/memory.c)
-// hands out addresses above the 8M identity map that fault on first touch, and
-// there is no kernel heap. TODO: make this dynamic once a real allocator exists.
-#define MAX_TASKS 4
+// A generous, arbitrary cap on how many tasks we TRACK. This is NOT the old
+// storage ceiling: the task_t structs are now heap-allocated (kmalloc, see
+// task_create), so the kernel heap that used to be missing exists. This only
+// bounds the size of the pointer-bookkeeping array in scheduler.c, not where the
+// tasks live. 64 is arbitrary; raise it freely.
+#define MAX_TASKS_LIMIT 64
 
 typedef enum {
     TASK_UNUSED = 0,   // slot never filled (.bss zero-init lands here)
@@ -35,17 +37,13 @@ typedef struct {
     uint32_t id;
 } task_t;
 
-// Crude static split of PD[3] (0x600000-0x7FFFFF, the one PG_USER stack page).
-// Each stack grows DOWN from its top, giving each task 1MB. This is a stopgap:
-// a real system allocates a stack per task from an allocator, not by carving a
-// single hard-coded page in half. See docs/reference/memory-map.md.
-#define TASK0_STACK_TOP  0x700000
-#define TASK1_STACK_TOP  0x800000
-
-// Forge a never-run task: fill its saved pile so it looks like it was interrupted
-// at its first instruction, mark it TASK_READY. Returns the task id, or -1 if the
-// table is full.
-int task_create(uint64_t entry, uint64_t stack_top);
+// Forge a never-run task: heap-allocate its task_t, ask the user-stack allocator
+// (scheduler.c) for a stack, fill its saved pile so it looks like it was
+// interrupted at its first instruction, mark it TASK_READY. task_create no longer
+// takes a stack: it hands out one from the PG_USER stack region itself, because a
+// ring-3 stack cannot live on the kernel heap (see scheduler.c). Returns the task
+// id, or -1 if the heap is out of memory or the user-stack region is exhausted.
+int task_create(uint64_t entry);
 
 // Pick task 0 and enter it. Does not return (control only ever comes back into
 // the kernel through an interrupt, where schedule() runs).
