@@ -166,6 +166,16 @@ void scheduler_start(void) {
     tasks[0]->state = TASK_RUNNING;
     scheduler_running = 1;
 
+    // Load task 0's address space BEFORE dropping to ring 3. Until now we have run
+    // on the boot tables; task 0's user code and stack live in ITS tree, not the
+    // boot tree, so entering ring 3 without this switch would fetch the first user
+    // instruction through a mapping that no longer describes this task. This is
+    // safe because the kernel half is cloned identically into task 0's tree, so
+    // enter_user_mode (kernel code) and the task_t it reads (kernel heap) stay
+    // mapped across the switch; only the user half changes. Every LATER switch is
+    // done by schedule(); this is just the first one, which schedule() never runs.
+    paging_switch(tasks[0]->aspace);
+
     // Reuse the proven ring-3 entry path rather than hand-rolling a second iretq.
     // Task 0's forged GPRs (all zero) do not matter on this first entry: a fresh
     // program sets up its own registers before it reads any. Every LATER entry
@@ -223,4 +233,22 @@ void schedule(registers_t *r) {
     // would leave the on-stack pile unchanged and iretq would return to the SAME
     // program. It must be written through r, which points at the live stack.
     *r = tasks[next]->regs;
+
+    // (4) SWITCH ADDRESS SPACES. Load the next task's CR3 so its private user half
+    // becomes active: the identical VAs (code at 0x400000, stack top 0x800000) now
+    // resolve to THIS task's own frames, which is the isolation. Writing CR3 also
+    // flushes the TLB (we use no global pages), dropping the previous task's stale
+    // user translations for free.
+    //
+    // ORDERING TRAP: this MUST come after we are done touching the outgoing task's
+    // world and before iretq returns to ring 3, and it is only safe mid-interrupt
+    // because EVERYTHING the CPU still needs on the way out lives in the KERNEL
+    // half, which is cloned identically into every tree: the register pile `r` is
+    // on the kernel stack, the tasks[] array and this code are kernel .data/.text,
+    // and when the timer next fires the IDT, GDT, TSS rsp0 stack and interrupt
+    // stub are all reached through the same kernel mappings. So the switch changes
+    // only the user half; the kernel never disappears out from under itself. If
+    // any of those lived in the user half this would triple-fault on the next
+    // instruction. Use the cached cr3 to avoid a double dereference on this path.
+    __asm__ __volatile__("mov %0, %%cr3" : : "r"(tasks[next]->cr3) : "memory");
 }
