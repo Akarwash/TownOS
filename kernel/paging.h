@@ -58,4 +58,10 @@ void paging_switch(address_space_t *as);
 #define PG_USER      (1UL << 2)   // ring-3 (CPL 3) access allowed
 #define PG_HUGE      (1UL << 7)   // PD entry: this IS a 2MB page, stop the walk
 
+// The physical-frame field of a page-table entry: bits 12..51. Masking an entry
+// with this drops the flag bits and leaves the frame address (which, because
+// everything below 1GB is identity mapped, is also a writable virtual pointer to
+// the next table). Exposed so a caller can walk a tree back by hand.
+#define PTE_ADDR_MASK  0x000FFFFFFFFFF000UL
+
 #endif
