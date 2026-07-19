@@ -99,15 +99,16 @@ the bounds check above and fault a ring-3 read.
 
 ## What a run looks like
 
-The two ring-3 tasks each call `SYS_WRITE` in a loop with a single-letter string,
-"A" and "B" (neither calls `SYS_EXIT`; the scheduler switches between them, see
+The three ring-3 tasks each call `SYS_WRITE` in a loop with a single-letter string,
+"A", "B", and "C" (none calls `SYS_EXIT`; the scheduler switches between them, see
 [scheduling.md](scheduling.md)). Booted under QEMU with `-d int`, vector `0x50`
-fires repeatedly from both tasks (two distinct RIPs, `IP=001b:0040002b` and
-`IP=001b:00400083`, on the two half-page stacks), each at `cpl=3`, with no `#GP`
-(0x0D) and no `#PF` (0x0E). On screen the letters interleave:
+fires repeatedly from all three tasks (three distinct RIPs, `IP=001b:0040002b`,
+`IP=001b:00400083`, and `IP=001b:004000db`, each in its own address space with its
+own `CR3`), each at `cpl=3`, with no `#GP` (0x0D) and no `#PF` (0x0E). On screen
+the letters interleave:
 
 ```
-ABABABABABABABAB...
+ABCABCABCABCABC...
 ```
 
 Passing a kernel address (for example `0x100000`) to `SYS_WRITE` instead prints

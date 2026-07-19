@@ -1,10 +1,11 @@
 # Project status
 
-MiniOS is a learning kernel: it boots x86-64 long mode, drops to ring 3, and now
-preempts between two ring-3 tasks on the timer tick. (An interrupt-driven shell is
-still compiled and working but off the boot path.) This page records what works
-today, what was deliberately never built, the natural next steps, and the known
-limitations. It is a factual snapshot, not a roadmap.
+MiniOS is a learning kernel: it boots x86-64 long mode, drops to ring 3, and
+preempts between three ring-3 tasks on the timer tick, each in its own address
+space (per-process paging). (An interrupt-driven shell is still compiled and
+working but off the boot path.) This page records what works today, what was
+deliberately never built, the natural next steps, and the known limitations. It
+is a factual snapshot, not a roadmap.
 
 ## What works
 
@@ -44,50 +45,63 @@ limitations. It is a factual snapshot, not a roadmap.
   [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
 - A round-robin preemptive scheduler (`kernel/scheduler.c`): the timer tick
   switches between several ring-3 tasks (three today) by overwriting the interrupt
-  frame on the kernel stack in place, so the stub's `iretq` resumes a different
-  task. `task_create` `kmalloc`s a `task_t`, forges it as a never-run task (the
-  ring-3 drop generalised), and bump-allocates its user stack from the user
-  region; a pointer array tracks the heap-allocated tasks. The three
-  `user_program_a`/`_b`/`_c` programs interleave "A", "B", and "C" on screen
-  forever. The old fixed four-task ceiling is gone; the shared user-stack region
-  and the lack of address-space isolation remain (see limitations below). See
+  frame on the kernel stack in place and loading the next task's CR3, so the
+  stub's `iretq` resumes a different task in its own address space. `task_create`
+  `kmalloc`s a `task_t`, builds its private address space, and forges it as a
+  never-run task (the ring-3 drop generalised); a pointer array tracks the
+  heap-allocated tasks. The three `user_program_a`/`_b`/`_c` programs interleave
+  "A", "B", and "C" on screen forever. The old fixed four-task ceiling and the
+  shared user-stack region are both gone. See
   [reference/scheduling.md](reference/scheduling.md),
   [decisions/0008-round-robin-preemptive-scheduler.md](decisions/0008-round-robin-preemptive-scheduler.md),
   and [decisions/0011-dynamic-tasks-and-stacks.md](decisions/0011-dynamic-tasks-and-stacks.md).
+- Per-process paging (`kernel/paging.c`): each task has its own page-table tree,
+  loaded into CR3 on every context switch, so two tasks use the same virtual
+  addresses (code `0x400000`, stack top `0x800000`) backed by different physical
+  frames. Each tree has a private 4KB user half (a per-task copy of the ring-3
+  image and a fresh stack) and a kernel half cloned from the boot tables by value,
+  kernel-only, so the kernel is mapped in every tree (interrupts land in mapped
+  kernel code without a CR3 change). This is real address-space isolation: a stray
+  pointer faults instead of corrupting a neighbour. The by-value kernel clone rests
+  on kernel mappings being frozen after boot (a documented tripwire). See
+  [reference/paging.md](reference/paging.md) and
+  [decisions/0012-per-process-paging.md](decisions/0012-per-process-paging.md).
 - A kernel heap (`kernel/heap.c`), `kmalloc`/`kfree`: an explicit free list with
   boundary tags and coalescing, ported from the CMSC216 p5 `el_malloc`. It draws
   its slab from `alloc_frames_contiguous` (a new multi-page frame helper in
   `kernel/memory.c`), grows on demand, and guards its critical section with a
   save-and-restore interrupt disable so the timer IRQ cannot corrupt the free
-  list mid-relink. This is the layer that would implement `mmap`. It is present
-  and working but has no caller yet on the boot path; it exists to unblock the
-  next steps (a dynamic task table, per-process page-table structures). See
+  list mid-relink. This is the layer that would implement `mmap`. It now has real
+  callers on the boot path: the heap-allocated `task_t` structs and the
+  per-process `address_space_t` handles. See
   [reference/heap.md](reference/heap.md) and
   [decisions/0010-kernel-heap-ported-from-p5.md](decisions/0010-kernel-heap-ported-from-p5.md).
 
 The kernel builds, links into `minios.elf`, is repackaged as `minios.bin`, and
 boots under QEMU. In the current build `kernel_main` hands off to the scheduler as
-its last act (it creates two ring-3 tasks and enters task 0; the timer then
-switches between them, and they print "A"/"B" forever), so the interactive shell,
-though compiled and working, is not reached. Swapping the scheduler handoff back
-for `shell_init` restores the shell. See [building.md](building.md).
+its last act (it creates three ring-3 tasks, each in its own address space, and
+enters task 0; the timer then switches between them, and they print "A"/"B"/"C"
+forever), so the interactive shell, though compiled and working, is not reached.
+Swapping the scheduler handoff back for `shell_init` restores the shell. See
+[building.md](building.md).
 
 ## What was never built
 
-These are absent by design; MiniOS stops at a single-address-space kernel that
-preempts between two hard-coded ring-3 tasks but does not manage processes.
+These are absent by design; MiniOS isolates and preempts between hard-coded
+ring-3 tasks in their own address spaces, but does not load or manage processes.
 
 - **Processes.** The scheduler runs hard-coded programs baked into the kernel
-  image (three today), not loaded programs. There is a `SYS_EXIT` syscall, but
-  with no parent to return to it can only halt the machine. There is no notion of
-  a process, no loading, and no way to add a program without editing the kernel
-  (though tasks are now created dynamically at runtime rather than from a fixed
+  image (three today), not loaded programs. Each task now has its own address
+  space (per-process paging), but the program it runs is still compiled in: there
+  is a `SYS_EXIT` syscall, but with no parent to return to it can only halt the
+  machine, and there is no loading and no way to add a program without editing the
+  kernel (though tasks are created dynamically at runtime rather than from a fixed
   table).
-- **Per-process paging.** Paging is on (it is required for long mode), but there
-  is a single identity-mapped address space shared by everything, tasks included.
-  There are no per-process page tables and no address-space isolation, so one
-  task can scribble on another's stack (all tasks share one 2MB user-stack region,
-  sub-allocated into slices with no guard pages).
+- **Demand paging, copy-on-write, and swap.** Per-process paging exists, but every
+  page is mapped eagerly at `task_create` and backed by real frames. There is no
+  lazy allocation on fault, no copy-on-write sharing (the read-only user text is
+  copied in full per task rather than shared, `TODO(shared-text)`), and no paging
+  to disk.
 - **A filesystem.** There is no block device, no disk driver, and no filesystem.
 - **Program loading.** There is no ELF loader and no way to run a separate
   program; the shell dispatches to compiled-in command functions.
@@ -122,14 +136,16 @@ See also
 What remains is everything isolation buys (below) and lifting the single-stack-
 region limit, which waits on per-process address spaces.
 
-**Per-process paging.** Real isolation needs a separate address space per
-process. Give each process its own top-level page table, switch `CR3` on context
-switch, and handle the page fault (vector 14, which already has a gate and a stub)
-to implement demand paging and to kill a process that touches memory it does not
-own. This is the largest step and the one that turns MiniOS from a single-image
-kernel into something that can safely run untrusted programs. Today all tasks
-share one address space and one stack region (sub-allocated into slices), so a
-stack overflow in one silently corrupts a neighbour.
+**Per-process paging.** Done. Each task has its own page-table tree, loaded into
+CR3 on every context switch (`kernel/paging.c`): a private 4KB user half on its
+own frames and a kernel half cloned from the boot tables by value. Two tasks use
+the same virtual addresses backed by different physical memory, so a stray or
+overflowing pointer faults instead of corrupting a neighbour. See
+[decisions/0012-per-process-paging.md](decisions/0012-per-process-paging.md).
+What remains builds on it: handling the page fault (vector 14, which already has
+a gate and a stub) for demand paging and to kill a process that touches memory it
+does not own, copy-on-write to share the read-only text instead of copying it per
+task, and finally loaded processes rather than compiled-in programs.
 
 ## Known limitations
 
@@ -140,22 +156,24 @@ stack overflow in one silently corrupts a neighbour.
   length, so a string starting just below `USER_REGION_END` with no NUL still
   walks off the region into kernel pages. Real validation, checking the whole
   `[ptr, ptr+len)` range against the caller's mapped pages and capping the
-  length, needs per-process address spaces that do not exist yet. Recorded as a
-  TODO in `kernel/syscall.c`. Do not read the region check as real pointer
-  safety. See [reference/syscalls.md](reference/syscalls.md).
-- **The scheduler is unisolated, and the user-stack region is a hard ceiling.**
-  Task structs are now heap-allocated (`kmalloc` in `task_create`) and their
-  stacks bump-allocated from the user region, so the old fixed four-task ceiling
-  is gone and the heap now has a real caller on the boot path. But all user stacks
-  still share the single 2MB PG_USER region (`0x600000`-`0x800000`), carved into
-  256KB slices, so there are only 8 stacks and no guard page between slices: a
-  stack overflow in one task corrupts a neighbour. User stacks cannot move to the
-  kernel heap, because `kmalloc` hands out frame-pool pages with no PG_USER bit
-  (a ring-3 push there would fault). There is no per-task address space, no
-  blocking or sleeping (a task yields only by being preempted), and no task exit
-  that returns anywhere. Lifting the stack ceiling needs per-process paging. See
-  [reference/scheduling.md](reference/scheduling.md) and
-  [decisions/0011-dynamic-tasks-and-stacks.md](decisions/0011-dynamic-tasks-and-stacks.md).
+  length, is now possible (each task has a private tree that can be walked to
+  confirm a page is mapped and user-accessible) but is not yet implemented: the
+  check still only tests the start pointer against the fixed region constants.
+  Recorded as a TODO in `kernel/syscall.c`. Do not read the region check as real
+  pointer safety. See [reference/syscalls.md](reference/syscalls.md).
+- **The scheduler still has no blocking, sleeping, or task exit.** Task structs
+  are heap-allocated and each task now has its own address space with a private
+  stack (per-process paging), so the old fixed four-task ceiling and the shared
+  user-stack region are both gone: a stack overflow faults in the offending task
+  instead of corrupting a neighbour. What remains: there is no blocking or
+  sleeping (a task yields only by being preempted), no task exit that returns
+  anywhere (`SYS_EXIT` halts the machine), and no reclamation (a task's frames and
+  tree are never freed, since tasks are never destroyed). Memory is also used
+  wastefully: the read-only user text is copied in full per task rather than
+  shared (`TODO(shared-text)`). See
+  [reference/scheduling.md](reference/scheduling.md),
+  [reference/paging.md](reference/paging.md), and
+  [decisions/0012-per-process-paging.md](decisions/0012-per-process-paging.md).
 - **No SMP.** MiniOS assumes a single CPU. It uses the legacy 8259 PIC, not the
   APIC/IO-APIC, and has no per-core state or locking.
 - **1GB identity-map ceiling.** The boot climb (`boot/boot.asm`) maps a fixed

@@ -7,6 +7,50 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- Per-process paging: a private page-table tree per task (`kernel/paging.c`,
+  `kernel/paging.h`). Each task now has its own address space, loaded into CR3 on
+  every context switch, so two tasks use the same virtual addresses (code
+  `0x400000`, stack top `0x800000`) backed by DIFFERENT physical frames: real
+  isolation, replacing the single identity-mapped tree every task used to share.
+  Every tree has two halves. The USER half is private: 4KB pages to fresh frames,
+  user bit set, holding a per-task copy of the ring-3 image and a fresh stack. The
+  KERNEL half is cloned from the boot `pd_table` BY VALUE (every PD entry except
+  the two user slots `pd_table[2]`/`pd_table[3]`, each carrying the identical 2MB
+  huge-page kernel mapping, no user bit), so the kernel is mapped identically in
+  every tree and an interrupt still lands in mapped kernel code without a CR3
+  change. By value, not by reference, because MiniOS hangs the ring-3 region off
+  the same `pd_table` the kernel uses, so sharing it by reference would share the
+  user huge pages too and make a private `0x400000` impossible (see the ADR). The
+  by-value clone rests on kernel mappings being FROZEN after boot
+  (`memory_detect_and_map` fills the identity map once, nothing mutates a kernel
+  PD entry afterward); a tripwire comment in `kernel/paging.c`, the reference page,
+  and the ADR all warn that runtime kernel remapping (ASLR, hot-plug, higher-half)
+  would make the copies go stale and force a switch to by-reference. New API:
+  `paging_create_address_space()` (own PML4/PDPT/PD from `alloc_frame`, clone the
+  kernel half), `paging_map_page(as, virt, phys, flags)` (4KB walk creating
+  intermediate tables, user bit AND-down), and `paging_switch(as)` (load CR3,
+  which also flushes the TLB since no page is `PG_GLOBAL`). `PG_*` flag bits and
+  `PTE_ADDR_MASK` are shared in `kernel/paging.h`. `boot/boot.asm` now exposes
+  `pml4_table` and `pdpt_table` as `global` (alongside `pd_table`) so the C clone
+  can read all three boot tables. `task_t` (`kernel/scheduler.h`) gains an
+  `address_space_t *aspace` and a cached `cr3`; `task_create` builds the tree
+  (copying the whole linked image `_user_text_start`.._user_rodata_end into fresh
+  frames at `0x400000`, mapping a fresh stack at the fixed `USER_STACK_TOP`) and
+  the old user-stack bump allocator (`alloc_user_stack`, `USER_STACK_REGION_*`) is
+  gone: every task's stack is now the same VA on its own frames, retiring the
+  eight-stack ceiling and no-guard-page corruption from
+  `docs/decisions/0011-dynamic-tasks-and-stacks.md`. `schedule()` loads the
+  incoming task's CR3 after copying its register pile; `scheduler_start()` loads
+  task 0's CR3 before the first drop to ring 3. Copying the read-only text per
+  task is deliberate isolation, marked `TODO(shared-text)` for a future
+  by-reference-text refinement. Verified under QEMU with `-d int`: three distinct
+  task CR3 values, the same three user RIPs (`0x40002b`, `0x400083`, `0x4000db`)
+  all at `cpl=3`, an even round-robin interleave, and zero page (`0x0E`), GP
+  (`0x0D`), or double (`0x08`) faults; a temporary isolation proof (added,
+  verified, removed) walked each tree and confirmed the shared VAs `0x400000` and
+  the stack top page resolve to different physical frames in all three. See
+  `docs/decisions/0012-per-process-paging.md`, `docs/reference/paging.md`,
+  `docs/reference/scheduling.md`, and `docs/reference/memory-map.md`.
 - Dynamic tasks and per-task user stacks in the scheduler (`kernel/scheduler.c`,
   `kernel/scheduler.h`). Task structs are now heap-allocated: `task_create` calls
   `kmalloc(sizeof(task_t))` and stores the pointer in `task_t *tasks[MAX_TASKS_LIMIT]`
