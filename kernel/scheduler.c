@@ -2,6 +2,8 @@
 #include "gdt.h"
 #include "usermode.h"
 #include "heap.h"
+#include "paging.h"
+#include "memory.h"
 #include "../libc/mem.h"
 
 // Pointers to the heap-allocated tasks, in creation order (ids 0, 1, ...). Slots
@@ -14,38 +16,68 @@
 // the STRUCT can go on the heap but the STACK below cannot.
 static task_t *tasks[MAX_TASKS_LIMIT];
 
-// User-stack bump allocator.
-// A user task's stack MUST be reachable at CPL 3, so it CANNOT come from the
-// kernel heap: kmalloc hands out frame-pool pages with no PG_USER bit, and a
-// ring-3 push there would page-fault. Stacks are carved instead from PD[3]
-// (0x600000-0x800000), the one PG_USER stack page (boot.asm), the same region the
-// old hardcoded TASK0/TASK1 stacks split by hand.
-//
-// TODO(per-process-paging): this is a HARD ceiling and heap-allocating the task
-// struct did NOT lift it. Every task's stack still shares this one fixed 2MB
-// region, so we get only USER_STACK_COUNT stacks total, and (with no guard pages)
-// one task can still run off its slice into a neighbour's. The real fix is
-// per-process paging: give each process its own address space and its stacks stop
-// competing for one shared region. See docs/reference/memory-map.md.
-#define USER_STACK_REGION_START  0x600000     // PD[3] base (6 MB)
-#define USER_STACK_REGION_END    0x800000     // top of PD[3] (8 MB)
-#define USER_STACK_SIZE          0x40000      // 256 KB per task stack
-// (0x800000 - 0x600000) / 0x40000 = 8 stacks total (USER_STACK_COUNT).
+// The linked ring-3 image: everything the bootloader loaded at 0x400000, spanning
+// the code (.user_text) and its read-only strings (.user_rodata). These symbols
+// come from linker.ld; their ADDRESSES mark the ends of the image. task_create
+// copies this whole range into every task's private frames.
+extern char _user_text_start[];
+extern char _user_rodata_end[];
 
-// Base of the next stack slice to hand out. Starts at the bottom of the region
-// and climbs; each task gets USER_STACK_SIZE and the TOP of its slice as RSP.
-static uint64_t next_stack_base = USER_STACK_REGION_START;
+// Flags for a ring-3 page: present, writable, reachable at CPL 3. Every user page
+// (code and stack) is mapped with these; the copied text is left writable for
+// simplicity (no W^X in this teaching kernel).
+#define USER_PAGE_FLAGS  (PG_PRESENT | PG_WRITABLE | PG_USER)
 
-// Hand out the next stack slice, returning its TOP (the initial RSP; the stack
-// grows DOWN from there). Returns 0 when the region is exhausted, which
-// task_create turns into a -1 failure (see the ceiling note above).
-static uint64_t alloc_user_stack(void) {
-    if (next_stack_base + USER_STACK_SIZE > USER_STACK_REGION_END) {
-        return 0;
+// Every task's stack lives at ONE fixed virtual address: it grows DOWN from
+// USER_STACK_TOP (0x800000, usermode.h) across USER_STACK_SIZE bytes. Per-process
+// paging is exactly what lets every task reuse this same VA: each maps it to its
+// OWN physical frames, so the stacks no longer compete for one shared 2MB region
+// and one task can no longer run off its slice into a neighbour's. This replaces
+// the old bump allocator that split PD[3] by hand.
+#define USER_STACK_SIZE  0x40000                        // 256 KB per task
+#define USER_STACK_BASE  (USER_STACK_TOP - USER_STACK_SIZE)
+
+// Build the private user half of `as`: copy the linked ring-3 image to fresh
+// frames mapped at its link address (0x400000), then map a fresh stack at the
+// fixed stack VA. Returns 0 on success, -1 if any frame or page-table allocation
+// fails. On failure the frames already mapped into `as` leak, which is acceptable
+// here: it only happens on out-of-memory, and tasks are never destroyed.
+static int build_user_space(address_space_t *as) {
+    // (a) Copy the user image. The bootloader loaded it at physical 0x400000,
+    // which the boot tables (active now, before any CR3 switch) identity-map, so
+    // _user_text_start is a readable pointer to the original bytes. We copy the
+    // WHOLE image (all three programs) into private frames: each task therefore
+    // runs its own copy. That is the strongest isolation but the most wasteful.
+    // TODO(shared-text): map the read-only text by reference and copy only the
+    // writable data, so the three programs share one physical text image.
+    uint64_t image_size = (uint64_t)_user_rodata_end - (uint64_t)_user_text_start;
+    for (uint64_t off = 0; off < image_size; off += FRAME_SIZE) {
+        uint64_t frame = alloc_frame();
+        if (frame == 0) {
+            return -1;
+        }
+        // alloc_frame returns an identity-mapped frame (physical == a writable
+        // virtual pointer), so both the source (0x400000+off, boot-mapped) and
+        // the destination (frame) are writable right now. Copying a whole frame
+        // may read a little past the image into the same page, which is harmless.
+        memcpy((void *)frame, (void *)((uint64_t)_user_text_start + off), FRAME_SIZE);
+        if (paging_map_page(as, (uint64_t)_user_text_start + off, frame, USER_PAGE_FLAGS) != 0) {
+            return -1;
+        }
     }
-    uint64_t top = next_stack_base + USER_STACK_SIZE;
-    next_stack_base += USER_STACK_SIZE;
-    return top;
+
+    // (b) Map the stack. Fresh frames, no copy: the program writes its own stack
+    // as it runs. Mapping the top of PD[3] down USER_STACK_SIZE bytes.
+    for (uint64_t va = USER_STACK_BASE; va < USER_STACK_TOP; va += FRAME_SIZE) {
+        uint64_t frame = alloc_frame();
+        if (frame == 0) {
+            return -1;
+        }
+        if (paging_map_page(as, va, frame, USER_PAGE_FLAGS) != 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 // Index of the task currently on the CPU.
@@ -75,18 +107,29 @@ int task_create(uint64_t entry) {
         return -1;                          // out of heap: same contract as old "table full"
     }
 
-    // The stack is different: ring-3 code pushes to it, so it MUST be user-
-    // accessible and therefore cannot come from the kernel heap. Carve it from the
-    // PG_USER stack region instead. Do this before bumping num_tasks so a failed
-    // create leaves no half-built slot.
-    uint64_t stack_top = alloc_user_stack();
-    if (stack_top == 0) {
+    // Build this task's private address space: its own page-table tree with the
+    // kernel cloned in (so interrupts still land in mapped kernel code) and an
+    // empty user half. Do all allocation before bumping num_tasks so a failed
+    // create leaves no half-built slot for schedule() to trip over.
+    address_space_t *as = paging_create_address_space();
+    if (as == NULL) {
         kfree(t);
-        return -1;                          // user-stack region exhausted
+        return -1;                          // out of frames for the page tables
+    }
+
+    // Fill the user half: a private copy of the ring-3 image at 0x400000 and a
+    // private stack at the fixed stack VA. Both land on fresh frames unique to
+    // this task, which is the whole isolation guarantee.
+    if (build_user_space(as) != 0) {
+        kfree(t);
+        return -1;                          // out of frames for code/stack pages
     }
 
     uint32_t id = num_tasks++;
     tasks[id] = t;
+
+    t->aspace = as;
+    t->cr3 = as->pml4_phys;                 // cached so schedule() need not deref
 
     // Forge the pile so iretq will "return" into a program that never ran. This
     // is the exact trick enter_user_mode uses (usermode.c), generalised: instead
@@ -94,8 +137,8 @@ int task_create(uint64_t entry) {
     // registers_t the scheduler will later copy onto the stack, and let the
     // timer's iretq consume it.
     memset(&t->regs, 0, sizeof(t->regs));   // all GPRs start at 0
-    t->regs.rip = entry;                    // first instruction
-    t->regs.user_rsp = stack_top;           // top of this task's stack
+    t->regs.rip = entry;                    // first instruction (0x400000 region)
+    t->regs.user_rsp = USER_STACK_TOP;      // fixed stack top, same VA in every task
     t->regs.cs = GDT_SELECTOR_USER_CODE;    // 0x1B: ring-3 code, RPL 3
     t->regs.ss = GDT_SELECTOR_USER_DATA;    // 0x23: ring-3 data, RPL 3
 
