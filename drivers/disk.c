@@ -22,6 +22,7 @@
 #define ATA_COMMAND      0x1F7  // command (write)
 #define ATA_STATUS       0x1F7  // status (read); same port, different direction
 #define ATA_ALT_STATUS   0x3F6  // alternate status (read); no side effects on read
+#define ATA_DEV_CONTROL  0x3F6  // device control (write); same port, different direction
 
 // Commands.
 #define ATA_CMD_READ_SECTORS  0x20
@@ -32,6 +33,11 @@
 #define ATA_STATUS_BSY 0x80  // busy: the drive owns the registers, do not touch them
 #define ATA_STATUS_DRQ 0x08  // data request: a block is ready to move
 #define ATA_STATUS_ERR 0x01  // error: the last command failed
+
+// Device control register bit. nIEN set means "do not raise INTRQ". Because this
+// driver polls the status port, it never wants the drive to assert IRQ14; setting
+// nIEN keeps the interrupt line quiet so no disk IRQ ever fires.
+#define ATA_CTRL_NIEN 0x02
 
 // Drive/head base value: bit 6 sets LBA mode, bit 4 clear selects the master.
 // The low 4 bits carry LBA bits 24-27, OR'd in per transfer.
@@ -150,6 +156,11 @@ int disk_write(uint32_t lba, uint8_t count, const void *buf) {
 }
 
 void disk_init(void) {
+    // This is a polling driver, so silence the drive's interrupt line up front by
+    // setting nIEN in the device control register. Without this, every completed
+    // command would assert IRQ14 for no one to handle.
+    port_byte_out(ATA_DEV_CONTROL, ATA_CTRL_NIEN);
+
     // Minimal presence check: select the master, let it settle, and read status.
     // A floating bus with no drive reads back 0xFF. A real drive reports something
     // else. A full IDENTIFY is not needed just to know a disk is there.
