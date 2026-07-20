@@ -78,18 +78,38 @@ make clean && make
 make run
 ```
 
-This runs `qemu-system-x86_64 -kernel minios.bin`. A window opens showing the
-banner and a shell prompt:
+This first creates a disk image if one does not exist, then runs QEMU with it
+attached to the primary ATA bus:
+
+```bash
+qemu-img create -f raw disk.img 16M          # once, if disk.img is absent
+qemu-system-x86_64 -kernel minios.bin \
+    -drive file=disk.img,format=raw,if=ide,index=0,media=disk
+```
+
+`disk.img` is a 16MB raw (flat, unstructured) file, created once by the `make`
+rule and git-ignored. The `-drive` flags matter: `if=ide` puts the drive on the
+emulated IDE/ATA controller (not virtio or AHCI), so it answers at the I/O ports
+0x1F0-0x1F7 where the disk driver looks; `index=0` makes it the primary bus
+master; `format=raw` means the file is a plain byte array with no qcow layering.
+See [reference/disk.md](reference/disk.md).
+
+A window opens showing the banner, the detected RAM, the disk detection line, and
+then the three ring-3 tasks interleaving "A", "B", and "C" forever:
 
 ```
 Welcome to MiniOS!
-> _
+Detected RAM: 127 MB
+Disk: primary ATA master detected
+Starting scheduler with three ring-3 tasks...
+ABCABCABC...
 ```
 
-Type a command and press Enter (Backspace works): `help`, `clear`, `hello`,
-`tick`. The timer ticks on IRQ 0 (`tick` prints the count) and the keyboard
-delivers keypresses on IRQ 1. To quit QEMU, close the window, or press `Ctrl-A`
-then `X` in the launching terminal.
+The timer ticks on IRQ 0 and the keyboard delivers keypresses on IRQ 1. The
+interactive shell (`help`, `clear`, `hello`, `tick`) is still compiled but off
+the current boot path (the scheduler runs instead); see
+[project-status.md](project-status.md). To quit QEMU, close the window, or press
+`Ctrl-A` then `X` in the launching terminal.
 
 ## Debug
 
