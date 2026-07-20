@@ -19,6 +19,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 | [reference/gdt.md](reference/gdt.md) | The kernel GDT and TSS: selector table, descriptor layouts, and the bootstrap-vs-kernel GDT split |
 | [reference/idt.md](reference/idt.md) | The IDT and interrupt entry path: gate format, PIC remap, the 48 stubs, dispatch, and EOI |
 | [reference/heap.md](reference/heap.md) | The kernel heap: header/footer boundary tags, split/coalesce, the frame-allocator seam, and interrupt safety |
+| [reference/disk.md](reference/disk.md) | The polled ATA PIO disk driver: the 512-byte block model, the port layout, the read and write flows, and the driver-vs-filesystem layering |
 | [project-status.md](project-status.md) | What works, what was never built, and the natural next steps |
 | [decisions/](decisions/) | Architecture decision records (ADRs) for the load-bearing choices |
 
@@ -36,6 +37,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 - [0010 — Port the p5 explicit-free-list allocator as the kernel heap](decisions/0010-kernel-heap-ported-from-p5.md) — Port the CMSC216 p5 `el_malloc` (boundary tags, coalescing) as `kmalloc`/`kfree`, swapping `mmap` for `alloc_frames_contiguous` and adding an interrupt guard.
 - [0011 — Heap-allocate task structs and bump-allocate user stacks](decisions/0011-dynamic-tasks-and-stacks.md) — Retire the fixed four-task array (`kmalloc` each `task_t`) and the two hardcoded stacks (bump-allocate 256KB slices of the user region); the stack ceiling remains until per-process paging.
 - [0012 — Per-process paging: a private address space per task](decisions/0012-per-process-paging.md) — Give each task its own page-table tree (private 4KB user half, kernel half cloned by value), switch CR3 on context switch, so tasks share virtual addresses but not physical memory.
+- [0013 — A polled ATA PIO disk driver](decisions/0013-ata-pio-disk-driver.md) — Read and write 512-byte LBA28 blocks on the primary ATA bus by polling (no interrupts, no DMA); the simplest correct block device, which freezes the machine during a transfer and unblocks a filesystem.
 
 ## Status
 

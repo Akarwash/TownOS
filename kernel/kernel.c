@@ -1,5 +1,6 @@
 #include "../drivers/screen.h"
 #include "../drivers/keyboard.h"
+#include "../drivers/disk.h"
 #include "gdt.h"
 #include "isr.h"
 #include "timer.h"
@@ -33,6 +34,8 @@ void kernel_main(uint64_t multiboot_info_addr) {
     memory_init(multiboot_info_addr);          // size the frame pool from real RAM
 
     heap_init();        // build the kernel heap on top of the frame allocator
+
+    disk_init();        // probe the primary ATA bus and silence its IRQ line
 
     print_string("Starting scheduler with three ring-3 tasks...\n");
 

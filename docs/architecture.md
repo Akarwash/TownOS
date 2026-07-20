@@ -25,7 +25,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 |-----------|----------------|
 | `boot/` | Multiboot header and the hand-written 32 to 64 long-mode climb (assembly). |
 | `kernel/` | Core kernel: GDT/TSS, IDT, interrupt dispatch, syscall dispatch, timer, physical frame allocator, the kernel heap, per-process paging, ring-3 entry, the scheduler, and `kernel_main`. |
-| `drivers/` | Hardware drivers: VGA text screen, PS/2 keyboard, port I/O helpers. |
+| `drivers/` | Hardware drivers: VGA text screen, PS/2 keyboard, the polled ATA PIO disk driver, port I/O helpers. |
 | `libc/` | Minimal freestanding C library: `string` and `mem` routines. |
 | `shell/` | The interactive command shell. |
 | `user/` | The three ring-3 demonstration programs (`.user_text`, run at CPL 3, call the kernel via `int 0x50`; the scheduler switches between them). |
@@ -52,7 +52,8 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `kernel/heap.c`, `kernel/heap.h` | Kernel heap (`kmalloc`/`kfree`): explicit free list with boundary tags and coalescing, ported from p5, on top of the frame allocator. | Implemented |
 | `drivers/screen.c`, `drivers/screen.h` | VGA text output: `print_char`/`print_string`/`print_int`, scrolling, cursor. | Implemented |
 | `drivers/keyboard.c`, `drivers/keyboard.h` | PS/2 keyboard driver on IRQ 1, scancode to ASCII. | Implemented |
-| `drivers/ports.c`, `drivers/ports.h` | `in`/`out` port I/O wrappers. | Implemented |
+| `drivers/disk.c`, `drivers/disk.h` | Polled ATA PIO disk driver: `disk_init`/`disk_read`/`disk_write` move 512-byte LBA28 blocks on the primary bus. | Implemented |
+| `drivers/ports.c`, `drivers/ports.h` | `in`/`out` port I/O wrappers (byte and word, in and out). | Implemented |
 | `libc/string.c`, `libc/string.h` | `strlen`, `strcmp`, `strcpy`. | Implemented |
 | `libc/mem.c`, `libc/mem.h` | `memcpy`, `memset`. | Implemented |
 | `shell/shell.c`, `shell/shell.h` | Command loop: buffer keypresses, dispatch `help`/`clear`/`hello`/`tick`. | Implemented |
@@ -73,6 +74,7 @@ boot (boot.asm) ............ long-mode climb, hands off to kernel_main
   -> ISR stubs (isr_stubs)   isr0-31 / irq0-15 entry points, common save/restore
   -> drivers .............. screen, keyboard, timer, ports
   -> heap_init ............ build the kernel heap (heap.c)
+  -> disk_init ............ probe the primary ATA bus, silence IRQ14 (disk.c)
   -> task_create x3 ....... kmalloc + forge a ring-3 task, build its private address space (scheduler.c, paging.c)
   -> scheduler_start ...... load task 0's CR3, enter task 0 via enter_user_mode (usermode.c)
   -> user_program_a/_b/_c . run at CPL 3 in their own trees, call the kernel via int 0x50
@@ -102,7 +104,9 @@ From power-on to the idle loop:
    `memory_init()` (sizes the frame pool from the detected RAM). The banner
    reports the detected RAM. See
    [reference/memory-map.md](reference/memory-map.md).
-5. `kernel_main` calls `heap_init()`, then `task_create` for each of
+5. `kernel_main` calls `heap_init()` and then `disk_init()` (which probes the
+   primary ATA bus, prints whether a disk was detected, and sets nIEN so the
+   polled driver's IRQ14 stays silent), then `task_create` for each of
    `user_program_a`, `_b`, and `_c` (each `kmalloc`s a `task_t`, builds a private
    page-table tree with its own copy of the ring-3 image and stack, and forges its
    ring-3 `iretq` frame), then `scheduler_start()`, which loads task 0's CR3 and
@@ -133,4 +137,5 @@ task and drive the switch.
 - Per-process paging: [reference/paging.md](reference/paging.md)
 - Memory layout: [reference/memory-map.md](reference/memory-map.md)
 - The kernel heap: [reference/heap.md](reference/heap.md)
+- The disk driver: [reference/disk.md](reference/disk.md)
 - Concepts (the why): [`../learnings/`](../learnings/README.md)

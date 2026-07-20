@@ -7,6 +7,39 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- A polled ATA PIO disk driver (`drivers/disk.c`, `drivers/disk.h`): `disk_read`
+  and `disk_write` move any run of contiguous 512-byte blocks between a disk and a
+  buffer on the primary ATA bus, addressed by LBA28. A disk is treated as a flat
+  array of 512-byte blocks numbered from zero; every transfer names an exact block
+  and the driver only moves its bytes (choosing and naming blocks is a
+  filesystem's job, still absent). Deliberately the simplest correct driver: the
+  CPU polls the status port and copies every 16-bit word itself, no interrupts and
+  no DMA, so a transfer freezes the whole machine (the scheduler cannot preempt
+  mid-transfer), an accepted PIO limitation, not a bug. The LBA28 block number is
+  split across the LBA-low/mid/high ports (bits 0-23) and the low nibble of the
+  drive/head port (bits 24-27, OR'd with 0xE0 to select the master and enable LBA
+  mode); READ SECTORS (0x20) and WRITE SECTORS (0x30) start a transfer and a block
+  is 256 words at the 16-bit data port (`port_word_in`/`port_word_out`), not 512
+  byte reads. A write issues CACHE FLUSH (0xE7) and waits, because it is not
+  durable until the drive commits its buffer; a read needs no flush because it
+  changes nothing. Two spots that bite are handled and commented: a ~400ns settle
+  after drive select (read alt-status 0x3F6 four times, discard) so the status
+  bits are valid, and every poll loop bounded by a large cap that returns -1 on
+  timeout so a missing or wrong-bus disk fails loudly instead of hanging. Because
+  the driver polls, `disk_init` sets nIEN in the device control register (0x3F6)
+  so the drive never asserts IRQ14, and does a minimal presence check (status 0xFF
+  = floating bus / no drive) printing whether a disk was detected. Add
+  `port_word_out` to `drivers/ports.c`/`.h`, the write-side mirror of
+  `port_word_in`. The `Makefile` gains a `disk.img` target (`qemu-img create -f
+  raw disk.img 16M`, git-ignored) and `make run` attaches it to the primary bus
+  with `-drive file=disk.img,format=raw,if=ide,index=0,media=disk`. Verified under
+  QEMU with a temporary self-test in `kernel_main` (added, verified, removed):
+  writing a known pattern and reading it back into a zeroed buffer compared byte
+  for byte printed `DISK TEST: PASS` for one block and for two contiguous blocks,
+  the `-d int` log showed no page (`0x0E`), GP (`0x0D`), or double (`0x08`) fault
+  and no disk IRQ (`v=4e`), and the three ring-3 tasks kept interleaving "ABC"
+  afterward. See `docs/decisions/0013-ata-pio-disk-driver.md` and
+  `docs/reference/disk.md`.
 - Per-process paging: a private page-table tree per task (`kernel/paging.c`,
   `kernel/paging.h`). Each task now has its own address space, loaded into CR3 on
   every context switch, so two tasks use the same virtual addresses (code

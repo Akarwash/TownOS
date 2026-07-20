@@ -30,6 +30,16 @@ is a factual snapshot, not a roadmap.
 - The interactive shell (`shell/shell.c`) with `help`, `clear`, `hello`, `tick`.
   (Present and working, but not on the current boot path — see below.)
 - A minimal freestanding libc (`libc/string.c`, `libc/mem.c`).
+- A polled ATA PIO disk driver (`drivers/disk.c`): `disk_read` and `disk_write`
+  move any run of contiguous 512-byte blocks between a disk and a buffer on the
+  primary ATA bus, addressed by LBA28. It polls the status port (no interrupts,
+  no DMA) with bounded poll loops that time out rather than hang, and sets nIEN so
+  the drive never raises IRQ14. `make run` attaches a 16MB raw `disk.img`. This is
+  a raw block device, not a filesystem: it moves the exact block it is told to and
+  has no names, files, or free-space tracking. A transfer freezes the machine (the
+  scheduler cannot preempt mid-transfer), an accepted limitation of polled PIO. See
+  [reference/disk.md](reference/disk.md) and
+  [decisions/0013-ata-pio-disk-driver.md](decisions/0013-ata-pio-disk-driver.md).
 - A drop to ring 3 (`kernel/usermode.c`, `user/user_program.c`): after init,
   `kernel_main` forges an `iretq` frame and runs a small program at CPL 3 in its
   own user-accessible pages (code at 4M, stack at 6-8M), while the kernel's own
@@ -89,6 +99,8 @@ Swapping the scheduler handoff back for `shell_init` restores the shell. See
 
 These are absent by design; MiniOS isolates and preempts between hard-coded
 ring-3 tasks in their own address spaces, but does not load or manage processes.
+There is now a block device (the ATA disk driver), but nothing is built on it
+yet.
 
 - **Processes.** The scheduler runs hard-coded programs baked into the kernel
   image (three today), not loaded programs. Each task now has its own address
@@ -102,9 +114,14 @@ ring-3 tasks in their own address spaces, but does not load or manage processes.
   lazy allocation on fault, no copy-on-write sharing (the read-only user text is
   copied in full per task rather than shared, `TODO(shared-text)`), and no paging
   to disk.
-- **A filesystem.** There is no block device, no disk driver, and no filesystem.
+- **A filesystem.** There is a block device now (the polled ATA disk driver,
+  `drivers/disk.c`), but nothing on top of it: no on-disk layout, no names, no
+  files or directories, and no free-space tracking. The driver moves the exact
+  512-byte block it is told to; deciding which block holds what is the filesystem
+  layer, still absent. See [reference/disk.md](reference/disk.md).
 - **Program loading.** There is no ELF loader and no way to run a separate
-  program; the shell dispatches to compiled-in command functions.
+  program; the shell dispatches to compiled-in command functions. This waits on a
+  filesystem to load a program image from.
 
 ## Natural next steps
 
@@ -147,6 +164,17 @@ a gate and a stub) for demand paging and to kill a process that touches memory i
 does not own, copy-on-write to share the read-only text instead of copying it per
 task, and finally loaded processes rather than compiled-in programs.
 
+**A block device.** Done. `drivers/disk.c` is a polled ATA PIO driver that reads
+and writes 512-byte blocks by LBA on the primary bus. It is the raw storage layer
+a filesystem needs. See
+[decisions/0013-ata-pio-disk-driver.md](decisions/0013-ata-pio-disk-driver.md).
+The remaining steps build on it.
+
+**A filesystem, then program loading.** Next. With a block device in place, a
+filesystem can turn names into block numbers and track free space, and a program
+loader can then read an ELF image off disk into a fresh address space and run it
+as a real process. Both are still absent.
+
 ## Known limitations
 
 - **Syscall pointer validation is a stopgap, not real.** `SYS_WRITE` takes a
@@ -174,6 +202,13 @@ task, and finally loaded processes rather than compiled-in programs.
   [reference/scheduling.md](reference/scheduling.md),
   [reference/paging.md](reference/paging.md), and
   [decisions/0012-per-process-paging.md](decisions/0012-per-process-paging.md).
+- **Disk transfers freeze the machine.** The disk driver polls, so the CPU spins
+  in the wait loops for the whole transfer and nothing else runs, including the
+  scheduler: the timer tick cannot preempt a task while a block is moving. This is
+  slow and blocking, an accepted limitation of polled PIO. The fix is
+  interrupt-driven transfer (IRQ14 when a block is ready) and then DMA, recorded as
+  future work in
+  [decisions/0013-ata-pio-disk-driver.md](decisions/0013-ata-pio-disk-driver.md).
 - **No SMP.** MiniOS assumes a single CPU. It uses the legacy 8259 PIC, not the
   APIC/IO-APIC, and has no per-core state or locking.
 - **1GB identity-map ceiling.** The boot climb (`boot/boot.asm`) maps a fixed
