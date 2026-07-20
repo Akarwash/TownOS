@@ -74,9 +74,22 @@ minios.bin: minios.elf
 %.o: %.asm
 	$(ASM) $(ASMFLAGS) $< -o $@
 
-# Run in QEMU
-run: minios.bin
-	$(QEMU) -kernel minios.bin
+# Disk image for the ATA driver. 16MB of zeros, created once if absent.
+# qemu-img is chosen over dd because it ships with qemu (already required) and
+# states the size and format explicitly. The image is a raw flat array of bytes,
+# exactly the block device the ATA driver expects.
+DISK_IMG = disk.img
+
+$(DISK_IMG):
+	qemu-img create -f raw $(DISK_IMG) 16M
+
+# Run in QEMU with the disk attached to the primary ATA bus.
+#   if=ide      put the drive on the emulated IDE/ATA controller (NOT virtio or
+#               AHCI), so it answers at I/O ports 0x1F0-0x1F7 where the driver looks
+#   index=0     first drive on that controller = primary bus master
+#   format=raw  the file is a flat byte array, no qcow layering
+run: minios.bin $(DISK_IMG)
+	$(QEMU) -kernel minios.bin -drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk
 
 # Clean build files
 clean:
