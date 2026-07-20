@@ -18,12 +18,20 @@ grab onto.
 > [`../docs/`](../docs/README.md). To learn how operating systems work, stay
 > here.
 >
-> Note: chapters 1, 2, 3, and 5 were written for the original 32-bit
-> protected-mode design and describe it, not the current kernel. MiniOS is now
-> x86-64 long mode. These chapters are kept as personal learning material and are
-> deliberately **not** rewritten; each one carries a note at the top pointing to
-> the current reference page. Where a chapter and [`../docs/`](../docs/README.md)
-> disagree on a fact, `../docs/` is the current truth.
+> Note: the chapters fall into three states, shown in the index below.
+> **Frozen-32bit:** chapters 1, 2, 3, and 5 were written for the original 32-bit
+> protected-mode design and describe it, not the current kernel (MiniOS is now
+> x86-64 long mode). They are kept as personal learning material and are
+> deliberately **not** rewritten; where such a chapter and
+> [`../docs/`](../docs/README.md) disagree on a fact, `../docs/` is the current
+> truth. **Written:** chapters that still hold. **Stubbed:** chapters 08 and up
+> cover subsystems the kernel grew after the 32-bit era (long mode, the 64-bit
+> GDT/TSS, user mode, syscalls, the scheduler, the heap, per-process paging, the
+> disk driver). Each of these has a factual [`../docs/reference/`](../docs/README.md)
+> page today but no hand-written teaching chapter yet, so it exists only as a
+> stub: a title, a scope sentence, a status marker, and a link to its reference
+> page. The teaching prose for these is written by hand, later; the stubs mark the
+> gap honestly instead of hiding it.
 
 ## Who this is for
 
@@ -46,37 +54,73 @@ use them as reference. Each chapter follows the same shape:
 4. **Going further** — how real, production kernels extend the idea, plus
    exercises.
 
-## The chapters
+## The chapters: an honest index
 
-| # | File | What you'll learn |
-|---|------|-------------------|
-| 0 | [00-what-is-an-operating-system.md](00-what-is-an-operating-system.md) | What an OS actually is, the kernel/user split, and the four jobs every kernel does |
-| 1 | [01-how-an-os-boots.md](01-how-an-os-boots.md) | Power-on to `kernel_main`: firmware, bootloaders, Multiboot, real vs protected mode |
-| 2 | [02-protected-mode-and-the-gdt.md](02-protected-mode-and-the-gdt.md) | Segmentation, privilege rings, and why MiniOS builds a "flat" GDT |
-| 3 | [03-interrupts.md](03-interrupts.md) | The single most important OS mechanism: IDT, the PIC, ISRs, IRQs, and EOI |
-| 4 | [04-drivers-and-io.md](04-drivers-and-io.md) | Talking to hardware: port I/O, the VGA screen, PS/2 keyboard, and the PIT timer |
-| 5 | [05-memory-management.md](05-memory-management.md) | Physical vs virtual memory, allocators, paging, and where MiniOS stops |
-| 6 | [06-the-shell-and-event-loop.md](06-the-shell-and-event-loop.md) | Tying it together: the event loop, `hlt`, and how a keypress becomes a command |
-| 7 | [07-build-system-and-toolchain.md](07-build-system-and-toolchain.md) | Freestanding C, cross-compilers, linker scripts, and how bytes become a bootable image |
-| — | [glossary.md](glossary.md) | Every acronym and term, defined in one place |
-| — | [lecture.md](lecture.md) | Long-form lecture notes covering the same material |
-| — | [learning.md](learning.md) | Personal running notes gathered while building MiniOS |
+This index lists every concept the current kernel implements, the state of its
+teaching chapter, and the factual reference page that already covers it. The three
+chapter states are:
+
+- **written** — a teaching chapter that still describes the current kernel.
+- **frozen-32bit** — a chapter written for the original 32-bit design, kept as-is,
+  superseded on the x86-64 details by its reference page (and by a stub below).
+- **stubbed** — a title, scope sentence, status marker, and reference link only;
+  the teaching prose is written by hand, later.
+
+| # | Concept | Chapter | State | Reference page (facts, now) |
+|---|---------|---------|-------|------------------------------|
+| 0 | What an OS is, the kernel/user split | [00-what-is-an-operating-system.md](00-what-is-an-operating-system.md) | written | (pure concept) |
+| 1 | Booting: power-on to `kernel_main` | [01-how-an-os-boots.md](01-how-an-os-boots.md) | frozen-32bit | [../docs/reference/boot-sequence.md](../docs/reference/boot-sequence.md) |
+| 2 | Protected mode, segmentation, the GDT | [02-protected-mode-and-the-gdt.md](02-protected-mode-and-the-gdt.md) | frozen-32bit | [../docs/reference/gdt.md](../docs/reference/gdt.md) |
+| 3 | Interrupts: the IDT, the PIC, ISRs, EOI | [03-interrupts.md](03-interrupts.md) | frozen-32bit | [../docs/reference/idt.md](../docs/reference/idt.md) |
+| 4 | Drivers and port I/O: screen, keyboard, timer | [04-drivers-and-io.md](04-drivers-and-io.md) | written | (screen/keyboard/timer have no dedicated reference page) |
+| 5 | Memory: physical, virtual, allocators | [05-memory-management.md](05-memory-management.md) | frozen-32bit | [../docs/reference/memory-map.md](../docs/reference/memory-map.md) |
+| 6 | The shell and the event loop | [06-the-shell-and-event-loop.md](06-the-shell-and-event-loop.md) | written | (see [../docs/architecture.md](../docs/architecture.md)) |
+| 7 | Build system and toolchain | [07-build-system-and-toolchain.md](07-build-system-and-toolchain.md) | written | [../docs/building.md](../docs/building.md) |
+| 8 | Long mode and paging (the x86-64 climb) | [08-long-mode-and-paging.md](08-long-mode-and-paging.md) | stubbed | [boot-sequence.md](../docs/reference/boot-sequence.md), [paging.md](../docs/reference/paging.md), [memory-map.md](../docs/reference/memory-map.md) |
+| 9 | The 64-bit GDT and the TSS | [09-the-64bit-gdt-and-tss.md](09-the-64bit-gdt-and-tss.md) | stubbed | [../docs/reference/gdt.md](../docs/reference/gdt.md) |
+| 10 | User mode (ring 3) | [10-user-mode.md](10-user-mode.md) | stubbed | [../docs/reference/user-mode.md](../docs/reference/user-mode.md) |
+| 11 | System calls | [11-system-calls.md](11-system-calls.md) | stubbed | [../docs/reference/syscalls.md](../docs/reference/syscalls.md) |
+| 12 | The scheduler | [12-the-scheduler.md](12-the-scheduler.md) | stubbed | [../docs/reference/scheduling.md](../docs/reference/scheduling.md) |
+| 13 | The heap | [13-the-heap.md](13-the-heap.md) | stubbed | [../docs/reference/heap.md](../docs/reference/heap.md) |
+| 14 | Per-process paging | [14-per-process-paging.md](14-per-process-paging.md) | stubbed | [../docs/reference/paging.md](../docs/reference/paging.md) |
+| 15 | The disk driver | [15-the-disk-driver.md](15-the-disk-driver.md) | stubbed | [../docs/reference/disk.md](../docs/reference/disk.md) |
+
+Chapters 1, 2, 3, and 5 (frozen-32bit) and chapters 8, 9, and 14 (stubbed)
+overlap on purpose: the frozen chapter teaches the original 32-bit take on boot,
+the GDT, interrupts, and memory, while the new stub will teach the current
+x86-64 form of the same subsystem. The frozen chapter is kept for its 32-bit
+narrative; the current facts live in the reference page and, eventually, the stub.
+
+Supporting material, not chapters:
+
+| File | What it is |
+|------|------------|
+| [glossary.md](glossary.md) | Every acronym and term, defined in one place |
+| [lecture.md](lecture.md) | Long-form lecture notes covering the same material |
+| [learning.md](learning.md) | Personal running notes gathered while building MiniOS |
 
 ## A map of MiniOS
 
 Keep this next to you. It shows which source file implements each concept.
 
 ```
-boot/boot.asm .............. Multiboot header + first instructions   → ch.1
+boot/boot.asm .............. Multiboot header + first instructions   → ch.1, ch.8
 kernel/kernel.c ............ kernel_main: the "init" sequence          → ch.6
-kernel/gdt.c / gdt_flush.asm  Global Descriptor Table (segmentation)  → ch.2
+kernel/gdt.c / gdt_flush.asm  Global Descriptor Table + TSS           → ch.2, ch.9
 kernel/idt.c ............... Interrupt Descriptor Table + PIC remap    → ch.3
 kernel/isr.c / isr_stubs.asm  Interrupt handlers (C side + asm stubs)  → ch.3
 kernel/timer.c ............. PIT timer driver (IRQ0)                    → ch.4
 kernel/memory.c ............ physical memory allocator                 → ch.5
+kernel/paging.c ............ per-process page tables, CR3 switch        → ch.8, ch.14
+kernel/heap.c .............. kmalloc/kfree (explicit free list)         → ch.13
+kernel/usermode.c .......... drop to ring 3 (forged iretq frame)        → ch.10
+kernel/syscall.c ........... the int 0x50 syscall dispatcher            → ch.11
+kernel/scheduler.c ......... round-robin preemptive scheduler          → ch.12
 drivers/screen.c ........... VGA text-mode output                      → ch.4
 drivers/keyboard.c ......... PS/2 keyboard input (IRQ1)                → ch.4
+drivers/disk.c ............. polled ATA PIO disk driver                 → ch.15
 drivers/ports.c ............ in/out instruction wrappers               → ch.4
+user/user_program.c ........ the ring-3 demo programs                   → ch.10
 libc/string.c, mem.c ....... hand-rolled standard library              → ch.7
 shell/shell.c .............. the interactive command loop              → ch.6
 include/types.h ............ fixed-width integer types                 → ch.7
