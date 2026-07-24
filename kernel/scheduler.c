@@ -4,6 +4,7 @@
 #include "heap.h"
 #include "paging.h"
 #include "memory.h"
+#include "elf.h"
 #include "../libc/mem.h"
 
 // Pointers to the heap-allocated tasks, in creation order (ids 0, 1, ...). Slots
@@ -28,14 +29,27 @@ extern char _user_rodata_end[];
 // simplicity (no W^X in this teaching kernel).
 #define USER_PAGE_FLAGS  (PG_PRESENT | PG_WRITABLE | PG_USER)
 
-// Every task's stack lives at ONE fixed virtual address: it grows DOWN from
-// USER_STACK_TOP (0x800000, usermode.h) across USER_STACK_SIZE bytes. Per-process
-// paging is exactly what lets every task reuse this same VA: each maps it to its
-// OWN physical frames, so the stacks no longer compete for one shared 2MB region
-// and one task can no longer run off its slice into a neighbour's. This replaces
-// the old bump allocator that split PD[3] by hand.
-#define USER_STACK_SIZE  0x40000                        // 256 KB per task
-#define USER_STACK_BASE  (USER_STACK_TOP - USER_STACK_SIZE)
+// Map a fresh stack into `as` at the fixed stack VA (USER_STACK_BASE up to
+// USER_STACK_TOP, both in usermode.h). Fresh frames, no copy: the program writes
+// its own stack as it runs. Every task's stack is at the SAME virtual address on
+// its OWN physical frames, which is what per-process paging buys and what
+// replaced the old bump allocator that split PD[3] by hand.
+//
+// Returns 0 on success, -1 if a frame or page-table allocation fails. On failure
+// the frames already mapped into `as` leak, which is acceptable here: it only
+// happens on out-of-memory, and tasks are never destroyed.
+static int map_user_stack(address_space_t *as) {
+    for (uint64_t va = USER_STACK_BASE; va < USER_STACK_TOP; va += FRAME_SIZE) {
+        uint64_t frame = alloc_frame();
+        if (frame == 0) {
+            return -1;
+        }
+        if (paging_map_page(as, va, frame, USER_PAGE_FLAGS) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
 
 // Build the private user half of `as`: copy the linked ring-3 image to fresh
 // frames mapped at its link address (0x400000), then map a fresh stack at the
@@ -66,18 +80,8 @@ static int build_user_space(address_space_t *as) {
         }
     }
 
-    // (b) Map the stack. Fresh frames, no copy: the program writes its own stack
-    // as it runs. Mapping the top of PD[3] down USER_STACK_SIZE bytes.
-    for (uint64_t va = USER_STACK_BASE; va < USER_STACK_TOP; va += FRAME_SIZE) {
-        uint64_t frame = alloc_frame();
-        if (frame == 0) {
-            return -1;
-        }
-        if (paging_map_page(as, va, frame, USER_PAGE_FLAGS) != 0) {
-            return -1;
-        }
-    }
-    return 0;
+    // (b) Map the stack.
+    return map_user_stack(as);
 }
 
 // Index of the task currently on the CPU.
@@ -95,7 +99,15 @@ static uint32_t num_tasks = 0;
 // stays 0 until scheduler_start arms it, so schedule() is a no-op before then.
 static int scheduler_running = 0;
 
-int task_create(uint64_t entry) {
+// Register a task whose address space is already built, and forge its saved pile
+// so iretq will "return" into a program that never ran.
+//
+// Both creation paths end here, so the forge exists in exactly one place. The
+// only thing that differs between a compiled-in program and one loaded from a
+// file is where `entry` came from: a linker symbol, or an ELF header.
+//
+// Returns the task id, or -1 if the heap is full or the task table is.
+static int task_register(address_space_t *as, uint64_t entry) {
     if (num_tasks >= MAX_TASKS_LIMIT) {
         return -1;                          // bookkeeping array full (arbitrary cap)
     }
@@ -105,24 +117,6 @@ int task_create(uint64_t entry) {
     task_t *t = (task_t *)kmalloc(sizeof(task_t));
     if (t == NULL) {
         return -1;                          // out of heap: same contract as old "table full"
-    }
-
-    // Build this task's private address space: its own page-table tree with the
-    // kernel cloned in (so interrupts still land in mapped kernel code) and an
-    // empty user half. Do all allocation before bumping num_tasks so a failed
-    // create leaves no half-built slot for schedule() to trip over.
-    address_space_t *as = paging_create_address_space();
-    if (as == NULL) {
-        kfree(t);
-        return -1;                          // out of frames for the page tables
-    }
-
-    // Fill the user half: a private copy of the ring-3 image at 0x400000 and a
-    // private stack at the fixed stack VA. Both land on fresh frames unique to
-    // this task, which is the whole isolation guarantee.
-    if (build_user_space(as) != 0) {
-        kfree(t);
-        return -1;                          // out of frames for code/stack pages
     }
 
     uint32_t id = num_tasks++;
@@ -151,6 +145,50 @@ int task_create(uint64_t entry) {
     t->id = id;
     t->state = TASK_READY;
     return (int)id;
+}
+
+int task_create(uint64_t entry) {
+    // Build this task's private address space: its own page-table tree with the
+    // kernel cloned in (so interrupts still land in mapped kernel code) and an
+    // empty user half. Do all allocation before task_register bumps num_tasks so
+    // a failed create leaves no half-built slot for schedule() to trip over.
+    address_space_t *as = paging_create_address_space();
+    if (as == NULL) {
+        return -1;                          // out of frames for the page tables
+    }
+
+    // Fill the user half: a private copy of the ring-3 image at 0x400000 and a
+    // private stack at the fixed stack VA. Both land on fresh frames unique to
+    // this task, which is the whole isolation guarantee.
+    if (build_user_space(as) != 0) {
+        return -1;                          // out of frames for code/stack pages
+    }
+
+    return task_register(as, entry);
+}
+
+int task_create_from_file(const char *name) {
+    // Same shape as task_create, and deliberately so: private address space,
+    // user half filled, stack mapped, frame forged. The ONLY differences are
+    // where the program's bytes come from (a file on the disk rather than a
+    // range of the kernel image) and where the entry address comes from (the
+    // ELF header rather than a linker symbol). Nothing about the page tree, the
+    // stack, the forge, the scheduler or the CR3 switch changes.
+    address_space_t *as = paging_create_address_space();
+    if (as == NULL) {
+        return -1;
+    }
+
+    uint64_t entry = 0;
+    if (elf_load_file(name, as, &entry) != 0) {
+        return -1;      // elf_load_file has already said what was wrong with it
+    }
+
+    if (map_user_stack(as) != 0) {
+        return -1;
+    }
+
+    return task_register(as, entry);
 }
 
 void scheduler_start(void) {

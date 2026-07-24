@@ -51,6 +51,14 @@ typedef struct {
 // pool is out of memory. Implemented in scheduler.c.
 int task_create(uint64_t entry);
 
+// The same, for a program that lives on the disk rather than in the kernel
+// image: read `name` (an 8.3 filename such as "A.ELF") off the FAT32 volume,
+// load its segments into a fresh address space, map a stack, and forge the frame
+// with the entry point from the file's ELF header. Returns the task id, or -1 if
+// the file is missing, is not a program this kernel accepts, or memory ran out.
+// A failed load creates no task and must not disturb the ones that succeeded.
+int task_create_from_file(const char *name);
+
 // Pick task 0 and enter it. Does not return (control only ever comes back into
 // the kernel through an interrupt, where schedule() runs).
 void scheduler_start(void);

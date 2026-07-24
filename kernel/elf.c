@@ -1,6 +1,11 @@
 #include "elf.h"
 #include "memory.h"
+#include "paging.h"
+#include "usermode.h"
+#include "heap.h"
 #include "../drivers/screen.h"
+#include "../fs/fat32.h"
+#include "../libc/mem.h"
 
 // ELF64 parsing. See elf.h for what this is for and docs/reference/elf-loading.md
 // for the format walkthrough. Only the ELF header and the program headers are
@@ -54,6 +59,13 @@
 // file claiming thousands is either corrupt or hostile, and the count is used to
 // size a loop over untrusted data.
 #define ELF_MAX_PHNUM 32
+
+// The window a loaded segment is allowed to occupy: from the bottom of the
+// ring-3 region up to the bottom of the fixed user stack. The stack is mapped
+// separately at a known address, so a segment reaching into it would have the
+// two fighting over the same pages.
+#define ELF_LOAD_MIN_VADDR  USER_REGION_START
+#define ELF_LOAD_MAX_VADDR  USER_STACK_BASE
 
 // ---------------------------------------------------------------------------
 // The two structures a loader reads.
@@ -248,48 +260,153 @@ static int elf_validate(const void *file, uint32_t file_size, const char *name,
     return 0;
 }
 
-int elf_check(const void *file, uint32_t file_size, const char *name,
-              uint64_t *out_entry) {
+// ---------------------------------------------------------------------------
+// Loading.
+// ---------------------------------------------------------------------------
+
+// Map one segment into `as` and fill it.
+//
+// Returns 0 on success, -1 if the destination is out of bounds or memory runs
+// out. On failure the pages already mapped leak, the same accepted tradeoff as
+// everywhere else here: it only happens on out-of-memory, and tasks are never
+// destroyed.
+static int load_segment(const struct elf64_phdr *ph, const void *file,
+                        address_space_t *as, const char *name) {
+    // (1) THE BOUNDS CHECK. This is the security boundary of the whole loader.
+    //
+    // Everything in a program header is an instruction from an untrusted file,
+    // and this one reads "write these bytes to this address". Without this
+    // check, a crafted ELF names any address it likes and the kernel dutifully
+    // maps a page there and copies attacker-chosen bytes into it, including
+    // over the kernel's own code. The file would not even need to be malicious
+    // on purpose; a corrupt vaddr does the same damage.
+    //
+    // So the destination is checked against the window a user program is
+    // allowed to occupy BEFORE a single frame is allocated. Same spirit as the
+    // syscall pointer check in kernel/syscall.c, and stricter: this one bounds
+    // the whole [start, end) range rather than just the start.
+    uint64_t start = ph->p_vaddr;
+    uint64_t end   = ph->p_vaddr + ph->p_memsz;   // memsz is page-aligned, checked
+    if (end < start) {
+        reject(name, "segment address range wraps");
+        return -1;
+    }
+    if (start < ELF_LOAD_MIN_VADDR || end > ELF_LOAD_MAX_VADDR) {
+        reject(name, "segment lands outside the region a program may occupy");
+        return -1;
+    }
+
+    // (2) Honour the segment's flags. Only the write bit is enforceable: MiniOS
+    // does not enable NX, so a segment marked R+X and one marked R are mapped
+    // identically. Leaving the writable bit OFF for the text segment is real
+    // though, and means a program cannot overwrite its own code.
+    uint64_t flags = PG_PRESENT | PG_USER;
+    if (ph->p_flags & PF_W) {
+        flags |= PG_WRITABLE;
+    }
+
+    const uint8_t *src = (const uint8_t *)file + ph->p_offset;
+
+    for (uint64_t page = 0; page < ph->p_memsz; page += FRAME_SIZE) {
+        uint64_t frame = alloc_frame();
+        if (frame == 0) {
+            reject(name, "out of physical frames");
+            return -1;
+        }
+
+        // (3) and (4) in one step: zero the whole frame, then copy in whatever
+        // part of it the file actually supplies.
+        //
+        // THE ZERO-FILL IS NOT OPTIONAL. A segment's memory size can exceed its
+        // file size, and the gap is uninitialised data: globals that start at
+        // zero, which the format deliberately does not store because storing
+        // thousands of zero bytes is a waste. alloc_frame hands back a frame
+        // holding whatever the last user of it left there. Skip the zeroing and
+        // a program's globals come up holding that garbage, so the program works
+        // or fails depending on what ran before it, which is the single most
+        // confusing class of loader bug. Zeroing the whole frame first (rather
+        // than only the tail past file size) makes it impossible to get the
+        // boundary case wrong at the cost of writing some bytes twice.
+        memset((void *)frame, 0, FRAME_SIZE);
+
+        if (page < ph->p_filesz) {
+            uint64_t remaining = ph->p_filesz - page;
+            uint64_t chunk = remaining < FRAME_SIZE ? remaining : FRAME_SIZE;
+            // alloc_frame returns an identity-mapped frame, so `frame` is a
+            // writable kernel pointer right now. The copy therefore does not
+            // care that the page may be mapped read-only into `as`.
+            memcpy((void *)frame, src + page, chunk);
+        }
+
+        if (paging_map_page(as, ph->p_vaddr + page, frame, flags) != 0) {
+            reject(name, "out of frames for page tables");
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int elf_load(const void *file, uint32_t file_size, address_space_t *as,
+             const char *name, uint64_t *out_entry) {
     const struct elf64_ehdr *header;
     const struct elf64_phdr *phdrs;
 
     if (elf_validate(file, file_size, name, &header, &phdrs) != 0) {
         return -1;
     }
+
+    for (uint16_t i = 0; i < header->e_phnum; i++) {
+        if (phdrs[i].p_type != PT_LOAD) {
+            continue;   // not a segment to bring into memory
+        }
+        if (load_segment(&phdrs[i], file, as, name) != 0) {
+            return -1;
+        }
+    }
+
+    // The entry point comes from the header, not from any symbol the kernel
+    // knows. This is what makes the program a file rather than part of the
+    // kernel: nothing here was decided at kernel link time.
     if (out_entry) {
         *out_entry = header->e_entry;
     }
     return 0;
 }
 
-void elf_print_manifest(const void *file, uint32_t file_size, const char *name) {
-    const struct elf64_ehdr *header;
-    const struct elf64_phdr *phdrs;
-
-    if (elf_validate(file, file_size, name, &header, &phdrs) != 0) {
-        return;
+int elf_load_file(const char *name, address_space_t *as, uint64_t *out_entry) {
+    // Ask the size first, then allocate exactly that. The alternative, a fixed
+    // buffer assumed to be big enough, is a limit that fails quietly the day a
+    // program outgrows it.
+    uint32_t size = 0;
+    if (fat32_stat(name, &size) != 0) {
+        reject(name, "not found on the disk");
+        return -1;
+    }
+    if (size == 0) {
+        reject(name, "file is empty");
+        return -1;
     }
 
-    print_string("elf: ");
-    print_string((char *)name);
-    print_string(" entry ");
-    print_hex(header->e_entry);
-    print_string("\n");
-
-    for (uint16_t i = 0; i < header->e_phnum; i++) {
-        const struct elf64_phdr *ph = &phdrs[i];
-        if (ph->p_type != PT_LOAD) {
-            continue;
-        }
-        print_string("  LOAD off ");
-        print_hex(ph->p_offset);
-        print_string(" vaddr ");
-        print_hex(ph->p_vaddr);
-        print_string(" filesz ");
-        print_hex(ph->p_filesz);
-        print_string(" memsz ");
-        print_hex(ph->p_memsz);
-        print_string(ph->p_flags & PF_W ? " RW" : " R");
-        print_string(ph->p_flags & PF_X ? "X\n" : "\n");
+    // The whole file is read before anything runs: there is no demand paging, so
+    // a program cannot be faulted in a page at a time.
+    void *buf = kmalloc(size);
+    if (buf == NULL) {
+        reject(name, "out of memory to read the file");
+        return -1;
     }
+
+    uint32_t read_size = 0;
+    if (fat32_read_file(name, buf, size, &read_size) != 0) {
+        reject(name, "could not be read");
+        kfree(buf);
+        return -1;
+    }
+
+    int result = elf_load(buf, read_size, as, name, out_entry);
+
+    // The file buffer is scratch. Its contents are now in the task's own frames,
+    // so nothing needs the copy afterward.
+    kfree(buf);
+    return result;
 }
