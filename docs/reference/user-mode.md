@@ -1,7 +1,7 @@
 # User mode (ring 3)
 
 This page documents how MiniOS drops to CPL 3 and how it proves the drop is
-real. Read from `kernel/usermode.c`, `user/user_program.c`, `boot/boot.asm`,
+real. Read from `kernel/usermode.c`, `user/A.c`, `boot/boot.asm`,
 `linker.ld`, and `kernel/gdt.c`. For the rationale and trade-offs see
 [decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
 
@@ -9,7 +9,7 @@ real. Read from `kernel/usermode.c`, `user/user_program.c`, `boot/boot.asm`,
 
 | Piece | Location | Source |
 |-------|----------|--------|
-| Ring-3 program code | `0x400000` (in `.user_text`, PD[2]) | `user/user_program.c`, `linker.ld` |
+| Ring-3 program code | `0x400000` (loaded from an ELF file, PD[2]) | `user/A.c`, `user/user.ld`, `kernel/elf.c` |
 | Ring-3 stack top | `0x800000` (top of PD[3]) | `USER_STACK_TOP` in `kernel/usermode.h` |
 | Ring-0 stack on entry | `tss.rsp0` (top of `tss_stack`) | `kernel/gdt.c` |
 | Ring-3 code selector | `0x1B` (`GDT_SELECTOR_USER_CODE`, RPL 3) | `kernel/gdt.h` |
@@ -33,7 +33,7 @@ push  SS      = 0x23   (ring-3 data selector)
 push  RSP     = 0x800000
 push  RFLAGS  = 0x202  (reserved bit 1 + IF)
 push  CS      = 0x1B   (ring-3 code selector, RPL 3)
-push  RIP     = &user_program
+push  RIP     = the program's ELF entry point
 iretq
 ```
 
@@ -80,7 +80,8 @@ CPL-0-only instruction, and observing the #GP it raises at `cpl=3` with
 That verification, with the exact QEMU `-d int` output, is recorded in
 [decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
 
-The shipped programs (`user/user_program.c`) no longer fault on purpose. Now that
+The shipped programs (`user/A.c`, `user/B.c`, `user/C.c`, loaded from disk) no
+longer fault on purpose. Now that
 a syscall gate and a scheduler exist, they demonstrate the drop the constructive
 way: three of them run at CPL 3 and call the kernel through `int 0x50` (`SYS_WRITE`)
 in a loop, and the scheduler switches between them on the timer tick. Each task
@@ -89,7 +90,7 @@ virtual addresses but not the same physical memory. Under QEMU with `-d int`,
 vector `0x50` fires from all three tasks (three distinct RIPs, each in its own
 address space with its own `CR3`), each at `cpl=3`, with no #GP and no #PF; the
 three strings interleave on screen, printed by the kernel on the ring-3 programs'
-behalf. That a ring-3 pointer into `.user_rodata` (4-8M) is accepted while a kernel
+behalf. That a ring-3 pointer into a loaded program's rodata (4-8M) is accepted while a kernel
 address is rejected is the same leaf-level user-bit boundary, now exercised through
 the syscall path instead of a fault. See [syscalls.md](syscalls.md),
 [scheduling.md](scheduling.md), and [paging.md](paging.md).

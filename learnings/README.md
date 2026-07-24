@@ -85,6 +85,7 @@ chapter states are:
 | 14 | Per-process paging | [14-per-process-paging.md](14-per-process-paging.md) | stubbed | [../docs/reference/paging.md](../docs/reference/paging.md) |
 | 15 | The disk driver | [15-the-disk-driver.md](15-the-disk-driver.md) | stubbed | [../docs/reference/disk.md](../docs/reference/disk.md) |
 | 16 | The filesystem | [16-the-filesystem.md](16-the-filesystem.md) | written | [../docs/reference/fat32.md](../docs/reference/fat32.md) |
+| 17 | Loading a program (the ELF loader) | [17-loading-a-program.md](17-loading-a-program.md) | written | [../docs/reference/elf-loading.md](../docs/reference/elf-loading.md) |
 
 Chapters 1, 2, 3, and 5 (frozen-32bit) and chapters 8, 9, and 14 (stubbed)
 overlap on purpose: the frozen chapter teaches the original 32-bit take on boot,
@@ -121,8 +122,9 @@ drivers/screen.c ........... VGA text-mode output                      → ch.4
 drivers/keyboard.c ......... PS/2 keyboard input (IRQ1)                → ch.4
 drivers/disk.c ............. polled ATA PIO disk driver                 → ch.15
 fs/fat32.c ................. read-only FAT32 filesystem                 → ch.16
+kernel/elf.c ............... ELF64 program loader                        → ch.17
+user/A.c, B.c, C.c ......... the ring-3 programs, loaded from disk        → ch.17, ch.10
 drivers/ports.c ............ in/out instruction wrappers               → ch.4
-user/user_program.c ........ the ring-3 demo programs                   → ch.10
 libc/string.c, mem.c ....... hand-rolled standard library              → ch.7
 shell/shell.c .............. the interactive command loop              → ch.6
 include/types.h ............ fixed-width integer types                 → ch.7

@@ -7,6 +7,102 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- An ELF64 program loader (`kernel/elf.c`, `kernel/elf.h`), and with it, user
+  programs that are files rather than parts of the kernel. Previously the three
+  ring-3 programs were compiled into the kernel image (`user/user_program.c` into
+  a `.user_text` section at 4M inside `minios.bin`) and copied out of the kernel
+  by `task_create`, so changing a program meant recompiling the kernel and the
+  set of programs was fixed at kernel link time. They are now separately
+  compiled, statically linked ELF64 binaries (`user/A.c`, `B.c`, `C.c` linked
+  with `user/user.ld`) that live on the FAT32 image as `A.ELF`, `B.ELF`, `C.ELF`
+  and are read, validated, and loaded at runtime. The loader parses only the ELF
+  header and the program headers (section headers describe the file for linkers
+  and debuggers and tell a loader nothing), and for each `PT_LOAD` segment it
+  bounds-checks the destination, allocates frames, maps them into the target
+  address space with flags derived from the segment's own, copies `p_filesz`
+  bytes, and zeroes from there up to `p_memsz`. Validation happens before
+  interpretation throughout: the file is confirmed to be at least header-sized
+  before the header is read as one, the magic before the class, the class before
+  anything 64-bit-shaped is dereferenced, `e_phentsize` before the table is
+  strided, and the program header table's own bounds before a single entry is
+  read out of it; then each segment is checked to lie inside the file, to have
+  `p_memsz >= p_filesz`, and to be page-aligned. Every rejection names its
+  reason. The in-file range check subtracts from the known-good file size rather
+  than adding two untrusted 64-bit values, whose sum can wrap and compare as
+  comfortably small. The segment bounds check is the security boundary of the
+  whole feature and is commented as such: a program header is an instruction
+  from an untrusted file reading "write these bytes to this address", so without
+  it a crafted or merely corrupt file names any address it likes and the kernel
+  maps a page there and copies attacker-chosen bytes in, including over the
+  kernel; the destination range is checked against `[USER_REGION_START,
+  USER_STACK_BASE)` before a frame is allocated, stopping below the fixed user
+  stack so a segment cannot collide with it. This is the same category of check
+  as the `SYS_WRITE` pointer validation and the stricter of the two, bounding the
+  whole `[start, end)` range rather than just the start. The zero-fill from file
+  size to memory size is equally load-bearing: that gap is uninitialised data
+  (`.bss`) the format deliberately does not store, and `alloc_frame` returns a
+  frame holding whatever the last user left in it, so skipping the zeroing makes
+  a program's globals come up holding stale garbage and the program work or fail
+  depending on what ran before it. Frames are zeroed whole and then overwritten
+  with the file bytes, which writes some bytes twice and makes the boundary case
+  impossible to get wrong. Both structs are `__attribute__((packed))` with
+  compile-time size guards (64 and 56 bytes), the same trap as the Multiboot mmap
+  entry and the FAT32 BPB. `task_create_from_file` (`kernel/scheduler.c`) is
+  deliberately the same shape as the old `task_create`: private address space,
+  user half filled, stack mapped, frame forged, with only the source of the bytes
+  and the entry address differing (the ELF header's `e_entry` rather than a
+  compile-time symbol); the forge moved into one shared `task_register` so both
+  paths used identical logic, and the page tree, the stack mapping, `schedule()`
+  and the CR3 switch are untouched. A missing or malformed file costs only its
+  own task: `kernel_main` prints the reason, skips it, and runs the rest. Also
+  adds `print_hex` to the screen driver (and deletes the duplicate static copy
+  that `kernel/heap.c` was carrying), since addresses and offsets are read in hex
+  in every other tool. Verified by the one demonstration that cannot be faked:
+  editing `user/A.c` to print `Z`, rebuilding only `A.ELF`, copying it onto the
+  image, and booting a byte-identical `minios.bin` (same MD5) printed `ZBCZBC`.
+  Also verified that a 520-byte text file named `BAD.ELF` is rejected with `not
+  an ELF file (bad magic)` and a nonexistent `MISSING.ELF` with `not found on the
+  disk`, both without faulting and without stopping the three real programs, and
+  that `-d int` shows only timer (`v=40`) and syscall (`v=50`) vectors: no page
+  (`0x0E`), GP (`0x0D`), or double (`0x08`) fault, no triple fault, no disk IRQ.
+  See `docs/decisions/0015-elf-program-loading.md` and
+  `docs/reference/elf-loading.md`.
+- A separate build for user programs (`user/user.ld`, `user/userlib.h`, and the
+  `USER_*` rules in the `Makefile`). Each program is built with `-ffreestanding
+  -m64 -mno-red-zone -mcmodel=small -fno-pie -no-pie -nostdlib -nodefaultlibs
+  -static -Wall -Wextra` against its own linker script. `-mcmodel=small` rather
+  than the kernel's `-mcmodel=kernel` is required, not stylistic: the kernel
+  model assumes every symbol lives in the top 2GB of the address space and
+  produces relocation errors on code linked at 0x400000, the same trap the
+  original user-mode work hit. `user/user.ld` sets `ENTRY(_start)`, links at
+  0x400000, and declares two load segments (R+X for text and rodata, R+W for data
+  and bss), starting every loadable segment on a 4096-byte boundary AND rounding
+  its size up to a whole number of pages via a trailing `. = ALIGN(4096)` inside
+  each output section (which is what rounds the size, not just the start). That
+  alignment is a deliberate contract with the loader, which requires it and
+  rejects a file that violates it: the loader maps whole pages, so a segment
+  starting or ending mid-page would put two segments in one page and the second
+  mapping would have to merge rather than replace, and since the linker script is
+  entirely under our control, satisfying it there is far cheaper than supporting
+  the general case in the kernel. `-Wl,-z,max-page-size=4096` keeps the linker
+  from padding segments out to its default 2MB. `user/userlib.h` is the whole
+  runtime a program gets: `always_inline` inline-asm syscall wrappers over the
+  standalone `include/syscalls.h` and `include/vectors.h`, plus the delay loop.
+  Each program carries a zero-initialised global so it has a real `.bss` (its
+  data segment has `filesz` 0 and `memsz` 0x1000), which keeps the loader's
+  zero-fill honest: a program with no `.bss` would load correctly even if that
+  step were missing. The binaries are copied onto the image by a PHONY
+  `disk-programs` target that `make run` depends on, so they are refreshed on
+  every boot; the image itself is still created once and left alone, but a stale
+  program binary looks exactly like a loader bug and must never survive a
+  rebuild. `user/*.ELF` is git-ignored. See `docs/building.md`.
+- `fat32_stat(name, &size)` (`fs/fat32.c`): report a file's size from its
+  directory entry without reading any of its contents. Reading a file means
+  allocating a buffer for it first, which means knowing the size first, and
+  `fat32_read_file` cannot answer that (it needs the buffer up front). The
+  alternative a caller would otherwise reach for, a fixed buffer assumed to be
+  big enough, is a size limit that fails quietly the day a file outgrows it.
+  Stat and read now share one root-directory lookup path.
 - A read-only FAT32 filesystem (`fs/fat32.c`, `fs/fat32.h`), the layer that gives
   the disk driver's numbered blocks meaning. Three calls: `fat32_init` parses the
   boot sector and caches the volume geometry, `fat32_list_root` prints the root
@@ -304,6 +400,21 @@ All notable changes to MiniOS are recorded here. The format is based on
   vector, name, and RIP/CS/RFLAGS, then halts with `cli; hlt`.
 - `docs/decisions/0005-self-describing-vector-map.md` recording the vector-map
   decision and its costs.
+
+### Removed
+
+- The compiled-in user program path, now that programs load from disk.
+  `user/user_program.c` and its entry in `C_SOURCES`, the `.user_text` and
+  `.user_rodata` sections and the whole `:user` PT_LOAD segment in `linker.ld`,
+  the `_user_text_start` / `_user_text_end` / `_user_rodata_start` /
+  `_user_rodata_end` symbols, the `build_user_space` loop that copied from them
+  into each task's frames, `task_create(uint64_t entry)` itself, and the extern
+  declarations of `user_program_a`/`_b`/`_c` in `kernel_main`. `minios.bin` drops
+  from 45476 to 42608 bytes and from two PT_LOAD segments to one, which is the
+  proof that ring-3 code is genuinely no longer inside the kernel image rather
+  than merely unreferenced. A full clean rebuild also surfaced a duplicate static
+  `print_hex` in `kernel/heap.c`, identical to the one added to the screen
+  driver; the duplicate is gone.
 
 ### Changed
 

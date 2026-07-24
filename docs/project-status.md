@@ -2,8 +2,9 @@
 
 MiniOS is a learning kernel: it boots x86-64 long mode, drops to ring 3, and
 preempts between three ring-3 tasks on the timer tick, each in its own address
-space (per-process paging). It can read files off a FAT32 disk by name, though
-nothing on the boot path does so yet. (An interrupt-driven shell is still compiled and
+space (per-process paging). It reads files off a FAT32 disk by name, and its
+three ring-3 programs are now ELF64 binaries loaded from that disk rather than
+code compiled into the kernel. (An interrupt-driven shell is still compiled and
 working but off the boot path.) This page records what works today, what was
 deliberately never built, the natural next steps, and the known limitations. It
 is a factual snapshot, not a roadmap.
@@ -50,14 +51,27 @@ is a factual snapshot, not a roadmap.
   (`TODO(fat32-write)`); it handles 8.3 names only and skips long-filename
   entries; it reads the first FAT copy only; and lookups are root-directory only.
   The image is formatted by the host build system (`tools/mkdisk.sh`, mtools), not
-  by the kernel. Nothing on the boot path calls it yet: the shell command and the
-  program loader that will are separate work. See
+  by the kernel. `fat32_stat` reports a file's size without reading it, which is
+  what lets a caller allocate the right buffer before a read. The ELF loader
+  reads every program file through this layer, so the filesystem is now on the
+  boot path. See
   [reference/fat32.md](reference/fat32.md) and
   [decisions/0014-read-only-fat32.md](decisions/0014-read-only-fat32.md).
-- A drop to ring 3 (`kernel/usermode.c`, `user/user_program.c`): after init,
-  `kernel_main` forges an `iretq` frame and runs a small program at CPL 3 in its
-  own user-accessible pages (code at 4M, stack at 6-8M), while the kernel's own
-  pages stay ring-0-only. This activates the previously inert user GDT
+- An ELF64 program loader (`kernel/elf.c`): user programs are separately
+  compiled, statically linked ELF64 binaries (`user/A.c`, `B.c`, `C.c`, linked
+  with `user/user.ld` at 0x400000) that live on the FAT32 image and are read,
+  validated, and loaded at runtime. `task_create_from_file` builds a private
+  address space, maps each `PT_LOAD` segment into it (bounds-checked, with flags
+  from the segment so text is mapped read-only), copies the file bytes, zeroes
+  from file size up to memory size, and forges the task's frame with the entry
+  point from the ELF header. Nothing ring-3 remains in `minios.bin`: changing a
+  program means rebuilding one binary and copying it onto the image, with no
+  kernel rebuild. A missing or malformed file is reported and skipped, costing
+  only its own task. See [reference/elf-loading.md](reference/elf-loading.md) and
+  [decisions/0015-elf-program-loading.md](decisions/0015-elf-program-loading.md).
+- A drop to ring 3 (`kernel/usermode.c`): after init, `kernel_main` forges an
+  `iretq` frame and runs a program at CPL 3 in its own user-accessible pages
+  (code at 4M, stack at 6-8M), while the kernel's own pages stay ring-0-only. This activates the previously inert user GDT
   descriptors and `tss.rsp0`. See [reference/user-mode.md](reference/user-mode.md)
   and [decisions/0006-user-mode-with-separate-pages.md](decisions/0006-user-mode-with-separate-pages.md).
 - System calls (`kernel/syscall.c`, `include/syscalls.h`): the ring-3 programs
@@ -70,11 +84,12 @@ is a factual snapshot, not a roadmap.
 - A round-robin preemptive scheduler (`kernel/scheduler.c`): the timer tick
   switches between several ring-3 tasks (three today) by overwriting the interrupt
   frame on the kernel stack in place and loading the next task's CR3, so the
-  stub's `iretq` resumes a different task in its own address space. `task_create`
-  `kmalloc`s a `task_t`, builds its private address space, and forges it as a
-  never-run task (the ring-3 drop generalised); a pointer array tracks the
-  heap-allocated tasks. The three `user_program_a`/`_b`/`_c` programs interleave
-  "A", "B", and "C" on screen forever. The old fixed four-task ceiling and the
+  stub's `iretq` resumes a different task in its own address space.
+  `task_create_from_file` `kmalloc`s a `task_t`, builds its private address
+  space, loads a program file into it, and forges it as a never-run task (the
+  ring-3 drop generalised); a pointer array tracks the heap-allocated tasks. The
+  three programs loaded from `A.ELF`, `B.ELF` and `C.ELF` interleave "A", "B",
+  and "C" on screen forever. The old fixed four-task ceiling and the
   shared user-stack region are both gone. See
   [reference/scheduling.md](reference/scheduling.md),
   [decisions/0008-round-robin-preemptive-scheduler.md](decisions/0008-round-robin-preemptive-scheduler.md),
@@ -82,8 +97,8 @@ is a factual snapshot, not a roadmap.
 - Per-process paging (`kernel/paging.c`): each task has its own page-table tree,
   loaded into CR3 on every context switch, so two tasks use the same virtual
   addresses (code `0x400000`, stack top `0x800000`) backed by different physical
-  frames. Each tree has a private 4KB user half (a per-task copy of the ring-3
-  image and a fresh stack) and a kernel half cloned from the boot tables by value,
+  frames. Each tree has a private 4KB user half (the program's own loaded
+  segments and a fresh stack) and a kernel half cloned from the boot tables by value,
   kernel-only, so the kernel is mapped in every tree (interrupts land in mapped
   kernel code without a CR3 change). This is real address-space isolation: a stray
   pointer faults instead of corrupting a neighbour. The by-value kernel clone rests
@@ -111,18 +126,23 @@ Swapping the scheduler handoff back for `shell_init` restores the shell. See
 
 ## What was never built
 
-These are absent by design; MiniOS isolates and preempts between hard-coded
-ring-3 tasks in their own address spaces, but does not load or manage processes.
-There is now a block device (the ATA disk driver) and a read-only filesystem on
-top of it, so files can be read but not written and not yet run.
+These are absent by design. MiniOS now loads programs from files, but it does not
+manage them as processes: there is no way for a program to start another, to end
+and return anywhere, or to be given anything on the way in.
 
-- **Processes.** The scheduler runs hard-coded programs baked into the kernel
-  image (three today), not loaded programs. Each task now has its own address
-  space (per-process paging), but the program it runs is still compiled in: there
-  is a `SYS_EXIT` syscall, but with no parent to return to it can only halt the
-  machine, and there is no loading and no way to add a program without editing the
-  kernel (though tasks are created dynamically at runtime rather than from a fixed
-  table).
+- **Processes.** Programs are loaded from disk now, but they are not processes.
+  There is no `fork` or `exec`, so nothing can start anything else; `SYS_EXIT`
+  has no parent to return to and can only halt the machine; a task is never
+  destroyed and its frames are never reclaimed; and which programs run is still
+  decided by a list in `kernel_main` rather than by anything at runtime.
+- **Arguments, dynamic linking, relocation, and demand paging.** A program is
+  entered with an empty stack and no argv. It must be `ET_EXEC` linked at the
+  fixed 0x400000, since the loader resolves and relocates nothing, so two
+  programs cannot be placed at different addresses and nothing can be shared as
+  a library. The whole file is read and every segment fully populated before the
+  first instruction runs. Each task also gets its own physical copy of the
+  program text (`TODO(shared-text)`). See
+  [decisions/0015-elf-program-loading.md](decisions/0015-elf-program-loading.md).
 - **Demand paging, copy-on-write, and swap.** Per-process paging exists, but every
   page is mapped eagerly at `task_create` and backed by real frames. There is no
   lazy allocation on fault, no copy-on-write sharing (the read-only user text is
@@ -138,10 +158,10 @@ top of it, so files can be read but not written and not yet run.
   skipped, so a file with a long name is invisible to MiniOS; lookups are
   root-directory only, since the interface takes a bare name with no path to
   split; and FAT32 carries essentially no permissions and no crash safety.
-- **Program loading.** There is no ELF loader and no way to run a separate
-  program; the shell dispatches to compiled-in command functions. The filesystem
-  it was waiting on now exists, so this is the next rung: read an image off the
-  disk into a fresh address space and run it as a real process.
+- **A way to start a program on demand.** The loader exists, but nothing drives
+  it interactively: the shell still dispatches to compiled-in command functions,
+  and the program list is fixed in `kernel_main`. A shell command that loads and
+  runs a named file is now a small piece of work rather than a missing layer.
 
 ## Natural next steps
 
@@ -195,14 +215,19 @@ it parses the boot sector, follows cluster chains through the FAT, and reads a
 file by 8.3 name out of the root directory. See
 [decisions/0014-read-only-fat32.md](decisions/0014-read-only-fat32.md).
 
-**Program loading, then filesystem writing.** Next, in that order. Reading is the
-complete prerequisite for program loading (a program image is read, never
-written), so a loader can now read an ELF image off the disk into a fresh address
-space and run it as a real process. Writing is the other direction and is
-independent of it: free-cluster search, chain and directory updates, mirroring
-every FAT copy, and crash ordering (`TODO(fat32-write)`). Nothing calls the
-filesystem on the boot path yet; a shell command to list and print files would be
-the smallest first caller.
+**Program loading.** Done. `kernel/elf.c` validates an ELF64 file, bounds-checks
+and maps each `PT_LOAD` segment into a fresh address space, zero-fills the gap
+between file size and memory size, and hands the entry point to the task forge.
+The three ring-3 programs are now files on the disk, and changing one needs no
+kernel rebuild. See
+[decisions/0015-elf-program-loading.md](decisions/0015-elf-program-loading.md).
+
+**Filesystem writing, then real processes.** Next. Writing is the other direction
+across the same filesystem and is independent of the loader: free-cluster search,
+chain and directory updates, mirroring every FAT copy, and crash ordering
+(`TODO(fat32-write)`). Real processes are the other axis: a shell command that
+loads a named program on demand, argv on the new stack, a `SYS_EXIT` that returns
+to a parent instead of halting, and reclaiming a dead task's frames.
 
 ## Known limitations
 

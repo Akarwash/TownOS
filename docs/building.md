@@ -67,6 +67,10 @@ lives in low memory, so relabelling the ELF container as `elf32-i386` is accepte
 by the loader and boots correctly. The code is unchanged; only the ELF header
 class differs.
 
+It also builds the three user programs (`user/A.ELF`, `B.ELF`, `C.ELF`), which
+are separate binaries and not part of `minios.bin`. See
+[Building a user program](#building-a-user-program) below.
+
 To rebuild from scratch:
 
 ```bash
@@ -134,6 +138,57 @@ To start over from a fresh image, delete `disk.img` and run `make run` again.
 The kernel reads 8.3 names only and skips long-filename entries, so a file copied
 in as `my-long-name.text` is readable by mtools but invisible to MiniOS. Use
 names of at most 8 characters plus a 3 character extension.
+
+## Building a user program
+
+User programs are not part of the kernel. Each is compiled and linked on its own
+into a static ELF64 binary that lives on the disk image, and the kernel loads it
+at runtime. Changing what the machine runs does not need a kernel rebuild.
+
+To add one:
+
+1. Write `user/D.c` (uppercase, matching the 8.3 name it will have on the disk).
+   Include `userlib.h` for the syscall wrappers, and give it a `void _start(void)`
+   entry point, which is what `user/user.ld` names as the entry:
+
+   ```c
+   #include "userlib.h"
+
+   void _start(void) {
+       for (;;) {
+           sys_write("D");
+           user_delay();
+       }
+   }
+   ```
+
+2. Add `user/D.ELF` to `USER_PROGRAMS` in the `Makefile`. The pattern rule builds
+   it, and `make run` copies it onto the image.
+3. Add `"D.ELF"` to the `user_programs` list in `kernel_main` so a task is
+   created for it. (This last step is the one that still needs a kernel rebuild;
+   nothing yet loads programs on demand.)
+
+The build flags are deliberate and documented in the `Makefile`. Two matter most:
+
+- **`-mcmodel=small`, not `-mcmodel=kernel`.** The kernel model assumes symbols
+  live in the top 2GB of the address space. User code links at 0x400000 and the
+  kernel model produces relocation errors on it. This is the single most likely
+  build failure when adding a program.
+- **`-static -nostdlib -nodefaultlibs -fno-pie -no-pie`.** No host libc, no
+  startup files, no relocation. The whole runtime a program gets is
+  `user/userlib.h`.
+
+To change an existing program without touching the kernel:
+
+```bash
+make user/A.ELF
+mcopy -o -i disk.img user/A.ELF ::/
+qemu-system-x86_64 -kernel minios.bin -drive file=disk.img,format=raw,if=ide,index=0,media=disk
+```
+
+`make run` does the copy step for you, on every run, so a stale program on the
+image can never be what boots. See
+[reference/elf-loading.md](reference/elf-loading.md).
 
 A window opens showing the banner, the detected RAM, the disk detection line, and
 then the three ring-3 tasks interleaving "A", "B", and "C" forever:

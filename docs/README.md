@@ -21,6 +21,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 | [reference/heap.md](reference/heap.md) | The kernel heap: header/footer boundary tags, split/coalesce, the frame-allocator seam, and interrupt safety |
 | [reference/disk.md](reference/disk.md) | The polled ATA PIO disk driver: the 512-byte block model, the port layout, the read and write flows, and the driver-vs-filesystem layering |
 | [reference/fat32.md](reference/fat32.md) | The read-only FAT32 filesystem: the on-disk layout, the boot sector fields, cluster-to-block arithmetic, FAT chains and the 28-bit mask, directory entries and 8.3 names, and the read path |
+| [reference/elf-loading.md](reference/elf-loading.md) | The ELF64 program loader: the manifest, the header and program header fields used, validation and the segment bounds check, the load loop and the zero-fill, and the separate user build |
 | [project-status.md](project-status.md) | What works, what was never built, and the natural next steps |
 | [decisions/](decisions/) | Architecture decision records (ADRs) for the load-bearing choices |
 
@@ -40,11 +41,13 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 - [0012 — Per-process paging: a private address space per task](decisions/0012-per-process-paging.md) — Give each task its own page-table tree (private 4KB user half, kernel half cloned by value), switch CR3 on context switch, so tasks share virtual addresses but not physical memory.
 - [0013 — A polled ATA PIO disk driver](decisions/0013-ata-pio-disk-driver.md) — Read and write 512-byte LBA28 blocks on the primary ATA bus by polling (no interrupts, no DMA); the simplest correct block device, which freezes the machine during a transfer and unblocks a filesystem.
 - [0014 — A read-only FAT32 filesystem](decisions/0014-read-only-fat32.md) — Give the raw blocks names: parse the boot sector, follow FAT cluster chains, and read a file by 8.3 name, read-only (first FAT copy, root directory, no long filenames), with the image formatted by the host build system.
+- [0015 — Load programs from disk as ELF64 binaries](decisions/0015-elf-program-loading.md) — User programs become separately linked static ELF64 files on the FAT32 image, loaded at runtime by an in-kernel loader that validates every field and bounds-checks every segment address; changing a program no longer means rebuilding the kernel.
 
 ## Status
 
-MiniOS **builds, links, and boots to an interactive shell** under QEMU, and can
-read files by name off a FAT32 disk.
+MiniOS **builds, links, and boots to an interactive shell** under QEMU, reads
+files by name off a FAT32 disk, and loads and runs its ring-3 programs from that
+disk as ELF64 binaries.
 
 - All C sources compile cleanly under `-Wall -Wextra`.
 - All assembly sources assemble cleanly with `nasm -f elf64`.
@@ -53,8 +56,8 @@ read files by name off a FAT32 disk.
   timer ticks on IRQ 0, the keyboard delivers keypresses on IRQ 1, and the shell
   runs `help`, `clear`, `hello`, and `tick`.
 
-The full feature list, the things that were deliberately never built (a
-filesystem, program loading), and the natural next steps are in
-[project-status.md](project-status.md).
+The full feature list, the things that are still deliberately absent (writing to
+the filesystem, argv, dynamic linking, demand paging), and the natural next steps
+are in [project-status.md](project-status.md).
 
 For the exact build, run, and debug commands, see [building.md](building.md).
