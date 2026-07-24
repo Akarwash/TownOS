@@ -99,3 +99,28 @@ void print_int(uint32_t n) {
     }
 }
 
+// Addresses, sizes and file offsets are read and compared in hex everywhere
+// else (linker scripts, readelf, the QEMU monitor, this kernel's own comments),
+// so printing them in decimal makes them needlessly hard to check against the
+// tools. 64-bit because an address is.
+void print_hex(uint64_t n) {
+    char buf[16];
+    int i = 0;
+
+    print_string("0x");
+    if (n == 0) {
+        print_char('0');
+        return;
+    }
+
+    while (n > 0) {
+        uint8_t digit = (uint8_t)(n & 0xF);
+        buf[i++] = (char)(digit < 10 ? '0' + digit : 'a' + (digit - 10));
+        n >>= 4;
+    }
+
+    while (i > 0) {
+        print_char(buf[--i]);
+    }
+}
+

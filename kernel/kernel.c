@@ -1,6 +1,8 @@
 #include "../drivers/screen.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/disk.h"
+#include "../fs/fat32.h"
+#include "elf.h"
 #include "gdt.h"
 #include "isr.h"
 #include "timer.h"
@@ -14,6 +16,43 @@
 extern void user_program_a(void);
 extern void user_program_b(void);
 extern void user_program_c(void);
+
+// ===========================================================================
+// TEMPORARY: ELF manifest test. Remove once the loader itself works.
+// ===========================================================================
+// Reads one program off the disk and prints the manifest the loader will act on,
+// without loading anything. Parsing is proven in isolation this way, with
+// nothing at risk: no frames allocated, no pages mapped, nothing written to any
+// address the file names.
+#define ELF_TEST_PROGRAM "A.ELF"
+
+static void elf_manifest_test(void) {
+    uint32_t size = 0;
+    if (fat32_stat(ELF_TEST_PROGRAM, &size) != 0) {
+        print_string("elf test: cannot stat " ELF_TEST_PROGRAM "\n");
+        return;
+    }
+
+    void *buf = kmalloc(size);
+    if (buf == NULL) {
+        print_string("elf test: out of memory for " ELF_TEST_PROGRAM "\n");
+        return;
+    }
+
+    uint32_t read_size = 0;
+    if (fat32_read_file(ELF_TEST_PROGRAM, buf, size, &read_size) != 0) {
+        print_string("elf test: cannot read " ELF_TEST_PROGRAM "\n");
+        kfree(buf);
+        return;
+    }
+
+    print_string("elf test: " ELF_TEST_PROGRAM " is ");
+    print_int(read_size);
+    print_string(" bytes\n");
+    elf_print_manifest(buf, read_size, ELF_TEST_PROGRAM);
+
+    kfree(buf);
+}
 
 void kernel_main(uint64_t multiboot_info_addr) {
     gdt_init();          // describe memory (flat segments) + load the TSS
@@ -36,6 +75,12 @@ void kernel_main(uint64_t multiboot_info_addr) {
     heap_init();        // build the kernel heap on top of the frame allocator
 
     disk_init();        // probe the primary ATA bus and silence its IRQ line
+
+    if (fat32_init() != 0) {
+        print_string("FAT32: mount failed, programs cannot be loaded\n");
+    }
+
+    elf_manifest_test();   // TEMPORARY: remove once the loader works
 
     print_string("Starting scheduler with three ring-3 tasks...\n");
 
