@@ -74,14 +74,23 @@ minios.bin: minios.elf
 %.o: %.asm
 	$(ASM) $(ASMFLAGS) $< -o $@
 
-# Disk image for the ATA driver. 16MB of zeros, created once if absent.
-# qemu-img is chosen over dd because it ships with qemu (already required) and
-# states the size and format explicitly. The image is a raw flat array of bytes,
-# exactly the block device the ATA driver expects.
+# Disk image for the ATA driver and the FAT32 filesystem, created once if absent.
+#
+# 64MB, not 16MB: FAT32 is only legal with at least 65525 clusters, and 16MB
+# cannot reach that with a sane cluster size (it would need 256-byte clusters,
+# which is smaller than a block). Formatting tools refuse a 16MB FAT32 volume or
+# silently hand back FAT16 instead. 64MB clears the bar comfortably at one block
+# per cluster.
+#
+# tools/mkdisk.sh formats the image and copies in the test files with mtools (no
+# sudo, no mounting). The rule has no prerequisites, so make skips it whenever
+# disk.img already exists, and the script bails out too: reformatting on every
+# `make run` would silently destroy the disk's contents.
 DISK_IMG = disk.img
+DISK_SIZE = 64M
 
 $(DISK_IMG):
-	qemu-img create -f raw $(DISK_IMG) 16M
+	./tools/mkdisk.sh $(DISK_IMG) $(DISK_SIZE)
 
 # Run in QEMU with the disk attached to the primary ATA bus.
 #   if=ide      put the drive on the emulated IDE/ATA controller (NOT virtio or
