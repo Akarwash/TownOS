@@ -2,15 +2,14 @@ OUTPUT_FORMAT(elf64-x86-64)
 OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
-/* Program headers (load segments). Declaring them explicitly keeps the kernel
- * and the user program in SEPARATE PT_LOAD segments. Without this, the 3MB
- * virtual gap between the kernel (at 1M) and the user code (at 4M) would be
- * padded with zeros IN THE FILE, ballooning minios.bin by ~3MB. A distinct
- * segment lets each region carry its own file offset, so the gap costs nothing
- * on disk. */
+/* One load segment: the kernel, and nothing else.
+ *
+ * There used to be a second :user segment here, holding the ring-3 programs at
+ * 4M. User programs are now separately linked binaries that live on the disk
+ * image (see user/user.ld) and are read in at runtime by the ELF loader, so
+ * nothing ring-3 is part of this image any more. */
 PHDRS {
     kernel PT_LOAD FLAGS(7);      /* RWX: the kernel image at 1M */
-    user   PT_LOAD FLAGS(7);      /* RWX: the ring-3 program at 4M */
 }
 
 SECTIONS {
@@ -37,26 +36,4 @@ SECTIONS {
         *(.bss)
     } :kernel
 
-    /* --- User program --- */
-    /* The ring-3 code lands at 4M, inside the PD[2] page (0x400000-0x5FFFFF)
-     * that boot.asm marks PG_USER. Its own load segment (see PHDRS) so the gap
-     * from the kernel is not written to the file. */
-    . = 0x400000;
-    .user_text : {
-        _user_text_start = .;
-        *(.user_text)
-        _user_text_end = .;
-    } :user
-
-    /* Read-only data the ring-3 program needs to reach (its string literals).
-     * Kept in the :user segment so it lands in the 4-8M user region, inside the
-     * PG_USER pages, where a ring-3 pointer is allowed to point. If these bytes
-     * fell into the kernel's .rodata at 1M instead, the syscall bounds check
-     * would reject any pointer into them, and the CPU would fault a ring-3 read
-     * of them anyway. */
-    .user_rodata : {
-        _user_rodata_start = .;
-        *(.user_rodata)
-        _user_rodata_end = .;
-    } :user
 }

@@ -17,16 +17,9 @@
 // the STRUCT can go on the heap but the STACK below cannot.
 static task_t *tasks[MAX_TASKS_LIMIT];
 
-// The linked ring-3 image: everything the bootloader loaded at 0x400000, spanning
-// the code (.user_text) and its read-only strings (.user_rodata). These symbols
-// come from linker.ld; their ADDRESSES mark the ends of the image. task_create
-// copies this whole range into every task's private frames.
-extern char _user_text_start[];
-extern char _user_rodata_end[];
-
-// Flags for a ring-3 page: present, writable, reachable at CPL 3. Every user page
-// (code and stack) is mapped with these; the copied text is left writable for
-// simplicity (no W^X in this teaching kernel).
+// Flags for a ring-3 stack page: present, writable, reachable at CPL 3. Program
+// pages are mapped by the ELF loader instead, which derives their flags from the
+// segment's own (kernel/elf.c), so a text segment can be mapped read-only.
 #define USER_PAGE_FLAGS  (PG_PRESENT | PG_WRITABLE | PG_USER)
 
 // Map a fresh stack into `as` at the fixed stack VA (USER_STACK_BASE up to
@@ -49,39 +42,6 @@ static int map_user_stack(address_space_t *as) {
         }
     }
     return 0;
-}
-
-// Build the private user half of `as`: copy the linked ring-3 image to fresh
-// frames mapped at its link address (0x400000), then map a fresh stack at the
-// fixed stack VA. Returns 0 on success, -1 if any frame or page-table allocation
-// fails. On failure the frames already mapped into `as` leak, which is acceptable
-// here: it only happens on out-of-memory, and tasks are never destroyed.
-static int build_user_space(address_space_t *as) {
-    // (a) Copy the user image. The bootloader loaded it at physical 0x400000,
-    // which the boot tables (active now, before any CR3 switch) identity-map, so
-    // _user_text_start is a readable pointer to the original bytes. We copy the
-    // WHOLE image (all three programs) into private frames: each task therefore
-    // runs its own copy. That is the strongest isolation but the most wasteful.
-    // TODO(shared-text): map the read-only text by reference and copy only the
-    // writable data, so the three programs share one physical text image.
-    uint64_t image_size = (uint64_t)_user_rodata_end - (uint64_t)_user_text_start;
-    for (uint64_t off = 0; off < image_size; off += FRAME_SIZE) {
-        uint64_t frame = alloc_frame();
-        if (frame == 0) {
-            return -1;
-        }
-        // alloc_frame returns an identity-mapped frame (physical == a writable
-        // virtual pointer), so both the source (0x400000+off, boot-mapped) and
-        // the destination (frame) are writable right now. Copying a whole frame
-        // may read a little past the image into the same page, which is harmless.
-        memcpy((void *)frame, (void *)((uint64_t)_user_text_start + off), FRAME_SIZE);
-        if (paging_map_page(as, (uint64_t)_user_text_start + off, frame, USER_PAGE_FLAGS) != 0) {
-            return -1;
-        }
-    }
-
-    // (b) Map the stack.
-    return map_user_stack(as);
 }
 
 // Index of the task currently on the CPU.
@@ -145,26 +105,6 @@ static int task_register(address_space_t *as, uint64_t entry) {
     t->id = id;
     t->state = TASK_READY;
     return (int)id;
-}
-
-int task_create(uint64_t entry) {
-    // Build this task's private address space: its own page-table tree with the
-    // kernel cloned in (so interrupts still land in mapped kernel code) and an
-    // empty user half. Do all allocation before task_register bumps num_tasks so
-    // a failed create leaves no half-built slot for schedule() to trip over.
-    address_space_t *as = paging_create_address_space();
-    if (as == NULL) {
-        return -1;                          // out of frames for the page tables
-    }
-
-    // Fill the user half: a private copy of the ring-3 image at 0x400000 and a
-    // private stack at the fixed stack VA. Both land on fresh frames unique to
-    // this task, which is the whole isolation guarantee.
-    if (build_user_space(as) != 0) {
-        return -1;                          // out of frames for code/stack pages
-    }
-
-    return task_register(as, entry);
 }
 
 int task_create_from_file(const char *name) {

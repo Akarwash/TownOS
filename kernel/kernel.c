@@ -10,13 +10,6 @@
 #include "heap.h"
 #include "scheduler.h"
 
-// The three ring-3 programs, linked into .user_text at 0x400000 (see
-// user/user_program.c and linker.ld). Each loops forever printing its own
-// letter; the scheduler switches between them on each timer tick.
-extern void user_program_a(void);
-extern void user_program_b(void);
-extern void user_program_c(void);
-
 // The three ring-3 programs, now files on the disk rather than parts of this
 // image. Each is a separately linked static ELF64 binary built from user/*.c
 // (see the USER_* rules in the Makefile) and copied onto the FAT32 volume.
