@@ -2,6 +2,7 @@
 #include "../drivers/disk.h"
 #include "../drivers/screen.h"
 #include "../kernel/heap.h"
+#include "../libc/mem.h"
 
 // Read-only FAT32. See fat32.h for the scope and docs/reference/fat32.md for the
 // on-disk layout this parses.
@@ -358,6 +359,49 @@ static int read_cluster(uint32_t cluster, uint8_t *buf) {
 // 8.3 names.
 // ---------------------------------------------------------------------------
 
+static char to_upper(char c) {
+    return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+}
+
+// Convert a caller's name ("HELLO.TXT") into the 11-byte on-disk form
+// ("HELLO   TXT"): base name padded to 8 with spaces, extension padded to 3, no
+// dot stored, uppercase. Returns 0 on success, -1 if the name cannot be
+// expressed in 8.3 (too long a base or extension, or empty). A name this
+// rejects is one MiniOS cannot see at all, since long-filename entries are
+// skipped when a directory is walked.
+static int name_to_83(const char *name, char out[FAT32_NAME_LENGTH]) {
+    for (int i = 0; i < FAT32_NAME_LENGTH; i++) {
+        out[i] = ' ';
+    }
+
+    int i = 0;
+    int written = 0;
+    while (name[i] != '\0' && name[i] != '.') {
+        if (written >= FAT32_BASE_LENGTH) {
+            return -1;   // base name too long for 8.3
+        }
+        out[written++] = to_upper(name[i]);
+        i++;
+    }
+    if (written == 0) {
+        return -1;       // no base name at all
+    }
+
+    if (name[i] == '.') {
+        i++;
+        written = 0;
+        while (name[i] != '\0') {
+            if (written >= FAT32_EXT_LENGTH) {
+                return -1;   // extension too long for 8.3
+            }
+            out[FAT32_BASE_LENGTH + written] = to_upper(name[i]);
+            written++;
+            i++;
+        }
+    }
+    return 0;
+}
+
 // Format an on-disk 11-byte name back for display: trim the padding from each
 // half and put the dot back. A name with an empty extension (directories usually
 // have one) gets no trailing dot.
@@ -390,6 +434,14 @@ static int name_equals_83(const uint8_t raw[FAT32_NAME_LENGTH],
         }
     }
     return 1;
+}
+
+// The start cluster is split across two 16-bit fields at opposite ends of the
+// entry. Recombine them; using only the low half silently works on small volumes
+// and then breaks on large ones.
+static uint32_t dirent_first_cluster(const struct fat32_dirent *entry) {
+    return ((uint32_t)entry->first_cluster_high << 16) |
+           (uint32_t)entry->first_cluster_low;
 }
 
 // Which entries are real files or directories, as opposed to format bookkeeping.
@@ -516,4 +568,105 @@ int fat32_list_root(void) {
         return -1;
     }
     return walk_directory(fs_root_cluster, NULL, NULL);
+}
+
+// ---------------------------------------------------------------------------
+// Reading a file.
+// ---------------------------------------------------------------------------
+
+int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
+                    uint32_t *out_size) {
+    if (!fs_ready) {
+        return -1;
+    }
+
+    char wanted[FAT32_NAME_LENGTH];
+    if (name_to_83(name, wanted) != 0) {
+        return -1;   // not expressible in 8.3, so nothing on disk can match it
+    }
+
+    // Root directory only. The walk itself takes any starting cluster and would
+    // read a subdirectory's entries just as happily, but this interface takes a
+    // bare name with no path to split, so there is no way to say which
+    // directory. Path lookup is future work alongside TODO(fat32-write).
+    struct fat32_dirent entry;
+    if (walk_directory(fs_root_cluster, wanted, &entry) != 0) {
+        return -1;   // not found, or the directory could not be read
+    }
+    if (entry.attr & FAT32_ATTR_DIRECTORY) {
+        return -1;   // a directory's contents are entries, not file bytes
+    }
+
+    // The chain says which clusters hold the file; the directory entry's size is
+    // what says where the real data ends inside the last one.
+    uint32_t size = entry.size;
+    if (size > bufsize) {
+        return -1;
+    }
+    if (out_size) {
+        *out_size = size;
+    }
+    if (size == 0) {
+        return 0;    // an empty file may not have a start cluster at all
+    }
+
+    uint32_t cluster = dirent_first_cluster(&entry);
+    if (!cluster_in_range(cluster)) {
+        return -1;
+    }
+
+    // Heap, not stack: a cluster can be far larger than a block (up to 128KB at
+    // the format's maximum), and the kernel stack is not big.
+    uint8_t *cluster_buf = (uint8_t *)kmalloc(fs_bytes_per_cluster);
+    if (cluster_buf == NULL) {
+        return -1;
+    }
+
+    uint8_t *out = (uint8_t *)buf;
+    uint32_t remaining = size;
+    int result = 0;
+
+    // Bounded for the same reason walk_directory is: a looping chain must fail,
+    // not hang. Delivering `size` bytes normally ends this loop long before the
+    // bound is reached.
+    uint32_t steps;
+    for (steps = 0; steps <= fs_total_clusters && remaining > 0; steps++) {
+        if (read_cluster(cluster, cluster_buf) != 0) {
+            result = -1;
+            break;
+        }
+
+        // Copy whole clusters until the last one, which is usually only partly
+        // real data. Trimming to `remaining` is what keeps the stale bytes after
+        // the end of the file (whatever occupied those blocks before) out of the
+        // caller's buffer.
+        uint32_t chunk = remaining < fs_bytes_per_cluster ? remaining
+                                                          : fs_bytes_per_cluster;
+        memcpy(out, cluster_buf, chunk);
+        out += chunk;
+        remaining -= chunk;
+
+        if (remaining == 0) {
+            break;   // satisfied the size, so the rest of the chain is padding
+        }
+
+        uint32_t next;
+        int step = fat32_next_cluster(cluster, &next);
+        if (step != FAT32_CHAIN_NEXT) {
+            // Either the chain ended early (size claims more data than the
+            // chain holds) or an entry was unreadable. Both mean the volume
+            // disagrees with itself, so refuse rather than return a short read
+            // the caller would mistake for the whole file.
+            result = -1;
+            break;
+        }
+        cluster = next;
+    }
+
+    if (remaining > 0 && result == 0) {
+        result = -1;   // ran past the cluster bound: the chain loops
+    }
+
+    kfree(cluster_buf);
+    return result;
 }

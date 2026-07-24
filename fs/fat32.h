@@ -35,4 +35,14 @@ int fat32_init(void);
 // success, -1 on a read error or a corrupt directory chain.
 int fat32_list_root(void);
 
+// Read the file called `name` (an 8.3 name such as "HELLO.TXT", case
+// insensitive) from the root directory into buf, and write its real length in
+// bytes to out_size (which may be NULL). The buffer receives exactly that many
+// bytes, trimmed from the last cluster, never the stale bytes that follow the
+// end of the file. Returns 0 on success, -1 if the name is not 8.3, is not in
+// the root directory, names a directory, does not fit in bufsize, or the volume
+// is corrupt.
+int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
+                    uint32_t *out_size);
+
 #endif
