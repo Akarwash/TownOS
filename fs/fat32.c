@@ -1,6 +1,7 @@
 #include "fat32.h"
 #include "../drivers/disk.h"
 #include "../drivers/screen.h"
+#include "../kernel/heap.h"
 
 // Read-only FAT32. See fat32.h for the scope and docs/reference/fat32.md for the
 // on-disk layout this parses.
@@ -24,8 +25,67 @@
 #define FAT32_MAX_SECTORS_PER_CLUSTER 255
 
 // FAT slots 0 and 1 are reserved by the format and never describe file data, so
-// the first cluster that can hold data is cluster 2. See CLUSTER_TO_BLOCK below.
+// the first cluster that can hold data is cluster 2. See cluster_to_block below.
 #define FAT32_FIRST_DATA_CLUSTER 2
+
+// ---------------------------------------------------------------------------
+// FAT entries.
+// ---------------------------------------------------------------------------
+// One 32-bit slot per cluster, holding the number of the next cluster in the
+// file. A slot holding zero means the cluster is free, so the same table is both
+// the chain map and the free list.
+#define FAT32_ENTRY_BYTES 4
+
+// Only the low 28 bits of an entry are meaningful; the top 4 are reserved and
+// may hold anything. Every entry must be masked before it is compared against
+// anything below. Skipping the mask is the classic FAT32 bug: end-of-chain
+// detection then fails intermittently, depending on what the formatter happened
+// to leave in the reserved bits.
+#define FAT32_ENTRY_MASK 0x0FFFFFFF
+
+#define FAT32_CLUSTER_FREE 0x00000000
+#define FAT32_CLUSTER_BAD  0x0FFFFFF7
+// Any masked value at or above this marks the last cluster of a file. It is a
+// range, not a single value, because different formatters write different
+// end-of-chain markers (0x0FFFFFF8 and 0x0FFFFFFF are both common).
+#define FAT32_CLUSTER_END  0x0FFFFFF8
+
+// fat32_next_cluster's three outcomes, kept distinct because "the chain ended"
+// and "the read failed" are different facts and callers act on them differently.
+#define FAT32_CHAIN_NEXT  0
+#define FAT32_CHAIN_END   1
+#define FAT32_CHAIN_ERROR (-1)
+
+// ---------------------------------------------------------------------------
+// Directory entries.
+// ---------------------------------------------------------------------------
+#define FAT32_DIRENT_BYTES 32
+
+// The first byte of an entry doubles as a marker.
+#define FAT32_DIRENT_FREE    0x00  // never used: no more entries in this directory
+#define FAT32_DIRENT_DELETED 0xE5  // was used, since deleted: skip it
+
+// Attribute byte bits.
+#define FAT32_ATTR_READ_ONLY 0x01
+#define FAT32_ATTR_HIDDEN    0x02
+#define FAT32_ATTR_SYSTEM    0x04
+#define FAT32_ATTR_VOLUME_ID 0x08
+#define FAT32_ATTR_DIRECTORY 0x10
+#define FAT32_ATTR_ARCHIVE   0x20
+
+// An entry whose whole attribute byte equals this is not a file at all: it is
+// one fragment of a long filename, bolted onto the format later and deliberately
+// given an attribute combination old software would ignore. Out of scope here,
+// so skip these; the 8.3 entry the fragments describe follows them.
+#define FAT32_ATTR_LONG_NAME 0x0F
+
+// The 8.3 name is 11 bytes with no dot stored: 8 bytes of base name then 3 of
+// extension, both space-padded, uppercase. HELLO.TXT is stored as "HELLO   TXT".
+#define FAT32_NAME_LENGTH 11
+#define FAT32_BASE_LENGTH 8
+#define FAT32_EXT_LENGTH  3
+// Longest display form: 8 base + '.' + 3 extension + terminator.
+#define FAT32_DISPLAY_NAME_MAX 13
 
 // ---------------------------------------------------------------------------
 // The BIOS Parameter Block: the filesystem describing its own shape.
@@ -73,6 +133,36 @@ typedef char fat32_bpb_is_packed[(sizeof(struct fat32_bpb) == FAT32_BPB_SIZE) ? 
 typedef char fat32_cluster_fits_one_read[
     (sizeof(((struct fat32_bpb *)0)->sectors_per_cluster) == 1 &&
      FAT32_MAX_SECTORS_PER_CLUSTER >= 255) ? 1 : -1];
+
+// ---------------------------------------------------------------------------
+// A directory entry: the mapping from a name to a starting cluster and a size.
+// ---------------------------------------------------------------------------
+// A directory is just a file whose contents are a run of these, 32 bytes each.
+// Packed for the same reason as the BPB: these offsets are fixed by the format,
+// not by the compiler's alignment preferences.
+//
+// first_cluster is split across two 16-bit fields at opposite ends of the entry
+// (a FAT16 layout with the high half bolted into a gap later). They must be
+// recombined as (high << 16) | low. Reading only the low half is easy to do by
+// accident and yields a wildly wrong cluster number on any volume large enough
+// for the high half to be non-zero.
+struct fat32_dirent {
+    uint8_t  name[FAT32_NAME_LENGTH];  // 0:  8.3, space-padded, no dot stored
+    uint8_t  attr;                     // 11: the attribute bits above
+    uint8_t  nt_reserved;              // 12: reserved
+    uint8_t  create_time_tenths;       // 13: creation time, tenths of a second
+    uint16_t create_time;              // 14: creation time
+    uint16_t create_date;              // 16: creation date
+    uint16_t access_date;              // 18: last access date
+    uint16_t first_cluster_high;       // 20: high 16 bits of the start cluster
+    uint16_t write_time;               // 22: last write time
+    uint16_t write_date;               // 24: last write date
+    uint16_t first_cluster_low;        // 26: low 16 bits of the start cluster
+    uint32_t size;                     // 28: file length in bytes
+} __attribute__((packed));
+
+typedef char fat32_dirent_is_packed[
+    (sizeof(struct fat32_dirent) == FAT32_DIRENT_BYTES) ? 1 : -1];
 
 // ---------------------------------------------------------------------------
 // Cached volume geometry, filled in by fat32_init.
@@ -180,4 +270,250 @@ int fat32_init(void) {
     print_string("\n");
 
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Clusters and chains.
+// ---------------------------------------------------------------------------
+
+// Where a cluster's blocks actually live.
+//
+// The `- 2` is not a bug. FAT slots 0 and 1 are reserved by the format and never
+// describe data, so the first cluster that can hold file contents is cluster 2,
+// and cluster 2 sits at offset 0 of the data area. Cluster 3 sits one cluster
+// in, and so on. If file contents come back shifted by exactly two clusters'
+// worth of bytes, this subtraction is missing or wrong.
+static uint32_t cluster_to_block(uint32_t cluster) {
+    return fs_first_data_block +
+           (cluster - FAT32_FIRST_DATA_CLUSTER) * fs_sectors_per_cluster;
+}
+
+// Is this a cluster number the volume could actually contain? Data clusters are
+// numbered from 2 up to total_clusters + 1. Anything else is corruption, and
+// following it would read blocks belonging to something else, or off the end of
+// the disk entirely.
+static int cluster_in_range(uint32_t cluster) {
+    return cluster >= FAT32_FIRST_DATA_CLUSTER &&
+           cluster < fs_total_clusters + FAT32_FIRST_DATA_CLUSTER;
+}
+
+// Look up one cluster's FAT entry and report what follows it.
+//
+// The FAT is a flat array of 32-bit entries starting at the first FAT block, so
+// finding an entry is a division: which block of the table holds it, and where
+// in that block it sits.
+//
+// Only the first FAT copy is consulted. The format keeps num_fats identical
+// copies for redundancy, and reading needs just one of them. A writer would have
+// to update every copy, or they disagree and the volume is corrupt.
+//
+// Returns FAT32_CHAIN_NEXT with *next set, FAT32_CHAIN_END at the end of the
+// chain, or FAT32_CHAIN_ERROR on a read failure or a corrupt entry.
+static int fat32_next_cluster(uint32_t cluster, uint32_t *next) {
+    uint32_t entries_per_block = fs_bytes_per_sector / FAT32_ENTRY_BYTES;
+    uint32_t block  = fs_first_fat_block + (cluster / entries_per_block);
+    uint32_t offset = (cluster % entries_per_block) * FAT32_ENTRY_BYTES;
+
+    // One block, so this stays on the stack. Cluster buffers are heap-allocated
+    // (see fat32_read_file) because a cluster can be far larger than a block.
+    uint8_t block_buf[DISK_SECTOR_SIZE];
+    if (disk_read(block, 1, block_buf) != 0) {
+        return FAT32_CHAIN_ERROR;
+    }
+
+    // Assembled byte by byte rather than cast through a uint32_t pointer: the
+    // entry is little-endian on disk and its offset need not be 4-byte aligned.
+    uint32_t entry = (uint32_t)block_buf[offset] |
+                     ((uint32_t)block_buf[offset + 1] << 8) |
+                     ((uint32_t)block_buf[offset + 2] << 16) |
+                     ((uint32_t)block_buf[offset + 3] << 24);
+
+    entry &= FAT32_ENTRY_MASK;   // the top 4 bits are reserved, never compared
+
+    if (entry >= FAT32_CLUSTER_END) {
+        return FAT32_CHAIN_END;
+    }
+    if (entry == FAT32_CLUSTER_FREE || entry == FAT32_CLUSTER_BAD ||
+        !cluster_in_range(entry)) {
+        // A live chain never points at a free or bad cluster, and never off the
+        // volume. Refuse it rather than read whatever happens to be there.
+        return FAT32_CHAIN_ERROR;
+    }
+
+    *next = entry;
+    return FAT32_CHAIN_NEXT;
+}
+
+// Read one whole cluster into buf, which must hold bytes_per_cluster bytes.
+// A single disk_read call by construction; see FAT32_MAX_SECTORS_PER_CLUSTER.
+static int read_cluster(uint32_t cluster, uint8_t *buf) {
+    if (!cluster_in_range(cluster)) {
+        return -1;
+    }
+    return disk_read(cluster_to_block(cluster),
+                     (uint8_t)fs_sectors_per_cluster, buf);
+}
+
+// ---------------------------------------------------------------------------
+// 8.3 names.
+// ---------------------------------------------------------------------------
+
+// Format an on-disk 11-byte name back for display: trim the padding from each
+// half and put the dot back. A name with an empty extension (directories usually
+// have one) gets no trailing dot.
+static void name_from_83(const uint8_t raw[FAT32_NAME_LENGTH],
+                         char out[FAT32_DISPLAY_NAME_MAX]) {
+    int written = 0;
+
+    for (int i = 0; i < FAT32_BASE_LENGTH && raw[i] != ' '; i++) {
+        out[written++] = (char)raw[i];
+    }
+    if (raw[FAT32_BASE_LENGTH] != ' ') {
+        out[written++] = '.';
+        for (int i = 0; i < FAT32_EXT_LENGTH; i++) {
+            uint8_t c = raw[FAT32_BASE_LENGTH + i];
+            if (c == ' ') {
+                break;
+            }
+            out[written++] = (char)c;
+        }
+    }
+    out[written] = '\0';
+}
+
+static int name_equals_83(const uint8_t raw[FAT32_NAME_LENGTH],
+                          const char wanted[FAT32_NAME_LENGTH]) {
+    // Fixed-length and not NUL-terminated, so strcmp does not apply.
+    for (int i = 0; i < FAT32_NAME_LENGTH; i++) {
+        if ((char)raw[i] != wanted[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// Which entries are real files or directories, as opposed to format bookkeeping.
+// The long-filename check must come first: an LFN entry's attribute byte has the
+// volume-id bit set too, so testing that bit first would misclassify it.
+static int dirent_is_usable(const struct fat32_dirent *entry) {
+    if (entry->attr == FAT32_ATTR_LONG_NAME) {
+        return 0;   // one fragment of a long filename, out of scope
+    }
+    if (entry->attr & FAT32_ATTR_VOLUME_ID) {
+        return 0;   // the volume label, not a file
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Walking a directory.
+// ---------------------------------------------------------------------------
+// A directory is a file, so reading one means following its cluster chain like
+// any other. Its contents are a run of 32-byte entries.
+//
+// Both callers below (listing and lookup) share this walk. If wanted is NULL,
+// every usable entry is printed; otherwise the walk stops at the first entry
+// whose name matches and copies it to found. Returns 0 on success (for a
+// lookup, 0 means found), -1 on a read error or a corrupt chain, and 1 when a
+// lookup completed without finding the name.
+#define FAT32_DIR_NOT_FOUND 1
+
+static int walk_directory(uint32_t dir_cluster,
+                          const char *wanted,
+                          struct fat32_dirent *found) {
+    uint8_t *cluster_buf = (uint8_t *)kmalloc(fs_bytes_per_cluster);
+    if (cluster_buf == NULL) {
+        return -1;
+    }
+
+    uint32_t cluster = dir_cluster;
+    int result = wanted ? FAT32_DIR_NOT_FOUND : 0;
+
+    // Bounded, deliberately. A corrupt or self-referential chain would otherwise
+    // spin here forever, and a filesystem that hangs the machine on bad data is
+    // worse than one that reports an error. No valid chain can be longer than
+    // the number of data clusters on the volume, so running past that bound is
+    // proof of corruption (checked after the loop). Same reasoning as the disk
+    // driver's bounded polling loops.
+    uint32_t steps;
+    for (steps = 0; steps <= fs_total_clusters; steps++) {
+        if (read_cluster(cluster, cluster_buf) != 0) {
+            result = -1;
+            break;
+        }
+
+        uint32_t entries = fs_bytes_per_cluster / FAT32_DIRENT_BYTES;
+        int done = 0;
+
+        for (uint32_t i = 0; i < entries; i++) {
+            struct fat32_dirent *entry =
+                (struct fat32_dirent *)(cluster_buf + i * FAT32_DIRENT_BYTES);
+
+            if (entry->name[0] == FAT32_DIRENT_FREE) {
+                // Never-used entry: everything after it is unused too, so this
+                // is the end of the directory, not just a gap.
+                done = 1;
+                break;
+            }
+            if (entry->name[0] == FAT32_DIRENT_DELETED) {
+                continue;   // a hole left by a deleted file, keep scanning
+            }
+            if (!dirent_is_usable(entry)) {
+                continue;
+            }
+
+            if (wanted) {
+                if (name_equals_83(entry->name, wanted)) {
+                    *found = *entry;
+                    result = 0;
+                    done = 1;
+                    break;
+                }
+                continue;
+            }
+
+            char display[FAT32_DISPLAY_NAME_MAX];
+            name_from_83(entry->name, display);
+            print_string(display);
+            if (entry->attr & FAT32_ATTR_DIRECTORY) {
+                print_string("  <DIR>\n");
+            } else {
+                print_string("  ");
+                print_int(entry->size);
+                print_string(" bytes\n");
+            }
+        }
+
+        if (done) {
+            break;
+        }
+
+        uint32_t next;
+        int step = fat32_next_cluster(cluster, &next);
+        if (step == FAT32_CHAIN_END) {
+            break;                  // directory ended on a cluster boundary
+        }
+        if (step == FAT32_CHAIN_ERROR) {
+            result = -1;
+            break;
+        }
+        cluster = next;
+    }
+
+    if (steps > fs_total_clusters) {
+        // Followed more clusters than the volume holds, so the chain loops.
+        print_string("FAT32: directory chain exceeds volume size\n");
+        result = -1;
+    }
+
+    kfree(cluster_buf);
+    return result;
+}
+
+int fat32_list_root(void) {
+    if (!fs_ready) {
+        print_string("FAT32: not initialised\n");
+        return -1;
+    }
+    return walk_directory(fs_root_cluster, NULL, NULL);
 }
