@@ -50,8 +50,40 @@ ASM_OBJECTS = $(ASM_SOURCES:.asm=.o)
 
 ALL_OBJECTS = $(ASM_OBJECTS) $(C_OBJECTS)
 
+# ---------------------------------------------------------------------------
+# User programs: separate binaries, not part of the kernel image
+# ---------------------------------------------------------------------------
+# Each user program is compiled and linked on its own into a static ELF64 file
+# that lands on the disk image. The kernel reads and loads it at runtime, so
+# changing a program means rebuilding one small binary and copying it onto the
+# image, not rebuilding the kernel.
+#
+#   -mcmodel=small  NOT -mcmodel=kernel. The kernel model assumes every symbol
+#                   lives in the top 2GB of the address space; user code links at
+#                   0x400000, nowhere near that, and the kernel model produces
+#                   relocation errors on it.
+#   -static         no dynamic linking; the loader resolves nothing at runtime.
+#   -nostdlib       no host libc and no startup files. The entire runtime a
+#                   program gets is user/userlib.h.
+#   -fno-pie -no-pie  position DEPENDENT. The loader does not relocate, so the
+#                   program must be linked at the exact address it loads at.
+USER_CFLAGS = -ffreestanding -m64 -mno-red-zone -mcmodel=small -fno-pie -no-pie \
+              -nostdlib -nodefaultlibs -static -Wall -Wextra
+USER_LD_SCRIPT = user/user.ld
+
+# -z max-page-size=4096 keeps the linker from padding segments out to its default
+# 2MB alignment, which would bloat each binary enormously for no benefit here.
+USER_LDFLAGS = -T $(USER_LD_SCRIPT) -Wl,-z,max-page-size=4096 -Wl,--build-id=none
+
+# 8.3 uppercase names because the filesystem reads 8.3 names only, and the source
+# file names match the on-disk names so the mapping needs no explaining.
+USER_PROGRAMS = user/A.ELF user/B.ELF user/C.ELF
+
+user/%.ELF: user/%.c user/userlib.h $(USER_LD_SCRIPT) include/syscalls.h include/vectors.h
+	$(CC) $(USER_CFLAGS) $(USER_LDFLAGS) -o $@ $<
+
 # Default target
-all: minios.bin
+all: minios.bin $(USER_PROGRAMS)
 
 # Link everything into the ELF64 image. This keeps the 64-bit symbols gdb needs.
 minios.elf: $(ALL_OBJECTS)
@@ -93,14 +125,26 @@ DISK_SIZE = 64M
 $(DISK_IMG):
 	./tools/mkdisk.sh $(DISK_IMG) $(DISK_SIZE)
 
+# Copy the user programs onto the image. Deliberately PHONY, so it runs on every
+# `make run` even when the image already exists.
+#
+# The image itself must be created once and then left alone (reformatting would
+# destroy its contents), but the program binaries are build output and must never
+# be stale: running an old A.ELF because the image was not refreshed looks exactly
+# like a loader bug and costs an afternoon. mcopy -o overwrites without asking.
+.PHONY: disk-programs
+disk-programs: $(DISK_IMG) $(USER_PROGRAMS)
+	mcopy -o -i $(DISK_IMG) $(USER_PROGRAMS) ::/
+
 # Run in QEMU with the disk attached to the primary ATA bus.
 #   if=ide      put the drive on the emulated IDE/ATA controller (NOT virtio or
 #               AHCI), so it answers at I/O ports 0x1F0-0x1F7 where the driver looks
 #   index=0     first drive on that controller = primary bus master
 #   format=raw  the file is a flat byte array, no qcow layering
-run: minios.bin $(DISK_IMG)
+run: minios.bin disk-programs
 	$(QEMU) -kernel minios.bin -drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk
 
-# Clean build files
+# Clean build files. The disk image is NOT removed: it is not build output, it is
+# the machine's disk, and the test files on it were put there by hand.
 clean:
-	rm -f $(ALL_OBJECTS) minios.bin minios.elf
+	rm -f $(ALL_OBJECTS) minios.bin minios.elf $(USER_PROGRAMS)
