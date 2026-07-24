@@ -7,6 +7,84 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- A read-only FAT32 filesystem (`fs/fat32.c`, `fs/fat32.h`), the layer that gives
+  the disk driver's numbered blocks meaning. Three calls: `fat32_init` parses the
+  boot sector and caches the volume geometry, `fat32_list_root` prints the root
+  directory (name, and either a size or `<DIR>`), and `fat32_read_file(name, buf,
+  bufsize, &out_size)` reads a file by 8.3 name into a caller's buffer and
+  reports its real length. Read-only on purpose: reading needs the boot sector,
+  cluster chains, and directory entries, while writing additionally needs
+  free-cluster search, chain updates, mirroring every FAT copy, directory entry
+  updates, directory growth, and crash ordering, which is where filesystems get
+  hard and where bugs corrupt data instead of merely failing. It is also the
+  complete prerequisite for the next rung (a program image is read, never
+  written), so this is not half a step; write support is separate work, marked
+  `TODO(fat32-write)`. Also out of scope: long filenames (LFN entries are
+  skipped, so a long-named file is invisible to MiniOS), permissions, and
+  subdirectory creation; lookups are root-directory only, though the walk itself
+  takes any starting cluster and a subdirectory lists as `<DIR>`. The BPB struct
+  is `__attribute__((packed))` because its fields sit at unaligned offsets
+  (`bytes_per_sector` is 16 bits at offset 11) and padding would silently shift
+  every field after the first misalignment, the same trap as the Multiboot mmap
+  entry; a compile-time size guard fails the build if padding returns.
+  `sectors_per_fat` is read from the 32-bit FAT32 field, not the 16-bit legacy
+  one (which is zero here and would put the data area on top of the FAT), and the
+  parsed geometry is sanity-checked (512-byte sectors, power-of-two cluster size,
+  the `0xAA55` signature at offset 510, non-zero FAT length) before anything is
+  computed from it. `block_of_cluster(n) = first_data_block + ((n - 2) *
+  sectors_per_cluster)`: the `- 2` is because FAT slots 0 and 1 are reserved, so
+  cluster 2 is the first that can hold data and sits at offset 0 of the data
+  area; contents shifted by exactly two clusters' worth of bytes is the symptom
+  of getting it wrong. Every FAT entry is masked with `0x0FFFFFFF` before
+  comparison, since only the low 28 bits are meaningful and an unmasked entry
+  makes end-of-chain detection fail intermittently; after masking, `0x00000000`
+  is free, `0x0FFFFFF7` is bad, `>= 0x0FFFFFF8` ends the chain, and anything else
+  is the next cluster. Only the first FAT copy is read (a writer would have to
+  update all of them). The start cluster is recombined from its two halves,
+  `(high << 16) | low`, which sit at opposite ends of the 32-byte directory
+  entry. Directory scanning stops at a `0x00` first byte (never-used, so nothing
+  follows), skips `0xE5` (deleted), skips attribute `0x0F` (long-filename
+  fragment, checked before the volume-id bit because an LFN entry sets that bit
+  too), skips the volume label (`0x08`), and marks subdirectories (`0x10`).
+  Helpers convert `"HELLO.TXT"` to the 11-byte space-padded uppercase on-disk
+  form `"HELLO   TXT"` and back for display. Reads follow the chain one cluster
+  at a time into a `kmalloc`'d buffer (the heap, not the stack, since a cluster
+  can be 128KB at the format's maximum) and trim the last cluster to the size in
+  the directory entry, so the stale bytes after the end of the file never reach
+  the caller. One cluster is always one `disk_read`, guaranteed at compile time
+  because `sectors_per_cluster` and `disk_read`'s count are both single bytes.
+  Both the directory walk and the file read are bounded by the volume's cluster
+  count and return -1 rather than spinning on a self-referential chain, the same
+  reasoning as the disk driver's bounded polling. Verified under QEMU with a
+  temporary self-test in `kernel_main` (added, verified, removed) that printed
+  the geometry (`512 B/sector, 1 sectors/cluster, first data block 2050, root
+  cluster 2`), listed the root (`HELLO.TXT 17`, `TEST.TXT 19`, `BIG.TXT 16384`),
+  read and compared `HELLO.TXT`, verified all 16384 bytes of the 32-cluster
+  `BIG.TXT` against a known repeating pattern, and confirmed a missing file
+  returns -1: `PASS (small file)`, `PASS (multi-cluster file)`, `PASS (missing
+  file returns -1)`. A negative control (removing the `- 2`) failed those checks,
+  which is what makes the passes mean something. The `-d int` log showed only
+  timer (`v=40`) and syscall (`v=50`) vectors: no page (`0x0E`), GP (`0x0D`), or
+  double (`0x08`) fault, no triple fault, and still no disk IRQ (`v=4e`). See
+  `docs/decisions/0014-read-only-fat32.md` and `docs/reference/fat32.md`.
+- A formatted disk image with test files (`tools/mkdisk.sh`). The image was 16MB
+  of zeros with no filesystem; it is now 64MB and formatted FAT32, with three
+  test files copied in. 64MB rather than 16MB because FAT32 is only legal with at
+  least 65525 clusters, which 16MB cannot reach with a sane cluster size, so
+  formatting tools either refuse or silently produce FAT16. Formatting uses
+  mtools (`mformat -i disk.img -F ::`, then `mcopy -i disk.img file ::/`), which
+  edits the image file directly as a bare FAT volume, so it needs no `sudo` and
+  no mounting; mtools is now a build dependency (`brew install mtools`, `apt
+  install mtools`). The volume is a "superfloppy" (it starts at block 0, no
+  partition table), which is why block 0 is the boot sector. The test files are
+  `HELLO.TXT` and `TEST.TXT` (short known strings) and `BIG.TXT` (16384 bytes of
+  a repeating 16-byte pattern), the last deliberately larger than one cluster so
+  chain following is genuinely exercised: a single-cluster file reads correctly
+  even when the chain logic is completely broken. The `Makefile`'s `disk.img`
+  rule now calls the script and `make run` still depends on it; both the rule and
+  the script skip an image that already exists, since `make run` calls into this
+  on every boot and reformatting would silently destroy the disk's contents.
+  `disk.img` stays git-ignored. See `docs/building.md`.
 - A polled ATA PIO disk driver (`drivers/disk.c`, `drivers/disk.h`): `disk_read`
   and `disk_write` move any run of contiguous 512-byte blocks between a disk and a
   buffer on the primary ATA bus, addressed by LBA28. A disk is treated as a flat

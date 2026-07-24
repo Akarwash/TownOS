@@ -20,6 +20,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 | [reference/idt.md](reference/idt.md) | The IDT and interrupt entry path: gate format, PIC remap, the 48 stubs, dispatch, and EOI |
 | [reference/heap.md](reference/heap.md) | The kernel heap: header/footer boundary tags, split/coalesce, the frame-allocator seam, and interrupt safety |
 | [reference/disk.md](reference/disk.md) | The polled ATA PIO disk driver: the 512-byte block model, the port layout, the read and write flows, and the driver-vs-filesystem layering |
+| [reference/fat32.md](reference/fat32.md) | The read-only FAT32 filesystem: the on-disk layout, the boot sector fields, cluster-to-block arithmetic, FAT chains and the 28-bit mask, directory entries and 8.3 names, and the read path |
 | [project-status.md](project-status.md) | What works, what was never built, and the natural next steps |
 | [decisions/](decisions/) | Architecture decision records (ADRs) for the load-bearing choices |
 
@@ -38,10 +39,12 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 - [0011 — Heap-allocate task structs and bump-allocate user stacks](decisions/0011-dynamic-tasks-and-stacks.md) — Retire the fixed four-task array (`kmalloc` each `task_t`) and the two hardcoded stacks (bump-allocate 256KB slices of the user region); the stack ceiling remains until per-process paging.
 - [0012 — Per-process paging: a private address space per task](decisions/0012-per-process-paging.md) — Give each task its own page-table tree (private 4KB user half, kernel half cloned by value), switch CR3 on context switch, so tasks share virtual addresses but not physical memory.
 - [0013 — A polled ATA PIO disk driver](decisions/0013-ata-pio-disk-driver.md) — Read and write 512-byte LBA28 blocks on the primary ATA bus by polling (no interrupts, no DMA); the simplest correct block device, which freezes the machine during a transfer and unblocks a filesystem.
+- [0014 — A read-only FAT32 filesystem](decisions/0014-read-only-fat32.md) — Give the raw blocks names: parse the boot sector, follow FAT cluster chains, and read a file by 8.3 name, read-only (first FAT copy, root directory, no long filenames), with the image formatted by the host build system.
 
 ## Status
 
-MiniOS **builds, links, and boots to an interactive shell** under QEMU.
+MiniOS **builds, links, and boots to an interactive shell** under QEMU, and can
+read files by name off a FAT32 disk.
 
 - All C sources compile cleanly under `-Wall -Wextra`.
 - All assembly sources assemble cleanly with `nasm -f elf64`.

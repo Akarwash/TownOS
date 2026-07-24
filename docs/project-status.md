@@ -2,7 +2,8 @@
 
 MiniOS is a learning kernel: it boots x86-64 long mode, drops to ring 3, and
 preempts between three ring-3 tasks on the timer tick, each in its own address
-space (per-process paging). (An interrupt-driven shell is still compiled and
+space (per-process paging). It can read files off a FAT32 disk by name, though
+nothing on the boot path does so yet. (An interrupt-driven shell is still compiled and
 working but off the boot path.) This page records what works today, what was
 deliberately never built, the natural next steps, and the known limitations. It
 is a factual snapshot, not a roadmap.
@@ -34,12 +35,25 @@ is a factual snapshot, not a roadmap.
   move any run of contiguous 512-byte blocks between a disk and a buffer on the
   primary ATA bus, addressed by LBA28. It polls the status port (no interrupts,
   no DMA) with bounded poll loops that time out rather than hang, and sets nIEN so
-  the drive never raises IRQ14. `make run` attaches a 16MB raw `disk.img`. This is
+  the drive never raises IRQ14. `make run` attaches a 64MB raw `disk.img`. This is
   a raw block device, not a filesystem: it moves the exact block it is told to and
   has no names, files, or free-space tracking. A transfer freezes the machine (the
   scheduler cannot preempt mid-transfer), an accepted limitation of polled PIO. See
   [reference/disk.md](reference/disk.md) and
   [decisions/0013-ata-pio-disk-driver.md](decisions/0013-ata-pio-disk-driver.md).
+- A read-only FAT32 filesystem (`fs/fat32.c`): `fat32_init` parses the boot
+  sector and caches the volume geometry, `fat32_list_root` lists the root
+  directory, and `fat32_read_file` reads a file by 8.3 name into a caller's
+  buffer, following its cluster chain and trimming the last cluster to the size
+  in the directory entry. Files on the disk can now be named and read, which is
+  what program loading needs. It is read-only by design, so nothing can be saved
+  (`TODO(fat32-write)`); it handles 8.3 names only and skips long-filename
+  entries; it reads the first FAT copy only; and lookups are root-directory only.
+  The image is formatted by the host build system (`tools/mkdisk.sh`, mtools), not
+  by the kernel. Nothing on the boot path calls it yet: the shell command and the
+  program loader that will are separate work. See
+  [reference/fat32.md](reference/fat32.md) and
+  [decisions/0014-read-only-fat32.md](decisions/0014-read-only-fat32.md).
 - A drop to ring 3 (`kernel/usermode.c`, `user/user_program.c`): after init,
   `kernel_main` forges an `iretq` frame and runs a small program at CPL 3 in its
   own user-accessible pages (code at 4M, stack at 6-8M), while the kernel's own
@@ -99,8 +113,8 @@ Swapping the scheduler handoff back for `shell_init` restores the shell. See
 
 These are absent by design; MiniOS isolates and preempts between hard-coded
 ring-3 tasks in their own address spaces, but does not load or manage processes.
-There is now a block device (the ATA disk driver), but nothing is built on it
-yet.
+There is now a block device (the ATA disk driver) and a read-only filesystem on
+top of it, so files can be read but not written and not yet run.
 
 - **Processes.** The scheduler runs hard-coded programs baked into the kernel
   image (three today), not loaded programs. Each task now has its own address
@@ -114,14 +128,20 @@ yet.
   lazy allocation on fault, no copy-on-write sharing (the read-only user text is
   copied in full per task rather than shared, `TODO(shared-text)`), and no paging
   to disk.
-- **A filesystem.** There is a block device now (the polled ATA disk driver,
-  `drivers/disk.c`), but nothing on top of it: no on-disk layout, no names, no
-  files or directories, and no free-space tracking. The driver moves the exact
-  512-byte block it is told to; deciding which block holds what is the filesystem
-  layer, still absent. See [reference/disk.md](reference/disk.md).
+- **Writing to the filesystem.** `fs/fat32.c` reads and only reads. There is no
+  free-cluster search, no chain update, no FAT-copy mirroring, no directory entry
+  creation, and no crash ordering, which is where filesystems get hard. Nothing
+  the kernel does can be saved, and the disk's contents are a build input
+  produced on the host. Recorded as `TODO(fat32-write)`. See
+  [decisions/0014-read-only-fat32.md](decisions/0014-read-only-fat32.md).
+- **Long filenames, paths, and permissions.** Long-filename directory entries are
+  skipped, so a file with a long name is invisible to MiniOS; lookups are
+  root-directory only, since the interface takes a bare name with no path to
+  split; and FAT32 carries essentially no permissions and no crash safety.
 - **Program loading.** There is no ELF loader and no way to run a separate
-  program; the shell dispatches to compiled-in command functions. This waits on a
-  filesystem to load a program image from.
+  program; the shell dispatches to compiled-in command functions. The filesystem
+  it was waiting on now exists, so this is the next rung: read an image off the
+  disk into a fresh address space and run it as a real process.
 
 ## Natural next steps
 
@@ -170,10 +190,19 @@ a filesystem needs. See
 [decisions/0013-ata-pio-disk-driver.md](decisions/0013-ata-pio-disk-driver.md).
 The remaining steps build on it.
 
-**A filesystem, then program loading.** Next. With a block device in place, a
-filesystem can turn names into block numbers and track free space, and a program
-loader can then read an ELF image off disk into a fresh address space and run it
-as a real process. Both are still absent.
+**A filesystem.** Done, for reading. `fs/fat32.c` turns names into block numbers:
+it parses the boot sector, follows cluster chains through the FAT, and reads a
+file by 8.3 name out of the root directory. See
+[decisions/0014-read-only-fat32.md](decisions/0014-read-only-fat32.md).
+
+**Program loading, then filesystem writing.** Next, in that order. Reading is the
+complete prerequisite for program loading (a program image is read, never
+written), so a loader can now read an ELF image off the disk into a fresh address
+space and run it as a real process. Writing is the other direction and is
+independent of it: free-cluster search, chain and directory updates, mirroring
+every FAT copy, and crash ordering (`TODO(fat32-write)`). Nothing calls the
+filesystem on the boot path yet; a shell command to list and print files would be
+the smallest first caller.
 
 ## Known limitations
 
@@ -209,6 +238,9 @@ as a real process. Both are still absent.
   interrupt-driven transfer (IRQ14 when a block is ready) and then DMA, recorded as
   future work in
   [decisions/0013-ata-pio-disk-driver.md](decisions/0013-ata-pio-disk-driver.md).
+  The filesystem inherits this: it caches nothing, so every FAT lookup reads a
+  full 512-byte block through the polled driver, and reading a large file freezes
+  the machine for the duration.
 - **No SMP.** MiniOS assumes a single CPU. It uses the legacy 8259 PIC, not the
   APIC/IO-APIC, and has no per-core state or locking.
 - **1GB identity-map ceiling.** The boot climb (`boot/boot.asm`) maps a fixed

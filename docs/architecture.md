@@ -2,7 +2,8 @@
 
 MiniOS is a small x86-64 hobby kernel that boots via Multiboot, climbs into
 64-bit long mode, and runs an interrupt-driven interactive shell. It is a
-learning kernel with no filesystem. It drops to ring 3 (CPL 3) to run small
+learning kernel with a read-only filesystem: files on the disk can be listed and
+read by name, but nothing can be written back. It drops to ring 3 (CPL 3) to run small
 demonstration programs in their own user-accessible pages, and those programs
 call back into the kernel through a single `int 0x50` syscall gate (`SYS_WRITE`,
 `SYS_EXIT`) rather than faulting. A round-robin preemptive scheduler switches
@@ -26,6 +27,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `boot/` | Multiboot header and the hand-written 32 to 64 long-mode climb (assembly). |
 | `kernel/` | Core kernel: GDT/TSS, IDT, interrupt dispatch, syscall dispatch, timer, physical frame allocator, the kernel heap, per-process paging, ring-3 entry, the scheduler, and `kernel_main`. |
 | `drivers/` | Hardware drivers: VGA text screen, PS/2 keyboard, the polled ATA PIO disk driver, port I/O helpers. |
+| `fs/` | The filesystem layer, above the disk driver: read-only FAT32 (list the root directory, read a file by name). |
 | `libc/` | Minimal freestanding C library: `string` and `mem` routines. |
 | `shell/` | The interactive command shell. |
 | `user/` | The three ring-3 demonstration programs (`.user_text`, run at CPL 3, call the kernel via `int 0x50`; the scheduler switches between them). |
@@ -54,6 +56,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `drivers/keyboard.c`, `drivers/keyboard.h` | PS/2 keyboard driver on IRQ 1, scancode to ASCII. | Implemented |
 | `drivers/disk.c`, `drivers/disk.h` | Polled ATA PIO disk driver: `disk_init`/`disk_read`/`disk_write` move 512-byte LBA28 blocks on the primary bus. | Implemented |
 | `drivers/ports.c`, `drivers/ports.h` | `in`/`out` port I/O wrappers (byte and word, in and out). | Implemented |
+| `fs/fat32.c`, `fs/fat32.h` | Read-only FAT32: `fat32_init` parses the boot sector, `fat32_list_root` lists the root directory, `fat32_read_file` reads a file by 8.3 name. | Implemented (read-only; nothing calls it yet) |
 | `libc/string.c`, `libc/string.h` | `strlen`, `strcmp`, `strcpy`. | Implemented |
 | `libc/mem.c`, `libc/mem.h` | `memcpy`, `memset`. | Implemented |
 | `shell/shell.c`, `shell/shell.h` | Command loop: buffer keypresses, dispatch `help`/`clear`/`hello`/`tick`. | Implemented |
@@ -75,6 +78,7 @@ boot (boot.asm) ............ long-mode climb, hands off to kernel_main
   -> drivers .............. screen, keyboard, timer, ports
   -> heap_init ............ build the kernel heap (heap.c)
   -> disk_init ............ probe the primary ATA bus, silence IRQ14 (disk.c)
+  -> (fs/fat32.c) ......... read-only FAT32 on top of the block device, not on the boot path
   -> task_create x3 ....... kmalloc + forge a ring-3 task, build its private address space (scheduler.c, paging.c)
   -> scheduler_start ...... load task 0's CR3, enter task 0 via enter_user_mode (usermode.c)
   -> user_program_a/_b/_c . run at CPL 3 in their own trees, call the kernel via int 0x50
@@ -138,4 +142,5 @@ task and drive the switch.
 - Memory layout: [reference/memory-map.md](reference/memory-map.md)
 - The kernel heap: [reference/heap.md](reference/heap.md)
 - The disk driver: [reference/disk.md](reference/disk.md)
+- The filesystem: [reference/fat32.md](reference/fat32.md)
 - Concepts (the why): [`../learnings/`](../learnings/README.md)
