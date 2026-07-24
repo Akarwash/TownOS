@@ -24,7 +24,7 @@ grab onto.
 > x86-64 long mode). They are kept as personal learning material and are
 > deliberately **not** rewritten; where such a chapter and
 > [`../docs/`](../docs/README.md) disagree on a fact, `../docs/` is the current
-> truth. **Written:** chapters that still hold. **Stubbed:** chapters 08 and up
+> truth. **Written:** chapters that still hold. **Stubbed:** chapters 08 through 15
 > cover subsystems the kernel grew after the 32-bit era (long mode, the 64-bit
 > GDT/TSS, user mode, syscalls, the scheduler, the heap, per-process paging, the
 > disk driver). Each of these has a factual [`../docs/reference/`](../docs/README.md)
@@ -84,6 +84,8 @@ chapter states are:
 | 13 | The heap | [13-the-heap.md](13-the-heap.md) | stubbed | [../docs/reference/heap.md](../docs/reference/heap.md) |
 | 14 | Per-process paging | [14-per-process-paging.md](14-per-process-paging.md) | stubbed | [../docs/reference/paging.md](../docs/reference/paging.md) |
 | 15 | The disk driver | [15-the-disk-driver.md](15-the-disk-driver.md) | stubbed | [../docs/reference/disk.md](../docs/reference/disk.md) |
+| 16 | The filesystem | [16-the-filesystem.md](16-the-filesystem.md) | written | [../docs/reference/fat32.md](../docs/reference/fat32.md) |
+| 17 | Loading a program (the ELF loader) | [17-loading-a-program.md](17-loading-a-program.md) | written | [../docs/reference/elf-loading.md](../docs/reference/elf-loading.md) |
 
 Chapters 1, 2, 3, and 5 (frozen-32bit) and chapters 8, 9, and 14 (stubbed)
 overlap on purpose: the frozen chapter teaches the original 32-bit take on boot,
@@ -119,8 +121,10 @@ kernel/scheduler.c ......... round-robin preemptive scheduler          → ch.12
 drivers/screen.c ........... VGA text-mode output                      → ch.4
 drivers/keyboard.c ......... PS/2 keyboard input (IRQ1)                → ch.4
 drivers/disk.c ............. polled ATA PIO disk driver                 → ch.15
+fs/fat32.c ................. read-only FAT32 filesystem                 → ch.16
+kernel/elf.c ............... ELF64 program loader                        → ch.17
+user/A.c, B.c, C.c ......... the ring-3 programs, loaded from disk        → ch.17, ch.10
 drivers/ports.c ............ in/out instruction wrappers               → ch.4
-user/user_program.c ........ the ring-3 demo programs                   → ch.10
 libc/string.c, mem.c ....... hand-rolled standard library              → ch.7
 shell/shell.c .............. the interactive command loop              → ch.6
 include/types.h ............ fixed-width integer types                 → ch.7

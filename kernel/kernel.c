@@ -1,6 +1,8 @@
 #include "../drivers/screen.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/disk.h"
+#include "../fs/fat32.h"
+#include "elf.h"
 #include "gdt.h"
 #include "isr.h"
 #include "timer.h"
@@ -8,12 +10,13 @@
 #include "heap.h"
 #include "scheduler.h"
 
-// The three ring-3 programs, linked into .user_text at 0x400000 (see
-// user/user_program.c and linker.ld). Each loops forever printing its own
-// letter; the scheduler switches between them on each timer tick.
-extern void user_program_a(void);
-extern void user_program_b(void);
-extern void user_program_c(void);
+// The three ring-3 programs, now files on the disk rather than parts of this
+// image. Each is a separately linked static ELF64 binary built from user/*.c
+// (see the USER_* rules in the Makefile) and copied onto the FAT32 volume.
+// Changing what the machine runs means rebuilding one of these and copying it
+// onto the image, with no kernel rebuild.
+static char *user_programs[] = { "A.ELF", "B.ELF", "C.ELF" };
+#define USER_PROGRAM_COUNT (sizeof(user_programs) / sizeof(user_programs[0]))
 
 void kernel_main(uint64_t multiboot_info_addr) {
     gdt_init();          // describe memory (flat segments) + load the TSS
@@ -37,17 +40,39 @@ void kernel_main(uint64_t multiboot_info_addr) {
 
     disk_init();        // probe the primary ATA bus and silence its IRQ line
 
-    print_string("Starting scheduler with three ring-3 tasks...\n");
+    if (fat32_init() != 0) {
+        print_string("FAT32: mount failed, programs cannot be loaded\n");
+    }
 
-    // Create three ring-3 tasks and hand off to the scheduler. Each task_create
-    // now heap-allocates its task_t and asks the user-stack allocator for its own
-    // stack slice (no more hardcoded stack tops). This is the LAST thing
-    // kernel_main does: scheduler_start enters task 0 and never returns; from here
-    // on the timer interrupt switches between the three tasks. If we ever reach
-    // the loop below, the handoff silently failed.
-    task_create((uint64_t)&user_program_a);
-    task_create((uint64_t)&user_program_b);
-    task_create((uint64_t)&user_program_c);
+    print_string("Loading ring-3 programs from disk...\n");
+
+    // Create one ring-3 task per program file. Each read, parse, and load can
+    // fail on its own (a missing file, a corrupt one, a program that asks to be
+    // put somewhere it is not allowed to go), and a failure must cost only that
+    // task: the loader reports the reason and this skips it, leaving the others
+    // to run. A bad file on the disk is not a reason to take the kernel down.
+    uint32_t started = 0;
+    for (uint32_t i = 0; i < USER_PROGRAM_COUNT; i++) {
+        if (task_create_from_file(user_programs[i]) >= 0) {
+            started++;
+        }
+    }
+
+    if (started == 0) {
+        print_string("No programs loaded, nothing to schedule.\n");
+        while (1) {
+            __asm__ __volatile__("hlt");
+        }
+    }
+
+    print_string("Starting scheduler with ");
+    print_int(started);
+    print_string(" ring-3 tasks...\n");
+
+    // Hand off to the scheduler. This is the LAST thing kernel_main does:
+    // scheduler_start enters task 0 and never returns; from here on the timer
+    // interrupt switches between the tasks. If we ever reach the loop below, the
+    // handoff silently failed.
     scheduler_start();
 
     while (1) {

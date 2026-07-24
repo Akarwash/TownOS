@@ -4,7 +4,7 @@ MiniOS lets a ring-3 program request kernel services through a single software
 interrupt, `int 0x50`. This page documents the gate, the calling convention, the
 two calls that exist, and the one thing that is deliberately not yet safe. Read
 from `kernel/syscall.c`, `kernel/isr_stubs.asm`, `kernel/isr.c`,
-`include/syscalls.h`, and `user/user_program.c`. For the rationale and the
+`include/syscalls.h`, and `user/userlib.h`. For the rationale and the
 alternatives considered, see
 [decision 0007](../decisions/0007-syscalls-via-int-0x50.md).
 
@@ -83,19 +83,23 @@ mistake the region check for real pointer validation.
 
 ## The ring-3 side
 
-`user/user_program.c` shows the caller's half. The raw `int 0x50` is wrapped in
+`user/userlib.h` shows the caller's half. The raw `int 0x50` is wrapped in
 `always_inline` helpers (`sys_write`, `sys_exit`) built on inline asm with
 explicit register constraints (`"a"` = RAX, `"D"` = RDI), and `SYSCALL_VECTOR`
 reaches the `int` instruction as an immediate through an `"i"` constraint so the
-vector stays a named constant. `always_inline` is not decoration: at this
-project's `-O0`, a plain `static inline` is emitted out of line into `.text` at
-1M (kernel pages), and a ring-3 call into it faults; inlining folds the trap into
-`user_program`, keeping every instruction in the program's own user pages.
+vector stays a named constant. `always_inline` is kept: it folds the trap
+directly into the caller, so every instruction the program runs is inside its own
+mapped text and there is no call through a symbol the (relocation-free) loader
+would have to resolve. It used to be load-bearing for a sharper reason, back when
+an out-of-line helper could land in kernel pages at 1M and fault a ring-3 call.
 
-The strings the program prints live in a `.user_rodata` section, which `linker.ld`
-places in the 4-8M user region alongside `.user_text`. A plain string literal
-would land in `.rodata` at 1M (kernel pages), where the pointer would both fail
-the bounds check above and fault a ring-3 read.
+The strings the program prints need no special section any more. A program is now
+linked on its own at 0x400000 (`user/user.ld`), so its ordinary `.rodata` already
+lands in the 4-8M user region where a ring-3 pointer is allowed to point. When the
+programs were compiled into the kernel, a plain string literal would have landed
+in the kernel's `.rodata` at 1M, where the pointer would both fail the bounds
+check above and fault a ring-3 read; that is why the old build forced them into a
+`.user_rodata` section by hand.
 
 ## What a run looks like
 

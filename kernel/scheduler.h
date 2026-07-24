@@ -42,14 +42,19 @@ typedef struct {
     uint32_t id;
 } task_t;
 
-// Forge a never-run task: heap-allocate its task_t, build a private address space
-// (copy the ring-3 image to fresh frames mapped at its link address, map a fresh
-// stack at the fixed stack VA), fill its saved pile so it looks like it was
-// interrupted at its first instruction, mark it TASK_READY. Because the address
-// space is private, every task's stack sits at the SAME virtual address on
-// different physical frames. Returns the task id, or -1 if the heap or the frame
-// pool is out of memory. Implemented in scheduler.c.
-int task_create(uint64_t entry);
+// Forge a never-run task from a program FILE: read `name` (an 8.3 filename such
+// as "A.ELF") off the FAT32 volume, load its ELF segments into a fresh private
+// address space, map a fresh stack at the fixed stack VA, and fill its saved
+// pile so it looks like it was interrupted at its first instruction (the entry
+// point from the file's ELF header), then mark it TASK_READY. Because the
+// address space is private, every task's stack sits at the SAME virtual address
+// on different physical frames.
+//
+// Returns the task id, or -1 if the file is missing, is not a program this
+// kernel accepts, or the heap or frame pool is out of memory. A failed load
+// creates no task and must not disturb the ones that succeeded. Implemented in
+// scheduler.c.
+int task_create_from_file(const char *name);
 
 // Pick task 0 and enter it. Does not return (control only ever comes back into
 // the kernel through an interrupt, where schedule() runs).

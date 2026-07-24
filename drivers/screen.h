@@ -13,5 +13,6 @@ void screen_clear(void);
 void print_char(char c);
 void print_string(char *str);
 void print_int(uint32_t n);
+void print_hex(uint64_t n);   // "0x..." form, for addresses, sizes and offsets
 
 #endif

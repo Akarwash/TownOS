@@ -127,23 +127,9 @@ static void print_dec(uint64_t n) {
     }
 }
 
-static void print_hex(uint64_t n) {
-    char buf[16];               // 64 bits is 16 hex digits
-    int i = 0;
-    print_string("0x");
-    if (n == 0) {
-        print_char('0');
-        return;
-    }
-    const char *digits = "0123456789abcdef";
-    while (n > 0) {
-        buf[i++] = digits[n & 0xF];
-        n >>= 4;
-    }
-    while (i > 0) {
-        print_char(buf[--i]);
-    }
-}
+// print_hex used to be a second static copy right here. It now lives in the
+// screen driver (drivers/screen.c) because the ELF loader needed the same thing,
+// and two identical hex printers in one kernel is one too many.
 
 // ============================================================================
 // Boundary-tag address arithmetic (verbatim from the p5 source).

@@ -15,6 +15,7 @@ the development machine (macOS on Apple Silicon, Homebrew):
 | `x86_64-elf-binutils` (`x86_64-elf-ld`) | 2.46.1 | Cross linker |
 | `nasm` | 3.01 | Assembler (`-f elf64`) |
 | `qemu-system-x86_64` | 11.0.0 | Emulator |
+| `mtools` (`mformat`, `mcopy`, `mdir`) | 4.0.49 | Format the FAT32 disk image and copy files into it |
 
 Why a cross-compiler? The host compiler produces binaries for the host OS on the
 host CPU. A kernel needs code for a bare x86-64 machine with no OS underneath.
@@ -25,7 +26,7 @@ keep it from pulling in host libc or startup code.
 ### Install (macOS, Homebrew)
 
 ```bash
-brew install x86_64-elf-gcc x86_64-elf-binutils nasm qemu
+brew install x86_64-elf-gcc x86_64-elf-binutils nasm qemu mtools
 ```
 
 ### Install (Linux)
@@ -37,7 +38,7 @@ code from being linked in. Install the native toolchain plus the assembler and
 emulator:
 
 ```bash
-sudo apt install build-essential nasm qemu-system-x86
+sudo apt install build-essential nasm qemu-system-x86 mtools
 ```
 
 Alternatively, build a dedicated `x86_64-elf` cross GCC from source per the OSDev
@@ -66,6 +67,10 @@ lives in low memory, so relabelling the ELF container as `elf32-i386` is accepte
 by the loader and boots correctly. The code is unchanged; only the ELF header
 class differs.
 
+It also builds the three user programs (`user/A.ELF`, `B.ELF`, `C.ELF`), which
+are separate binaries and not part of `minios.bin`. See
+[Building a user program](#building-a-user-program) below.
+
 To rebuild from scratch:
 
 ```bash
@@ -78,21 +83,112 @@ make clean && make
 make run
 ```
 
-This first creates a disk image if one does not exist, then runs QEMU with it
-attached to the primary ATA bus:
+This first creates and formats a disk image if one does not exist, then runs QEMU
+with it attached to the primary ATA bus:
 
 ```bash
-qemu-img create -f raw disk.img 16M          # once, if disk.img is absent
+./tools/mkdisk.sh disk.img 64M               # once, if disk.img is absent
 qemu-system-x86_64 -kernel minios.bin \
     -drive file=disk.img,format=raw,if=ide,index=0,media=disk
 ```
 
-`disk.img` is a 16MB raw (flat, unstructured) file, created once by the `make`
+`disk.img` is a 64MB raw (flat, unstructured) file, created once by the `make`
 rule and git-ignored. The `-drive` flags matter: `if=ide` puts the drive on the
 emulated IDE/ATA controller (not virtio or AHCI), so it answers at the I/O ports
 0x1F0-0x1F7 where the disk driver looks; `index=0` makes it the primary bus
 master; `format=raw` means the file is a plain byte array with no qcow layering.
 See [reference/disk.md](reference/disk.md).
+
+### The disk image
+
+`tools/mkdisk.sh` creates the image, formats it FAT32, and copies in the test
+files, all with [mtools](https://www.gnu.org/software/mtools/). mtools edits the
+image file directly as a bare FAT volume, so nothing needs `sudo` and nothing
+needs to be mounted or attached to a loopback device. The exact commands it runs:
+
+```bash
+qemu-img create -f raw disk.img 64M
+mformat -i disk.img -F ::                    # -F forces FAT32, not FAT12/FAT16
+mcopy -i disk.img HELLO.TXT ::/
+mdir -i disk.img ::                          # list what is on the image
+```
+
+Why 64MB and not the old 16MB: FAT32 is only legal with at least 65525 clusters.
+16MB cannot reach that with a sane cluster size, so formatting tools either
+refuse or silently produce FAT16 instead. 64MB clears the bar at one block per
+cluster. See [reference/fat32.md](reference/fat32.md).
+
+The image is formatted as a "superfloppy": the FAT32 volume starts at block 0,
+with no partition table, which is why the kernel can read block 0 and find a boot
+sector there.
+
+The rule is idempotent. It has no prerequisites, so make skips it whenever
+`disk.img` exists, and the script bails out as well. Reformatting on every
+`make run` would silently destroy whatever the disk had accumulated. To add a
+file to an existing image, or to inspect one:
+
+```bash
+mcopy -i disk.img somefile.txt ::/           # add (8.3 names only; see below)
+mdir -i disk.img ::                          # list
+mtype -i disk.img ::/HELLO.TXT               # print a file
+```
+
+To start over from a fresh image, delete `disk.img` and run `make run` again.
+
+The kernel reads 8.3 names only and skips long-filename entries, so a file copied
+in as `my-long-name.text` is readable by mtools but invisible to MiniOS. Use
+names of at most 8 characters plus a 3 character extension.
+
+## Building a user program
+
+User programs are not part of the kernel. Each is compiled and linked on its own
+into a static ELF64 binary that lives on the disk image, and the kernel loads it
+at runtime. Changing what the machine runs does not need a kernel rebuild.
+
+To add one:
+
+1. Write `user/D.c` (uppercase, matching the 8.3 name it will have on the disk).
+   Include `userlib.h` for the syscall wrappers, and give it a `void _start(void)`
+   entry point, which is what `user/user.ld` names as the entry:
+
+   ```c
+   #include "userlib.h"
+
+   void _start(void) {
+       for (;;) {
+           sys_write("D");
+           user_delay();
+       }
+   }
+   ```
+
+2. Add `user/D.ELF` to `USER_PROGRAMS` in the `Makefile`. The pattern rule builds
+   it, and `make run` copies it onto the image.
+3. Add `"D.ELF"` to the `user_programs` list in `kernel_main` so a task is
+   created for it. (This last step is the one that still needs a kernel rebuild;
+   nothing yet loads programs on demand.)
+
+The build flags are deliberate and documented in the `Makefile`. Two matter most:
+
+- **`-mcmodel=small`, not `-mcmodel=kernel`.** The kernel model assumes symbols
+  live in the top 2GB of the address space. User code links at 0x400000 and the
+  kernel model produces relocation errors on it. This is the single most likely
+  build failure when adding a program.
+- **`-static -nostdlib -nodefaultlibs -fno-pie -no-pie`.** No host libc, no
+  startup files, no relocation. The whole runtime a program gets is
+  `user/userlib.h`.
+
+To change an existing program without touching the kernel:
+
+```bash
+make user/A.ELF
+mcopy -o -i disk.img user/A.ELF ::/
+qemu-system-x86_64 -kernel minios.bin -drive file=disk.img,format=raw,if=ide,index=0,media=disk
+```
+
+`make run` does the copy step for you, on every run, so a stale program on the
+image can never be what boots. See
+[reference/elf-loading.md](reference/elf-loading.md).
 
 A window opens showing the banner, the detected RAM, the disk detection line, and
 then the three ring-3 tasks interleaving "A", "B", and "C" forever:

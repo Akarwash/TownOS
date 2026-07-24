@@ -19,7 +19,12 @@
 
 // Top of the ring-3 stack. The stack lives in PD[3] (0x600000-0x7FFFFF, marked
 // PG_USER in boot.asm) and grows DOWN from the top of that 2MB page.
+//
+// Every task's stack sits at this same virtual address: per-process paging is
+// what makes that possible, since each task maps it to its own physical frames.
 #define USER_STACK_TOP    0x800000
+#define USER_STACK_SIZE   0x40000                        // 256 KB per task
+#define USER_STACK_BASE   (USER_STACK_TOP - USER_STACK_SIZE)
 
 // Enter ring 3 at `entry`, with `user_stack_top` as the initial RSP. Does not
 // return: control next re-enters the kernel through an interrupt/fault.
