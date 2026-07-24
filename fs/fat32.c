@@ -571,11 +571,21 @@ int fat32_list_root(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Reading a file.
+// Finding a file.
 // ---------------------------------------------------------------------------
 
-int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
-                    uint32_t *out_size) {
+// Look up one name in the root directory and copy its entry out. Shared by
+// fat32_stat and fat32_read_file so there is exactly one lookup path.
+//
+// Root directory only. The walk itself takes any starting cluster and would read
+// a subdirectory's entries just as happily, but this interface takes a bare name
+// with no path to split, so there is no way to say which directory. Path lookup
+// is future work alongside TODO(fat32-write).
+//
+// Returns 0 on success, -1 if the filesystem is not ready, the name is not
+// expressible in 8.3, the name is not present, or the entry is a directory
+// rather than a file.
+static int lookup_root_file(const char *name, struct fat32_dirent *out) {
     if (!fs_ready) {
         return -1;
     }
@@ -585,16 +595,41 @@ int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
         return -1;   // not expressible in 8.3, so nothing on disk can match it
     }
 
-    // Root directory only. The walk itself takes any starting cluster and would
-    // read a subdirectory's entries just as happily, but this interface takes a
-    // bare name with no path to split, so there is no way to say which
-    // directory. Path lookup is future work alongside TODO(fat32-write).
-    struct fat32_dirent entry;
-    if (walk_directory(fs_root_cluster, wanted, &entry) != 0) {
+    if (walk_directory(fs_root_cluster, wanted, out) != 0) {
         return -1;   // not found, or the directory could not be read
     }
-    if (entry.attr & FAT32_ATTR_DIRECTORY) {
+    if (out->attr & FAT32_ATTR_DIRECTORY) {
         return -1;   // a directory's contents are entries, not file bytes
+    }
+    return 0;
+}
+
+int fat32_stat(const char *name, uint32_t *out_size) {
+    // Answers "how big is this file" without reading a byte of it. A caller that
+    // wants a file's contents has to allocate a buffer first, which means knowing
+    // the size first, and the only honest alternative (a fixed buffer that is
+    // assumed to be big enough) is a size limit waiting to be exceeded quietly.
+    // The size lives in the directory entry, so this walk costs the same as a
+    // lookup and touches no file data at all.
+    struct fat32_dirent entry;
+    if (lookup_root_file(name, &entry) != 0) {
+        return -1;
+    }
+    if (out_size) {
+        *out_size = entry.size;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Reading a file.
+// ---------------------------------------------------------------------------
+
+int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
+                    uint32_t *out_size) {
+    struct fat32_dirent entry;
+    if (lookup_root_file(name, &entry) != 0) {
+        return -1;
     }
 
     // The chain says which clusters hold the file; the directory entry's size is

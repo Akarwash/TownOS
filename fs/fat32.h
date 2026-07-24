@@ -35,6 +35,13 @@ int fat32_init(void);
 // success, -1 on a read error or a corrupt directory chain.
 int fat32_list_root(void);
 
+// Report the size in bytes of the file called `name`, without reading any of its
+// contents (the size lives in the directory entry). This exists because reading a
+// file means allocating a buffer for it first, which means knowing its size
+// first. Returns 0 on success, -1 if the name is not 8.3, is not in the root
+// directory, or names a directory.
+int fat32_stat(const char *name, uint32_t *out_size);
+
 // Read the file called `name` (an 8.3 name such as "HELLO.TXT", case
 // insensitive) from the root directory into buf, and write its real length in
 // bytes to out_size (which may be NULL). The buffer receives exactly that many
