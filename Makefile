@@ -40,8 +40,7 @@ C_SOURCES = kernel/kernel.c kernel/gdt.c kernel/idt.c kernel/isr.c kernel/timer.
             kernel/elf.c \
             drivers/screen.c drivers/ports.c drivers/keyboard.c drivers/disk.c \
             fs/fat32.c \
-            libc/mem.c libc/string.c \
-            shell/shell.c
+            libc/mem.c libc/string.c
 ASM_SOURCES = boot/boot.asm kernel/gdt_flush.asm kernel/isr_stubs.asm
 
 # Object files (replace .c with .o and .asm with .o)
@@ -76,10 +75,18 @@ USER_LD_SCRIPT = user/user.ld
 USER_LDFLAGS = -T $(USER_LD_SCRIPT) -Wl,-z,max-page-size=4096 -Wl,--build-id=none
 
 # 8.3 uppercase names because the filesystem reads 8.3 names only, and the source
-# file names match the on-disk names so the mapping needs no explaining.
-USER_PROGRAMS = user/A.ELF user/B.ELF user/C.ELF
+# file names match the on-disk names so the mapping needs no explaining. SHELL.ELF
+# is the exception: its source is user/shell.c (lowercase), so it needs the explicit
+# rule below rather than the pattern rule, which would look for user/SHELL.c and
+# only resolve to shell.c on a case-insensitive filesystem.
+USER_PROGRAMS = user/A.ELF user/B.ELF user/C.ELF user/SHELL.ELF
 
 user/%.ELF: user/%.c user/userlib.h $(USER_LD_SCRIPT) include/syscalls.h include/vectors.h
+	$(CC) $(USER_CFLAGS) $(USER_LDFLAGS) -o $@ $<
+
+# The interactive shell. Same recipe as the pattern rule, but the target and source
+# names differ in case, so it is spelled out explicitly and portably.
+user/SHELL.ELF: user/shell.c user/userlib.h $(USER_LD_SCRIPT) include/syscalls.h include/vectors.h
 	$(CC) $(USER_CFLAGS) $(USER_LDFLAGS) -o $@ $<
 
 # Default target

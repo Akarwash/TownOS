@@ -49,6 +49,44 @@ unsigned long syscall1(unsigned long number, unsigned long arg1) {
     return ret;
 }
 
+// The zero-, two-, and three-argument forms of the same doorbell. Same ABI: RAX =
+// number, then RDI, RSI, RDX in System V order ("D" = RDI, "S" = RSI, "d" = RDX),
+// return in RAX. Split out by arity rather than one variadic helper so each pins
+// exactly the registers the kernel reads and no others.
+static inline __attribute__((always_inline))
+unsigned long syscall0(unsigned long number) {
+    unsigned long ret;
+    __asm__ __volatile__(
+        "int %[vec]"
+        : "=a"(ret)
+        : "a"(number), [vec] "i"(SYSCALL_VECTOR)
+        : "memory");
+    return ret;
+}
+
+static inline __attribute__((always_inline))
+unsigned long syscall2(unsigned long number, unsigned long arg1, unsigned long arg2) {
+    unsigned long ret;
+    __asm__ __volatile__(
+        "int %[vec]"
+        : "=a"(ret)
+        : "a"(number), "D"(arg1), "S"(arg2), [vec] "i"(SYSCALL_VECTOR)
+        : "memory");
+    return ret;
+}
+
+static inline __attribute__((always_inline))
+unsigned long syscall3(unsigned long number, unsigned long arg1,
+                       unsigned long arg2, unsigned long arg3) {
+    unsigned long ret;
+    __asm__ __volatile__(
+        "int %[vec]"
+        : "=a"(ret)
+        : "a"(number), "D"(arg1), "S"(arg2), "d"(arg3), [vec] "i"(SYSCALL_VECTOR)
+        : "memory");
+    return ret;
+}
+
 // SYS_WRITE: hand the kernel a pointer to a NUL-terminated string to print.
 // Returns 0 on success, (unsigned long)-1 if the kernel rejected the pointer.
 static inline __attribute__((always_inline))
@@ -66,6 +104,37 @@ void sys_exit(void) {
     }
 }
 
+// SYS_READKEY: pop one buffered keystroke, or 0 if none is waiting right now.
+// NON-BLOCKING: the kernel cannot sleep a task yet, so this returns immediately and
+// the caller polls it in a loop (busy-wait) until it returns non-zero. See
+// TODO(blocking-readkey) in kernel/syscall.c. Returns the character (1..255) or 0.
+static inline __attribute__((always_inline))
+unsigned long sys_readkey(void) {
+    return syscall0(SYS_READKEY);
+}
+
+// SYS_LIST: fill buf with the root directory's file names, one per line, NUL-
+// terminated. Returns the number of names, or (unsigned long)-1 on error.
+static inline __attribute__((always_inline))
+unsigned long sys_list(char *buf, unsigned long size) {
+    return syscall2(SYS_LIST, (unsigned long)buf, size);
+}
+
+// SYS_RUN: load and start the named program; it joins the scheduler alongside this
+// one. Returns 0 on success, (unsigned long)-1 if it could not be started.
+static inline __attribute__((always_inline))
+unsigned long sys_run(const char *name) {
+    return syscall1(SYS_RUN, (unsigned long)name);
+}
+
+// SYS_READFILE: read the named file into buf. Returns the number of bytes read, or
+// (unsigned long)-1 on error. The bytes are RAW and NOT NUL-terminated: terminate
+// them yourself before printing the buffer as a string.
+static inline __attribute__((always_inline))
+unsigned long sys_readfile(const char *name, char *buf, unsigned long size) {
+    return syscall3(SYS_READFILE, (unsigned long)name, (unsigned long)buf, size);
+}
+
 // A crude busy-wait so the letters do not scroll past faster than the eye can
 // follow. This is NOT a timed delay, just a spin; the count was tuned by eye
 // under QEMU for a readable interleave. A real system would sleep, not spin.
@@ -76,6 +145,60 @@ void user_delay(void) {
     // volatile so -O0 (and any optimiser) keeps the loop instead of deleting it.
     for (volatile unsigned long i = 0; i < USER_DELAY_ITERATIONS; i++) {
     }
+}
+
+// ============================================================================
+// next_token: a reentrant, in-place tokenizer.
+// ============================================================================
+// It lives here, in the user-side runtime, rather than in libc/string.c on
+// purpose. The user build compiles a single freestanding translation unit and
+// links no kernel objects (see the user/%.ELF rule in the Makefile), so
+// libc/string.c is simply not reachable from a ring-3 program; and the kernel
+// itself never tokenizes anything, so putting it there would be dead code. So it
+// sits beside the syscall wrappers, the rest of the runtime the shell is allowed
+// to lean on, as a standalone function the program compiles directly.
+//
+// It is the strtok_r style: the caller holds the current position in *pos, so
+// there is NO hidden global. That is deliberate, avoiding strtok's single static
+// cursor, which makes strtok non-reentrant and is a classic action-at-a-distance
+// bug (a second tokenization, even in a called function, clobbers the first).
+//
+// IN PLACE, NO COPYING: the separator after a token is overwritten with '\0' and
+// the returned pointer points INTO the caller's buffer, so THE INPUT BUFFER IS
+// MODIFIED. That is what lets the shell compare a token with a plain string
+// compare and still reach the untouched remainder of the line after it.
+static inline char *next_token(char **pos, char sep) {
+    char *p = *pos;
+
+    // SKIP LEADING SEPARATORS. A run of separators before the token is stepped
+    // over, so "run   A.ELF" (extra spaces) yields "run" then "A.ELF" and never an
+    // empty token in between. This is the non-obvious part: it is also why an empty
+    // or all-separator remainder returns NULL (no more tokens) instead of a
+    // zero-length token.
+    while (*p == sep) {
+        p++;
+    }
+
+    if (*p == '\0') {
+        *pos = p;
+        return (char *)0;   // no more tokens (NULL is not defined in this freestanding runtime)
+    }
+
+    // The token runs from here to the next separator or the end of the string.
+    char *start = p;
+    while (*p != '\0' && *p != sep) {
+        p++;
+    }
+
+    if (*p == sep) {
+        *p = '\0';   // shred: terminate this token in place
+        p++;         // step past the separator so the next call resumes after it
+    }
+    // else *p is already '\0' (end of string), and *pos will point at it, so the
+    // next call returns NULL.
+
+    *pos = p;
+    return start;
 }
 
 #endif

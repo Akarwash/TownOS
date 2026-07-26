@@ -463,16 +463,50 @@ static int dirent_is_usable(const struct fat32_dirent *entry) {
 // A directory is a file, so reading one means following its cluster chain like
 // any other. Its contents are a run of 32-byte entries.
 //
-// Both callers below (listing and lookup) share this walk. If wanted is NULL,
-// every usable entry is printed; otherwise the walk stops at the first entry
-// whose name matches and copies it to found. Returns 0 on success (for a
-// lookup, 0 means found), -1 on a read error or a corrupt chain, and 1 when a
-// lookup completed without finding the name.
+// A sink for collecting file names during a directory walk, used by
+// fat32_list_names (which backs SYS_LIST). When walk_directory is handed one of
+// these, each usable entry's display name is appended followed by '\n' and the
+// buffer is kept NUL-terminated, instead of being printed. Truncation is silent
+// but safe: once a name plus its separator and terminator would not fit, that name
+// and every one after it is dropped, and `count` reflects only the names written.
+struct fat32_name_sink {
+    char    *buf;
+    uint32_t size;    // capacity of buf in bytes, including the terminating NUL
+    uint32_t used;    // bytes written so far, not counting the terminating NUL
+    uint32_t count;   // names actually written into the buffer
+};
+
+// Append one name plus a '\n' to the sink, keeping it NUL-terminated. Drops the
+// name if it would not fit with its separator and terminator (see the sink above).
+static void fat32_name_sink_add(struct fat32_name_sink *sink, const char *name) {
+    uint32_t len = 0;
+    while (name[len] != '\0') {
+        len++;
+    }
+    // Room needed: len name bytes, one '\n', one '\0'. Reject rather than overrun.
+    if (sink->used + len + 2 > sink->size) {
+        return;
+    }
+    for (uint32_t i = 0; i < len; i++) {
+        sink->buf[sink->used++] = name[i];
+    }
+    sink->buf[sink->used++] = '\n';
+    sink->buf[sink->used] = '\0';   // valid C string after every append
+    sink->count++;
+}
+
+// Both callers below (listing and lookup) share this walk. When wanted is NULL it
+// visits every usable entry: appending each name to `sink` if one is given, else
+// printing it. When wanted is non-NULL it stops at the first entry whose name
+// matches and copies it to found. Returns 0 on success (for a lookup, 0 means
+// found), -1 on a read error or a corrupt chain, and 1 when a lookup completed
+// without finding the name.
 #define FAT32_DIR_NOT_FOUND 1
 
 static int walk_directory(uint32_t dir_cluster,
                           const char *wanted,
-                          struct fat32_dirent *found) {
+                          struct fat32_dirent *found,
+                          struct fat32_name_sink *sink) {
     uint8_t *cluster_buf = (uint8_t *)kmalloc(fs_bytes_per_cluster);
     if (cluster_buf == NULL) {
         return -1;
@@ -526,13 +560,17 @@ static int walk_directory(uint32_t dir_cluster,
 
             char display[FAT32_DISPLAY_NAME_MAX];
             name_from_83(entry->name, display);
-            print_string(display);
-            if (entry->attr & FAT32_ATTR_DIRECTORY) {
-                print_string("  <DIR>\n");
+            if (sink) {
+                fat32_name_sink_add(sink, display);
             } else {
-                print_string("  ");
-                print_int(entry->size);
-                print_string(" bytes\n");
+                print_string(display);
+                if (entry->attr & FAT32_ATTR_DIRECTORY) {
+                    print_string("  <DIR>\n");
+                } else {
+                    print_string("  ");
+                    print_int(entry->size);
+                    print_string(" bytes\n");
+                }
             }
         }
 
@@ -567,7 +605,26 @@ int fat32_list_root(void) {
         print_string("FAT32: not initialised\n");
         return -1;
     }
-    return walk_directory(fs_root_cluster, NULL, NULL);
+    return walk_directory(fs_root_cluster, NULL, NULL, NULL);
+}
+
+// Buffer-filling sibling of fat32_list_root: instead of printing, collect the root
+// directory's names into buf, one per line, NUL-terminated. This is what SYS_LIST
+// hands back to a ring-3 program, which cannot see the screen the print path
+// writes to. Names that do not all fit are dropped from the end (see the sink).
+int fat32_list_names(char *buf, uint32_t bufsize, uint32_t *out_count) {
+    if (!fs_ready || buf == NULL || bufsize == 0) {
+        return -1;
+    }
+    struct fat32_name_sink sink = { buf, bufsize, 0, 0 };
+    buf[0] = '\0';   // an empty directory yields an empty string, not garbage
+    if (walk_directory(fs_root_cluster, NULL, NULL, &sink) != 0) {
+        return -1;
+    }
+    if (out_count) {
+        *out_count = sink.count;
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -595,7 +652,7 @@ static int lookup_root_file(const char *name, struct fat32_dirent *out) {
         return -1;   // not expressible in 8.3, so nothing on disk can match it
     }
 
-    if (walk_directory(fs_root_cluster, wanted, out) != 0) {
+    if (walk_directory(fs_root_cluster, wanted, out, NULL) != 0) {
         return -1;   // not found, or the directory could not be read
     }
     if (out->attr & FAT32_ATTR_DIRECTORY) {

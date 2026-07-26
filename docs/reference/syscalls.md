@@ -2,11 +2,14 @@
 
 MiniOS lets a ring-3 program request kernel services through a single software
 interrupt, `int 0x50`. This page documents the gate, the calling convention, the
-two calls that exist, and the one thing that is deliberately not yet safe. Read
+six calls that exist, and the pointer checks that guard the untrusted ones. Read
 from `kernel/syscall.c`, `kernel/isr_stubs.asm`, `kernel/isr.c`,
-`include/syscalls.h`, and `user/userlib.h`. For the rationale and the
-alternatives considered, see
-[decision 0007](../decisions/0007-syscalls-via-int-0x50.md).
+`include/syscalls.h`, `drivers/keyboard.c`, and `user/userlib.h`. For the
+rationale and the alternatives considered, see
+[decision 0007](../decisions/0007-syscalls-via-int-0x50.md). The four calls the
+interactive shell needs (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`) are
+covered here and in [shell.md](shell.md); see
+[decision 0016](../decisions/0016-interactive-shell.md).
 
 ## The doorway
 
@@ -51,10 +54,27 @@ not do (kernel pages are not user-readable).
 |--------|------|-----------|---------|--------|
 | 0 | `SYS_EXIT` | none | does not return | Halts the machine with `cli; hlt`. |
 | 1 | `SYS_WRITE` | RDI = pointer to a NUL-terminated string | 0 on success, `(uint64_t)-1` if rejected | Prints the string via the VGA driver. |
+| 2 | `SYS_READKEY` | none | one character, or 0 if none waiting | Pops one key from the keyboard ring buffer. |
+| 3 | `SYS_LIST` | RDI = buffer, RSI = size | number of names, or -1 | Writes the root directory's file names into the buffer, newline-separated. |
+| 4 | `SYS_RUN` | RDI = filename pointer | 0 on success, -1 on failure | Loads and starts the named program as a new task. |
+| 5 | `SYS_READFILE` | RDI = filename, RSI = buffer, RDX = size | bytes read, or -1 | Reads a whole file into the buffer. |
 
 `SYS_EXIT` can only halt: with no scheduler and no parent to return to, there is
 nowhere for an exit to go, so it stops the machine, the same terminal state the
 exception handlers use.
+
+`SYS_READKEY` is the consumer end of the keyboard ring buffer (`drivers/keyboard.c`,
+documented in [shell.md](shell.md)). It is **non-blocking**: on an empty buffer it
+returns 0 immediately rather than sleeping the caller, because the kernel has no
+task-sleeping. A caller polls it in a loop (`TODO(blocking-readkey)`). 0 is a safe
+"nothing waiting" sentinel because a real 0 never enters the buffer.
+
+`SYS_LIST`, `SYS_RUN`, and `SYS_READFILE` are the shell's data calls. `SYS_LIST`
+fills a buffer through `fat32_list_names`; `SYS_READFILE` fills one through
+`fat32_read_file`; `SYS_RUN` copies in a filename and calls
+`task_create_from_file`, which loads the program and registers it with the
+scheduler (a failed load returns -1 and never faults the kernel). Each takes an
+untrusted pointer from ring 3, checked as described below.
 
 An **unknown syscall number** is not fatal. `syscall_handler` prints the offending
 number and returns `(uint64_t)-1` in RAX; a bad request from ring 3 must never
@@ -81,13 +101,41 @@ tracking that does not exist yet. This is recorded as a TODO in
 `kernel/syscall.c` and in [../project-status.md](../project-status.md). Do not
 mistake the region check for real pointer validation.
 
+## The shell syscalls bound the whole range
+
+The four calls added for the shell take untrusted pointers too, and they do better
+than the `SYS_WRITE` stopgap: they bound the entire range, not just the start.
+`kernel/syscall.c` has two shared helpers.
+
+`user_range_ok(ptr, len)` confirms that all of `[ptr, ptr+len)` lies inside the
+ring-3 region before the kernel writes a byte through the pointer. It is careful
+about overflow: `ptr + len` can wrap on a crafted length and a wrapped sum compares
+as comfortably small, so `len` is checked against the room above `ptr`
+(`USER_REGION_END - ptr`) rather than by forming the sum. `SYS_LIST` and
+`SYS_READFILE` bound their destination buffers with it.
+
+`copy_user_string(ptr, dst, cap)` copies a NUL-terminated string in from ring 3
+with a length cap, so a string with no terminator cannot walk off the region: it
+bounds-checks the start pointer, then copies until a NUL, until the cap, or until
+`USER_REGION_END`, whichever comes first, and always NUL-terminates. `SYS_RUN` and
+`SYS_READFILE` copy their filenames in with it.
+
+This is the same category of check as the ELF loader's segment bounds
+([elf-loading.md](elf-loading.md)) and stricter than the `SYS_WRITE` stopgap above.
+It still checks virtual addresses against the fixed region constants rather than
+walking the caller's page tables, so it is not yet the full per-process validation
+the `SYS_WRITE` TODO describes, but it does bound the whole range and cap the
+length, which the stopgap does not.
+
 ## The ring-3 side
 
 `user/userlib.h` shows the caller's half. The raw `int 0x50` is wrapped in
-`always_inline` helpers (`sys_write`, `sys_exit`) built on inline asm with
-explicit register constraints (`"a"` = RAX, `"D"` = RDI), and `SYSCALL_VECTOR`
-reaches the `int` instruction as an immediate through an `"i"` constraint so the
-vector stays a named constant. `always_inline` is kept: it folds the trap
+`always_inline` helpers built on inline asm with explicit register constraints
+(`"a"` = RAX, `"D"` = RDI, `"S"` = RSI, `"d"` = RDX), one per arity: `syscall0`
+through `syscall3`, with `sys_write`, `sys_exit`, `sys_readkey`, `sys_list`,
+`sys_run`, and `sys_readfile` over them. `SYSCALL_VECTOR` reaches the `int`
+instruction as an immediate through an `"i"` constraint so the vector stays a named
+constant. `always_inline` is kept: it folds the trap
 directly into the caller, so every instruction the program runs is inside its own
 mapped text and there is no call through a symbol the (relocation-free) loader
 would have to resolve. It used to be load-bearing for a sharper reason, back when
@@ -103,22 +151,44 @@ check above and fault a ring-3 read; that is why the old build forced them into 
 
 ## What a run looks like
 
-The three ring-3 tasks each call `SYS_WRITE` in a loop with a single-letter string,
-"A", "B", and "C" (none calls `SYS_EXIT`; the scheduler switches between them, see
-[scheduling.md](scheduling.md)). Booted under QEMU with `-d int`, vector `0x50`
-fires repeatedly from all three tasks (three distinct RIPs, `IP=001b:0040002b`,
-`IP=001b:00400083`, and `IP=001b:004000db`, each in its own address space with its
-own `CR3`), each at `cpl=3`, with no `#GP` (0x0D) and no `#PF` (0x0E). On screen
-the letters interleave:
+The machine boots into `SHELL.ELF`, which prints a prompt and loops on
+`SYS_READKEY`, echoing with `SYS_WRITE`, tokenizing each line, and dispatching the
+commands in [shell.md](shell.md). Booted under QEMU and driven with a scripted key
+sequence, it behaves like this:
 
 ```
-ABCABCABCABCABC...
+> help
+commands:
+  list           list files in the root directory
+  ...
+> list
+HELLO.TXT
+TEST.TXT
+BIG.TXT
+A.ELF
+B.ELF
+C.ELF
+SHELL.ELF
+> read hello.txt
+Hello from FAT32!
+> run a.elf
+run: started a.elf
+> AAAAAAAAAA...
 ```
 
-Passing a kernel address (for example `0x100000`) to `SYS_WRITE` instead prints
-`syscall: SYS_WRITE rejected an out-of-bounds pointer` and returns `-1`, printing
-nothing from kernel memory, confirming the stopgap check fires. (`SYS_EXIT` stays
-implemented; it halts with `cli; hlt`, but the shipped tasks never call it.)
+`run a.elf` calls `SYS_RUN`, which loads `A.ELF` as a new task; from the next timer
+tick A's `SYS_WRITE` output interleaves with the live prompt, which is the
+scheduler running the shell and A together. Over the session `-d int` shows only
+timer (`v=40`), keyboard (`v=41`), and syscall (`v=50`) vectors, all at `cpl=3` for
+the ring-3 traps, with no `#GP` (0x0D), no `#PF` (0x0E), no double fault (0x08), no
+triple fault, and no disk IRQ (0x4E). The idle shell's busy-wait on `SYS_READKEY`
+is why `v=50` dominates the log.
+
+Passing a kernel address (for example `0x100000`) to `SYS_WRITE` still prints
+`syscall: SYS_WRITE rejected an out-of-bounds pointer` and returns `-1`, and the
+shell syscalls reject an out-of-region buffer or filename the same way, printing
+nothing from kernel memory. (`SYS_EXIT` stays implemented; it halts with
+`cli; hlt`, but the shell never calls it.)
 
 ## Related
 
@@ -130,3 +200,6 @@ implemented; it halts with `cli; hlt`, but the shipped tasks never call it.)
   [user-mode.md](user-mode.md) and
   [decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
 - The region the pointer check reuses: [memory-map.md](memory-map.md).
+- The shell that uses `SYS_READKEY`/`SYS_LIST`/`SYS_RUN`/`SYS_READFILE`, and the
+  keyboard ring buffer behind `SYS_READKEY`: [shell.md](shell.md) and
+  [decision 0016](../decisions/0016-interactive-shell.md).

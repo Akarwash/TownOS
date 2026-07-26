@@ -1,21 +1,25 @@
 # Architecture
 
 MiniOS is a small x86-64 hobby kernel that boots via Multiboot, climbs into
-64-bit long mode, and runs an interrupt-driven interactive shell. It is a
-learning kernel with a read-only filesystem: files on the disk can be listed and
-read by name, but nothing can be written back. Its user programs are separately
-compiled ELF64 binaries that live on that disk and are loaded at runtime, not
-code welded into the kernel image. It drops to ring 3 (CPL 3) to run those
-programs in their own user-accessible pages, and those programs
-call back into the kernel through a single `int 0x50` syscall gate (`SYS_WRITE`,
-`SYS_EXIT`) rather than faulting. A round-robin preemptive scheduler switches
-between several ring-3 tasks (three today) on every timer tick by overwriting the
-interrupt frame in place, so they run concurrently. Each task is a heap-allocated
-`task_t` with its OWN page-table tree (per-process paging): the scheduler loads
-that task's CR3 on every switch, so two tasks share virtual addresses but not
-physical memory. That is real address-space isolation, not a single shared space.
-See [reference/user-mode.md](reference/user-mode.md),
+64-bit long mode, and boots into an interactive shell. It is a learning kernel
+with a read-only filesystem: files on the disk can be listed and read by name, but
+nothing can be written back. Its user programs are separately compiled ELF64
+binaries that live on that disk and are loaded at runtime, not code welded into the
+kernel image. The shell is one of them: a fenced-in ring-3 program (`SHELL.ELF`)
+that reads typed commands and runs them using nothing but syscalls, which is what
+proves the syscall boundary is complete. MiniOS drops to ring 3 (CPL 3) to run
+those programs in their own user-accessible pages, and those programs call back
+into the kernel through a single `int 0x50` syscall gate (`SYS_WRITE`, `SYS_EXIT`,
+`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`) rather than faulting. A
+round-robin preemptive scheduler switches between the ring-3 tasks on every timer
+tick by overwriting the interrupt frame in place, so they run concurrently: the
+shell boots alone, and `run A.ELF` starts another task that interleaves with it.
+Each task is a heap-allocated `task_t` with its OWN page-table tree (per-process
+paging): the scheduler loads that task's CR3 on every switch, so two tasks share
+virtual addresses but not physical memory. That is real address-space isolation,
+not a single shared space. See [reference/user-mode.md](reference/user-mode.md),
 [reference/syscalls.md](reference/syscalls.md),
+[reference/shell.md](reference/shell.md),
 [reference/scheduling.md](reference/scheduling.md), and
 [reference/paging.md](reference/paging.md).
 
@@ -31,8 +35,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `drivers/` | Hardware drivers: VGA text screen, PS/2 keyboard, the polled ATA PIO disk driver, port I/O helpers. |
 | `fs/` | The filesystem layer, above the disk driver: read-only FAT32 (list the root directory, read a file by name). |
 | `libc/` | Minimal freestanding C library: `string` and `mem` routines. |
-| `shell/` | The interactive command shell. |
-| `user/` | The three ring-3 demonstration programs, built as standalone static ELF64 binaries (`user/A.c`, `B.c`, `C.c`, linked with `user/user.ld`) that live on the disk image and are loaded at runtime. Not part of `minios.bin`. |
+| `user/` | The ring-3 programs, built as standalone static ELF64 binaries (linked with `user/user.ld`) that live on the disk image and are loaded at runtime, not part of `minios.bin`. Includes the interactive shell (`user/shell.c`, booted as `SHELL.ELF`) and the three demonstration letter-printers (`user/A.c`, `B.c`, `C.c`). |
 | `include/` | Shared definitions (`types.h`, the vector map, the syscall ABI numbers). |
 
 ## Source files
@@ -40,14 +43,15 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | File | Responsibility | State |
 |------|----------------|-------|
 | `boot/boot.asm` | Multiboot header, page tables, PAE/EFER/paging, bootstrap GDT, far jump to 64-bit, call `kernel_main`. | Implemented |
-| `kernel/kernel.c` | `kernel_main`: the init sequence, then loads three programs from disk as tasks and starts the scheduler. | Implemented |
+| `kernel/kernel.c` | `kernel_main`: the init sequence, then loads `SHELL.ELF` from disk as a task and starts the scheduler. | Implemented |
 | `kernel/gdt.c`, `kernel/gdt.h` | Kernel GDT (null, kernel code/data, user code/data) and 64-bit TSS; selector constants. | Implemented |
 | `kernel/usermode.c`, `kernel/usermode.h` | `enter_user_mode`: forge the `iretq` frame and drop to ring 3. | Implemented |
-| `kernel/syscall.c`, `kernel/syscall.h` | Syscall dispatcher: `syscall_handler` switches on RAX (`SYS_WRITE`, `SYS_EXIT`). | Implemented |
+| `kernel/syscall.c`, `kernel/syscall.h` | Syscall dispatcher: `syscall_handler` switches on RAX (`SYS_WRITE`, `SYS_EXIT`, `SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`), with `user_range_ok`/`copy_user_string` bounding the untrusted pointers. | Implemented |
 | `kernel/scheduler.c`, `kernel/scheduler.h` | Round-robin scheduler: `task_create_from_file` heap-allocates and forges a task, builds its private address space and loads a program file into it, `schedule` swaps the interrupt frame and loads the next task's CR3, `scheduler_start` enters task 0. | Implemented |
 | `kernel/paging.c`, `kernel/paging.h` | Per-process paging: `paging_create_address_space` (private tree, kernel half cloned by value), `paging_map_page` (4KB user mappings), `paging_switch` (load CR3). | Implemented |
 | `kernel/elf.c`, `kernel/elf.h` | ELF64 program loader: validate a file, bounds-check and map each `PT_LOAD` segment, copy and zero-fill it, report the entry point. | Implemented |
-| `user/A.c`, `user/B.c`, `user/C.c` | The three ring-3 demo programs, each a separate static ELF64 binary on the disk image; each loops calling the kernel via `int 0x50`. | Implemented |
+| `user/shell.c` | The interactive shell: a ring-3 program (`SHELL.ELF`) that reads a line via `SYS_READKEY`, tokenizes it, and dispatches `list`/`read`/`run`/`help`/`clear`/`return` through syscalls. | Implemented |
+| `user/A.c`, `user/B.c`, `user/C.c` | The three ring-3 demo programs, each a separate static ELF64 binary on the disk image; each loops calling the kernel via `int 0x50`. Launched on demand with the shell's `run`. | Implemented |
 | `user/userlib.h` | The whole runtime a user program gets: `always_inline` inline-asm syscall wrappers and the delay loop. | Implemented |
 | `user/user.ld` | User program linker script: entry `_start`, load address 0x400000, every loadable segment page-aligned (a contract with the loader). | Implemented |
 | `kernel/gdt_flush.asm` | `lgdt`, reload data segments, reload CS via far return, `ltr`. | Implemented |
@@ -58,13 +62,12 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `kernel/memory.c`, `kernel/memory.h` | Bitmap physical frame allocator, plus `alloc_frames_contiguous` for multi-page runs. | Implemented |
 | `kernel/heap.c`, `kernel/heap.h` | Kernel heap (`kmalloc`/`kfree`): explicit free list with boundary tags and coalescing, ported from p5, on top of the frame allocator. | Implemented |
 | `drivers/screen.c`, `drivers/screen.h` | VGA text output: `print_char`/`print_string`/`print_int`/`print_hex`, scrolling, cursor. | Implemented |
-| `drivers/keyboard.c`, `drivers/keyboard.h` | PS/2 keyboard driver on IRQ 1, scancode to ASCII. | Implemented |
+| `drivers/keyboard.c`, `drivers/keyboard.h` | PS/2 keyboard driver on IRQ 1: scancode to ASCII, pushed into a ring buffer the IRQ fills and `SYS_READKEY` drains. | Implemented |
 | `drivers/disk.c`, `drivers/disk.h` | Polled ATA PIO disk driver: `disk_init`/`disk_read`/`disk_write` move 512-byte LBA28 blocks on the primary bus. | Implemented |
 | `drivers/ports.c`, `drivers/ports.h` | `in`/`out` port I/O wrappers (byte and word, in and out). | Implemented |
 | `fs/fat32.c`, `fs/fat32.h` | Read-only FAT32: `fat32_init` parses the boot sector, `fat32_list_root` lists the root directory, `fat32_read_file` reads a file by 8.3 name, `fat32_stat` reports a size without reading. | Implemented (read-only; the ELF loader reads programs through it) |
 | `libc/string.c`, `libc/string.h` | `strlen`, `strcmp`, `strcpy`. | Implemented |
 | `libc/mem.c`, `libc/mem.h` | `memcpy`, `memset`. | Implemented |
-| `shell/shell.c`, `shell/shell.h` | Command loop: buffer keypresses, dispatch `help`/`clear`/`hello`/`tick`. | Implemented |
 | `include/types.h` | Fixed-width integer types and `NULL`. | Implemented |
 | `include/vectors.h` | Single source of truth for every interrupt vector, including `SYSCALL_VECTOR`. | Implemented |
 | `include/syscalls.h` | Standalone syscall ABI numbers (`SYS_EXIT`, `SYS_WRITE`), no kernel code. | Implemented |
@@ -84,13 +87,15 @@ boot (boot.asm) ............ long-mode climb, hands off to kernel_main
   -> heap_init ............ build the kernel heap (heap.c)
   -> disk_init ............ probe the primary ATA bus, silence IRQ14 (disk.c)
   -> fat32_init ........... parse the boot sector, mount the FAT32 volume (fat32.c)
-  -> task_create_from_file x3  read A/B/C.ELF off the disk, validate and load each one's
+  -> task_create_from_file  read SHELL.ELF off the disk, validate and load its
                           segments into a fresh private address space, forge the task
                           (elf.c, scheduler.c, paging.c)
   -> scheduler_start ...... load task 0's CR3, enter task 0 via enter_user_mode (usermode.c)
-  -> A.ELF / B.ELF / C.ELF  run at CPL 3 in their own trees, call the kernel via int 0x50
+  -> SHELL.ELF ............ runs at CPL 3 in its own tree, reads keys and runs commands
+                          via int 0x50 (SYS_READKEY/LIST/RUN/READFILE/WRITE)
+  -> keyboard IRQ ......... pushes each key into the ring buffer (keyboard.c)
   -> timer tick ........... schedule() swaps the interrupt frame and loads the next task's CR3
-  -> syscall_handler ...... SYS_WRITE prints (syscall.c)
+  -> syscall_handler ...... dispatches the call and writes the result to RAX (syscall.c)
 ```
 
 The kernel links into `minios.elf`, is repackaged as a Multiboot-loadable
@@ -118,19 +123,21 @@ From power-on to the idle loop:
 5. `kernel_main` calls `heap_init()`, then `disk_init()` (which probes the
    primary ATA bus, prints whether a disk was detected, and sets nIEN so the
    polled driver's IRQ14 stays silent), then `fat32_init()` to mount the volume,
-   then `task_create_from_file` for each of `A.ELF`, `B.ELF`, and `C.ELF` (each
+   then `task_create_from_file("SHELL.ELF")` (which
    `kmalloc`s a `task_t`, builds a private page-table tree, reads and validates
    the program file and maps its segments into that tree, maps a private stack,
    and forges its ring-3 `iretq` frame with the entry point from the ELF header).
    A file that is missing or malformed costs only its own task: the loader prints
-   the reason and the remaining programs still run. Then `scheduler_start()`, which loads task 0's CR3 and
+   the reason, and if nothing loaded the kernel idles rather than scheduling. Then
+   `scheduler_start()`, which loads task 0's CR3 and
    enters task 0 via `enter_user_mode`. From here the timer tick is a preemption
    point: `schedule()` saves the interrupted task's register frame, copies the
    next task's frame over it in place, and loads the next task's CR3, so `iretq`
-   resumes a different task in its own address space. The three programs loop, each
-   calling `SYS_WRITE` through the `int 0x50` gate, and interleave "A", "B", and
-   "C" on screen forever (none calls `SYS_EXIT`). `scheduler_start` does not
-   return, so the `hlt` idle loop below it is unreachable in this build. See
+   resumes a different task in its own address space. The shell loops, reading keys
+   through `SYS_READKEY` and running commands through the `int 0x50` gate; a `run
+   A.ELF` command calls `SYS_RUN`, which loads a second task that then interleaves
+   with the shell on the timer tick (neither calls `SYS_EXIT`). `scheduler_start`
+   does not return, so the `hlt` idle loop below it is unreachable in this build. See
    [reference/scheduling.md](reference/scheduling.md),
    [reference/paging.md](reference/paging.md),
    [reference/user-mode.md](reference/user-mode.md), and
@@ -154,4 +161,5 @@ task and drive the switch.
 - The disk driver: [reference/disk.md](reference/disk.md)
 - The filesystem: [reference/fat32.md](reference/fat32.md)
 - Program loading: [reference/elf-loading.md](reference/elf-loading.md)
+- The interactive shell: [reference/shell.md](reference/shell.md)
 - Concepts (the why): [`../learnings/`](../learnings/README.md)

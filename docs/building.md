@@ -67,8 +67,9 @@ lives in low memory, so relabelling the ELF container as `elf32-i386` is accepte
 by the loader and boots correctly. The code is unchanged; only the ELF header
 class differs.
 
-It also builds the three user programs (`user/A.ELF`, `B.ELF`, `C.ELF`), which
-are separate binaries and not part of `minios.bin`. See
+It also builds the user programs (`user/SHELL.ELF`, the interactive shell, plus
+`user/A.ELF`, `B.ELF`, `C.ELF`, the letter-printers), which are separate binaries
+and not part of `minios.bin`. See
 [Building a user program](#building-a-user-program) below.
 
 To rebuild from scratch:
@@ -164,9 +165,11 @@ To add one:
 
 2. Add `user/D.ELF` to `USER_PROGRAMS` in the `Makefile`. The pattern rule builds
    it, and `make run` copies it onto the image.
-3. Add `"D.ELF"` to the `user_programs` list in `kernel_main` so a task is
-   created for it. (This last step is the one that still needs a kernel rebuild;
-   nothing yet loads programs on demand.)
+3. That is enough to run it from the shell: `make run`, then type `run D.ELF` at
+   the prompt, and the loader starts it as a new task with no kernel rebuild. To
+   have it launched automatically at boot instead, add `"D.ELF"` to the
+   `user_programs` list in `kernel_main` (which today holds only `"SHELL.ELF"`);
+   that last step is the one that needs a kernel rebuild.
 
 The build flags are deliberate and documented in the `Makefile`. Two matter most:
 
@@ -191,20 +194,24 @@ image can never be what boots. See
 [reference/elf-loading.md](reference/elf-loading.md).
 
 A window opens showing the banner, the detected RAM, the disk detection line, and
-then the three ring-3 tasks interleaving "A", "B", and "C" forever:
+then the shell prompt:
 
 ```
 Welcome to MiniOS!
 Detected RAM: 127 MB
 Disk: primary ATA master detected
-Starting scheduler with three ring-3 tasks...
-ABCABCABC...
+Starting scheduler with 1 ring-3 tasks...
+MiniOS shell. type 'help'.
+>
 ```
 
-The timer ticks on IRQ 0 and the keyboard delivers keypresses on IRQ 1. The
-interactive shell (`help`, `clear`, `hello`, `tick`) is still compiled but off
-the current boot path (the scheduler runs instead); see
-[project-status.md](project-status.md). To quit QEMU, close the window, or press
+The timer ticks on IRQ 0 and the keyboard delivers keypresses on IRQ 1, which the
+shell reads through `SYS_READKEY`. Type `help` for the command list, `list` to see
+the files on the disk, `read HELLO.TXT` to print a file, `return hello` to echo
+text, or `run A.ELF` to start one of the letter-printers, whose output then
+interleaves with the prompt (a live demonstration of the scheduler running two
+tasks). The command names are MiniOS's own, not the Unix ones; see
+[reference/shell.md](reference/shell.md). To quit QEMU, close the window, or press
 `Ctrl-A` then `X` in the launching terminal.
 
 ## Debug

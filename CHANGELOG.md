@@ -7,6 +7,60 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- An interactive shell, built as a ring-3 program (`user/shell.c`, booted off the
+  disk as `SHELL.ELF`) rather than kernel code. It reads typed commands and runs
+  them using nothing but syscalls, which is the point: a fully fenced-in program,
+  holding no privilege and touching the keyboard, screen, filesystem, and loader
+  only through `int 0x50`, runs an interactive shell, and that is the proof the
+  syscall boundary is complete. The commands are MiniOS's own, deliberately not the
+  Unix names: `list` (list the root directory), `read <file>` (print a file's
+  contents), `run <file>` (load and start a program), `help`, `clear`, and `return
+  <text>` (echo). The shell reads a line a key at a time, echoing printable
+  characters and handling backspace, tokenizes it in place, matches the first word,
+  and reprints the prompt; an empty line does nothing and an unknown word prints
+  `unknown command: <word>`. Four new syscalls back it, each an entry in the `int
+  0x50` dispatcher (`kernel/syscall.c`): `SYS_READKEY` (2) pops one key from a new
+  keyboard ring buffer or returns 0 when none is waiting; `SYS_LIST` (3) writes the
+  root directory's names into a caller buffer, newline-separated; `SYS_RUN` (4)
+  copies in a filename and calls `task_create_from_file`, so the launched program
+  joins the scheduler and interleaves with the shell; `SYS_READFILE` (5) reads a
+  whole file into a caller buffer. `SYS_READKEY` is non-blocking by design: this
+  kernel cannot sleep a task, so on an empty buffer it returns 0 immediately and the
+  shell busy-waits, recorded as `TODO(blocking-readkey)`. Every pointer these calls
+  take from ring 3 is untrusted and checked before the kernel touches it, better
+  than the `SYS_WRITE` stopgap it sits beside: `user_range_ok` bounds the whole
+  `[ptr, ptr+len)` destination range (overflow-safe, checking the length against the
+  room above the pointer rather than forming a sum that can wrap), and
+  `copy_user_string` copies a filename in with a length cap so a string with no
+  terminator cannot walk off the region. The keyboard IRQ was reduced to a producer:
+  `keyboard_callback` now only decodes one scancode and pushes the character into a
+  fixed 128-slot ring buffer (write and read indices, wrap modulo size, one slot
+  always left unused so empty and full stay distinguishable, newest key dropped on a
+  full buffer), keeping real work out of interrupt context. The tokenizer,
+  `next_token` in `user/userlib.h`, is a reentrant (`strtok_r`-style) in-place
+  splitter: it holds the cursor in a caller pointer with no hidden global, skips
+  leading separators so repeated spaces do not yield empty tokens, and shreds the
+  line by overwriting each separator with a NUL. It lives in the user runtime rather
+  than `libc/string.c` because the user build links no kernel objects (so
+  `libc/string.c` is unreachable from ring 3) and the kernel never tokenizes (so it
+  would be dead there). `user/userlib.h` also gained `syscall0`/`syscall2`/`syscall3`
+  (only `syscall1` existed) and wrappers `sys_readkey`/`sys_list`/`sys_run`/
+  `sys_readfile`; `fs/fat32.c` gained `fat32_list_names`, the buffer-filling sibling
+  of `fat32_list_root`, sharing the same `walk_directory` through a new name sink so
+  listing and lookup still go through one walk. `kernel_main` now boots `SHELL.ELF`
+  alone (the letter-printers `A/B/C.ELF` stay on the disk so `run A.ELF` can start
+  one on demand), and the Makefile builds `SHELL.ELF` with an explicit rule (its
+  source is lowercase `shell.c` but its 8.3 disk name is uppercase). Verified under
+  QEMU by a scripted key session (keys injected through the monitor, the VGA text
+  buffer dumped after each command): the prompt appears at boot; `help` prints the
+  command list; `list` prints the seven files; `read hello.txt` prints `Hello from
+  FAT32!`; `run a.elf` prints `run: started a.elf` and then A's output interleaves
+  with the live prompt; `return hello world` prints `hello world`; `asdf` prints
+  `unknown command: asdf` without faulting; and backspace correctly edits the line.
+  `-d int` over the session showed only timer (`v=40`), keyboard (`v=41`), and
+  syscall (`v=50`) vectors, with no page fault (`0x0E`), `#GP` (`0x0D`), double fault
+  (`0x08`), triple fault, or disk IRQ (`0x4E`). See
+  `docs/decisions/0016-interactive-shell.md` and `docs/reference/shell.md`.
 - An ELF64 program loader (`kernel/elf.c`, `kernel/elf.h`), and with it, user
   programs that are files rather than parts of the kernel. Previously the three
   ring-3 programs were compiled into the kernel image (`user/user_program.c` into
@@ -403,6 +457,16 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Removed
 
+- The old in-kernel shell (`shell/shell.c`, `shell/shell.h`), superseded by the
+  ring-3 shell above. It ran at ring 0, was driven straight from the keyboard IRQ
+  (`keyboard_callback` called `shell_handle_keypress`, doing line editing and
+  command dispatch inside the interrupt), and dispatched compiled-in commands
+  (`help`, `clear`, `hello`, `tick`); it was also off the boot path, since
+  `kernel_main` handed control to the scheduler and never called `shell_init`. Its
+  only live link was the keyboard callback, now replaced by the ring buffer, so the
+  files, the `shell/shell.c` entry in `C_SOURCES`, and the `#include
+  "../shell/shell.h"` are all gone. `get_tick` (`kernel/timer.c`) loses its only
+  caller but stays as public API.
 - The compiled-in user program path, now that programs load from disk.
   `user/user_program.c` and its entry in `C_SOURCES`, the `.user_text` and
   `.user_rodata` sections and the whole `:user` PT_LOAD segment in `linker.ld`,

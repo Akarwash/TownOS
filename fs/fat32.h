@@ -35,6 +35,16 @@ int fat32_init(void);
 // success, -1 on a read error or a corrupt directory chain.
 int fat32_list_root(void);
 
+// Fill `buf` with the root directory's file names, one per line (each name
+// followed by '\n'), keeping the buffer NUL-terminated, and report how many names
+// were written through out_count (which may be NULL). This is the buffer-filling
+// sibling of fat32_list_root, which prints instead: SYS_LIST uses it to hand a
+// listing to a ring-3 program that cannot see the kernel's screen. If the names do
+// not all fit, the trailing ones are dropped and the count reflects only those
+// written. Returns 0 on success, -1 if the filesystem is not ready, buf is NULL or
+// zero-sized, or the directory chain is corrupt.
+int fat32_list_names(char *buf, uint32_t bufsize, uint32_t *out_count);
+
 // Report the size in bytes of the file called `name`, without reading any of its
 // contents (the size lives in the directory entry). This exists because reading a
 // file means allocating a buffer for it first, which means knowing its size
