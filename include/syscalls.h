@@ -13,7 +13,8 @@
 // follow in RDI, RSI, RDX (System V order); the return value comes back in RAX.
 // The vector the program raises is SYSCALL_VECTOR (0x50) from include/vectors.h.
 
-#define SYS_EXIT   0    // no args; stop the machine (no scheduler to return to)
-#define SYS_WRITE  1    // RDI = pointer to a NUL-terminated string; print it
+#define SYS_EXIT    0    // no args; stop the machine (no scheduler to return to)
+#define SYS_WRITE   1    // RDI = pointer to a NUL-terminated string; print it
+#define SYS_READKEY 2    // no args; return one buffered key in RAX, or 0 if none
 
 #endif

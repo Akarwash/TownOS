@@ -40,8 +40,7 @@ C_SOURCES = kernel/kernel.c kernel/gdt.c kernel/idt.c kernel/isr.c kernel/timer.
             kernel/elf.c \
             drivers/screen.c drivers/ports.c drivers/keyboard.c drivers/disk.c \
             fs/fat32.c \
-            libc/mem.c libc/string.c \
-            shell/shell.c
+            libc/mem.c libc/string.c
 ASM_SOURCES = boot/boot.asm kernel/gdt_flush.asm kernel/isr_stubs.asm
 
 # Object files (replace .c with .o and .asm with .o)

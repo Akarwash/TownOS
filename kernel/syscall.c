@@ -1,6 +1,7 @@
 #include "syscall.h"
 #include "memory.h"
 #include "../drivers/screen.h"
+#include "../drivers/keyboard.h"
 #include "../include/syscalls.h"
 
 // The value returned to ring 3 on any rejected or unknown request. Written into
@@ -33,6 +34,21 @@ static uint64_t sys_write(uint64_t user_ptr) {
     return 0;
 }
 
+// SYS_READKEY: pop one character from the keyboard ring buffer, or 0 if none is
+// waiting (drivers/keyboard.c). No pointer crosses the ring boundary here, so
+// there is nothing to bounds-check: the character is returned by value in RAX.
+//
+// NON-BLOCKING BY DESIGN. This kernel has no way to sleep a task, so a blocking
+// read (park the caller until a key arrives, wake it from the keyboard IRQ) cannot
+// be built yet. Returning 0 on an empty buffer instead means the shell must
+// busy-wait, calling this in a tight loop until it returns non-zero, burning a
+// timeslice it could have yielded. That is the deliberate tradeoff; a real OS
+// would block the task. TODO(blocking-readkey): block the caller once tasks can
+// sleep, so the shell stops spinning on an empty buffer.
+static uint64_t sys_readkey(void) {
+    return (uint64_t)keyboard_getchar();
+}
+
 // SYS_EXIT: there is no scheduler and no parent to return to, so "exit" can only
 // mean stop the machine. Halt with interrupts disabled, the same terminal state
 // the exception handlers use.
@@ -52,6 +68,9 @@ void syscall_handler(registers_t *regs) {
             break;
         case SYS_WRITE:
             regs->rax = sys_write(regs->rdi);
+            break;
+        case SYS_READKEY:
+            regs->rax = sys_readkey();
             break;
         default:
             print_string("syscall: unknown number ");
