@@ -10,12 +10,15 @@
 #include "heap.h"
 #include "scheduler.h"
 
-// The three ring-3 programs, now files on the disk rather than parts of this
-// image. Each is a separately linked static ELF64 binary built from user/*.c
-// (see the USER_* rules in the Makefile) and copied onto the FAT32 volume.
-// Changing what the machine runs means rebuilding one of these and copying it
-// onto the image, with no kernel rebuild.
-static char *user_programs[] = { "A.ELF", "B.ELF", "C.ELF" };
+// The program the machine boots into: the interactive shell, a ring-3 binary on
+// the disk (SHELL.ELF, built from user/shell.c). It is launched alone rather than
+// alongside the letter-printers (A/B/C.ELF), which would interleave their output
+// with the prompt and make the shell awkward to type against. Those programs still
+// live on the disk, so the shell can start them on demand with `run A.ELF`, which
+// is a cleaner demonstration of the scheduler than booting them automatically.
+// Changing what the machine runs means rebuilding one binary and copying it onto
+// the image, with no kernel rebuild.
+static char *user_programs[] = { "SHELL.ELF" };
 #define USER_PROGRAM_COUNT (sizeof(user_programs) / sizeof(user_programs[0]))
 
 void kernel_main(uint64_t multiboot_info_addr) {
