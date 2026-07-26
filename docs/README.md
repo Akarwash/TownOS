@@ -22,6 +22,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 | [reference/disk.md](reference/disk.md) | The polled ATA PIO disk driver: the 512-byte block model, the port layout, the read and write flows, and the driver-vs-filesystem layering |
 | [reference/fat32.md](reference/fat32.md) | The read-only FAT32 filesystem: the on-disk layout, the boot sector fields, cluster-to-block arithmetic, FAT chains and the 28-bit mask, directory entries and 8.3 names, and the read path |
 | [reference/elf-loading.md](reference/elf-loading.md) | The ELF64 program loader: the manifest, the header and program header fields used, validation and the segment bounds check, the load loop and the zero-fill, and the separate user build |
+| [reference/shell.md](reference/shell.md) | The interactive shell (a ring-3 program): the read-match-do loop, the keyboard ring buffer, the four shell syscalls and their pointer checks, the tokenizer, and the command table |
 | [project-status.md](project-status.md) | What works, what was never built, and the natural next steps |
 | [decisions/](decisions/) | Architecture decision records (ADRs) for the load-bearing choices |
 
@@ -42,19 +43,21 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 - [0013 — A polled ATA PIO disk driver](decisions/0013-ata-pio-disk-driver.md) — Read and write 512-byte LBA28 blocks on the primary ATA bus by polling (no interrupts, no DMA); the simplest correct block device, which freezes the machine during a transfer and unblocks a filesystem.
 - [0014 — A read-only FAT32 filesystem](decisions/0014-read-only-fat32.md) — Give the raw blocks names: parse the boot sector, follow FAT cluster chains, and read a file by 8.3 name, read-only (first FAT copy, root directory, no long filenames), with the image formatted by the host build system.
 - [0015 — Load programs from disk as ELF64 binaries](decisions/0015-elf-program-loading.md) — User programs become separately linked static ELF64 files on the FAT32 image, loaded at runtime by an in-kernel loader that validates every field and bounds-checks every segment address; changing a program no longer means rebuilding the kernel.
+- [0016 — An interactive shell as a ring-3 program](decisions/0016-interactive-shell.md) — The shell becomes a fenced-in ring-3 program (`SHELL.ELF`) that reads commands and runs them using four new syscalls (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`) and a keyboard ring buffer, proving the syscall boundary is complete; the old in-kernel shell is removed.
 
 ## Status
 
 MiniOS **builds, links, and boots to an interactive shell** under QEMU, reads
 files by name off a FAT32 disk, and loads and runs its ring-3 programs from that
-disk as ELF64 binaries.
+disk as ELF64 binaries. The shell itself is one of those ring-3 programs.
 
 - All C sources compile cleanly under `-Wall -Wextra`.
 - All assembly sources assemble cleanly with `nasm -f elf64`.
 - The kernel links into `minios.elf` and is repackaged as a Multiboot-loadable
-  `minios.bin`. `make run` boots it under QEMU: the banner and prompt appear, the
-  timer ticks on IRQ 0, the keyboard delivers keypresses on IRQ 1, and the shell
-  runs `help`, `clear`, `hello`, and `tick`.
+  `minios.bin`. `make run` boots it under QEMU: the banner appears, the timer ticks
+  on IRQ 0, the keyboard delivers keypresses on IRQ 1, and `SHELL.ELF` runs at
+  ring 3, dispatching `list`, `read`, `run`, `help`, `clear`, and `return` through
+  the syscall gate.
 
 The full feature list, the things that are still deliberately absent (writing to
 the filesystem, argv, dynamic linking, demand paging), and the natural next steps

@@ -86,6 +86,7 @@ chapter states are:
 | 15 | The disk driver | [15-the-disk-driver.md](15-the-disk-driver.md) | stubbed | [../docs/reference/disk.md](../docs/reference/disk.md) |
 | 16 | The filesystem | [16-the-filesystem.md](16-the-filesystem.md) | written | [../docs/reference/fat32.md](../docs/reference/fat32.md) |
 | 17 | Loading a program (the ELF loader) | [17-loading-a-program.md](17-loading-a-program.md) | written | [../docs/reference/elf-loading.md](../docs/reference/elf-loading.md) |
+| 18 | The shell (interactive, ring 3) | [18-the-shell.md](18-the-shell.md) | written | [../docs/reference/shell.md](../docs/reference/shell.md) |
 
 Chapters 1, 2, 3, and 5 (frozen-32bit) and chapters 8, 9, and 14 (stubbed)
 overlap on purpose: the frozen chapter teaches the original 32-bit take on boot,
@@ -123,10 +124,10 @@ drivers/keyboard.c ......... PS/2 keyboard input (IRQ1)                → ch.4
 drivers/disk.c ............. polled ATA PIO disk driver                 → ch.15
 fs/fat32.c ................. read-only FAT32 filesystem                 → ch.16
 kernel/elf.c ............... ELF64 program loader                        → ch.17
-user/A.c, B.c, C.c ......... the ring-3 programs, loaded from disk        → ch.17, ch.10
+user/A.c, B.c, C.c ......... the ring-3 demo programs, loaded from disk    → ch.17, ch.10
+user/shell.c ............... the interactive shell (ring 3), loaded from disk → ch.18
 drivers/ports.c ............ in/out instruction wrappers               → ch.4
 libc/string.c, mem.c ....... hand-rolled standard library              → ch.7
-shell/shell.c .............. the interactive command loop              → ch.6
 include/types.h ............ fixed-width integer types                 → ch.7
 linker.ld .................. memory layout of the final binary         → ch.7
 ```

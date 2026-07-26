@@ -1,13 +1,14 @@
 # Project status
 
 MiniOS is a learning kernel: it boots x86-64 long mode, drops to ring 3, and
-preempts between three ring-3 tasks on the timer tick, each in its own address
-space (per-process paging). It reads files off a FAT32 disk by name, and its
-three ring-3 programs are now ELF64 binaries loaded from that disk rather than
-code compiled into the kernel. (An interrupt-driven shell is still compiled and
-working but off the boot path.) This page records what works today, what was
-deliberately never built, the natural next steps, and the known limitations. It
-is a factual snapshot, not a roadmap.
+preempts between ring-3 tasks on the timer tick, each in its own address space
+(per-process paging). It reads files off a FAT32 disk by name, and its ring-3
+programs are ELF64 binaries loaded from that disk rather than code compiled into
+the kernel. It boots into an interactive shell that is itself one of those ring-3
+programs (`SHELL.ELF`): it reads typed commands and runs them using nothing but
+syscalls, which is what proves the syscall boundary is complete. This page records
+what works today, what was deliberately never built, the natural next steps, and
+the known limitations. It is a factual snapshot, not a roadmap.
 
 ## What works
 
@@ -29,8 +30,6 @@ is a factual snapshot, not a roadmap.
   the Multiboot map reports (identity map extended to cover it, up to a 1GB cap),
   so it hands out real, mapped frames. See
   [reference/memory-map.md](reference/memory-map.md).
-- The interactive shell (`shell/shell.c`) with `help`, `clear`, `hello`, `tick`.
-  (Present and working, but not on the current boot path — see below.)
 - A minimal freestanding libc (`libc/string.c`, `libc/mem.c`).
 - A polled ATA PIO disk driver (`drivers/disk.c`): `disk_read` and `disk_write`
   move any run of contiguous 512-byte blocks between a disk and a buffer on the
@@ -76,11 +75,27 @@ is a factual snapshot, not a roadmap.
   and [decisions/0006-user-mode-with-separate-pages.md](decisions/0006-user-mode-with-separate-pages.md).
 - System calls (`kernel/syscall.c`, `include/syscalls.h`): the ring-3 programs
   call back into the kernel through one `int 0x50` gate, the only DPL 3 gate in
-  the IDT. `SYS_WRITE` prints a string; `SYS_EXIT` halts. The dispatcher switches
-  on RAX and returns its result in RAX; an unknown number is rejected, not fatal.
-  The `SYS_WRITE` pointer check is a stopgap (see limitations below). See
+  the IDT. Six calls: `SYS_WRITE` prints a string; `SYS_EXIT` halts; `SYS_READKEY`
+  pops one key from the keyboard ring buffer (non-blocking); `SYS_LIST` writes the
+  root directory's names into a caller buffer; `SYS_RUN` loads and starts a named
+  program; `SYS_READFILE` reads a whole file into a caller buffer. The dispatcher
+  switches on RAX and returns its result in RAX; an unknown number is rejected, not
+  fatal. The `SYS_WRITE` pointer check is a stopgap (see limitations below), but the
+  four shell calls bound the whole `[ptr, ptr+len)` range with `user_range_ok` and
+  cap copied filenames with `copy_user_string`. See
   [reference/syscalls.md](reference/syscalls.md) and
   [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
+- An interactive shell (`user/shell.c`, booted as `SHELL.ELF`): a ring-3 program,
+  loaded off the disk like any other, that reads typed commands and runs them using
+  only syscalls. It reads a line a key at a time through `SYS_READKEY` (busy-waiting,
+  echoing, with backspace), tokenizes it in place with a reentrant `next_token`, and
+  dispatches the custom commands `list`, `read`, `run`, `help`, `clear`, and
+  `return` (deliberately not the Unix names). The keyboard IRQ was reduced to a
+  producer that only pushes a decoded character into a 128-slot ring buffer; the old
+  in-kernel shell (`shell/shell.c`) is deleted. That a fully fenced-in program runs
+  an interactive shell is the proof the syscall boundary is complete. See
+  [reference/shell.md](reference/shell.md) and
+  [decisions/0016-interactive-shell.md](decisions/0016-interactive-shell.md).
 - A round-robin preemptive scheduler (`kernel/scheduler.c`): the timer tick
   switches between several ring-3 tasks (three today) by overwriting the interrupt
   frame on the kernel stack in place and loading the next task's CR3, so the
@@ -118,11 +133,13 @@ is a factual snapshot, not a roadmap.
 
 The kernel builds, links into `minios.elf`, is repackaged as `minios.bin`, and
 boots under QEMU. In the current build `kernel_main` hands off to the scheduler as
-its last act (it creates three ring-3 tasks, each in its own address space, and
-enters task 0; the timer then switches between them, and they print "A"/"B"/"C"
-forever), so the interactive shell, though compiled and working, is not reached.
-Swapping the scheduler handoff back for `shell_init` restores the shell. See
-[building.md](building.md).
+its last act: it creates one ring-3 task from `SHELL.ELF` and enters it, and the
+shell then runs the machine, launching further tasks on demand with `run`. Verified
+under QEMU by a scripted key session: the prompt appears at boot, `help`/`list`/
+`read`/`return`/`run`/unknown-command all behave, `run A.ELF` starts A.ELF whose
+output interleaves with the live prompt, and `-d int` over the session shows only
+timer, keyboard, and syscall vectors with no page fault, `#GP`, double fault, triple
+fault, or disk IRQ. See [building.md](building.md).
 
 ## What was never built
 
@@ -158,10 +175,13 @@ and return anywhere, or to be given anything on the way in.
   skipped, so a file with a long name is invisible to MiniOS; lookups are
   root-directory only, since the interface takes a bare name with no path to
   split; and FAT32 carries essentially no permissions and no crash safety.
-- **A way to start a program on demand.** The loader exists, but nothing drives
-  it interactively: the shell still dispatches to compiled-in command functions,
-  and the program list is fixed in `kernel_main`. A shell command that loads and
-  runs a named file is now a small piece of work rather than a missing layer.
+- **Arguments to a launched program, and a shell beyond one line.** The shell's
+  `run` command starts a program on demand now, but it cannot pass it anything:
+  `SYS_RUN` forges the same empty, argv-less frame the loader always does. And the
+  shell is one line at a time: no pipes or redirection to connect programs, no job
+  control to background one, and no history or line recall (backspace editing of the
+  current line is all there is). A launched program also never ends anywhere:
+  `SYS_EXIT` halts the machine rather than returning to the shell.
 
 ## Natural next steps
 
@@ -222,12 +242,20 @@ The three ring-3 programs are now files on the disk, and changing one needs no
 kernel rebuild. See
 [decisions/0015-elf-program-loading.md](decisions/0015-elf-program-loading.md).
 
+**The interactive shell.** Done. `user/shell.c` is a ring-3 program that reads
+commands and runs them through four syscalls (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`,
+`SYS_READFILE`) and a keyboard ring buffer. `run` loads a named program on demand,
+so the fixed program list in `kernel_main` is gone. See
+[decisions/0016-interactive-shell.md](decisions/0016-interactive-shell.md).
+
 **Filesystem writing, then real processes.** Next. Writing is the other direction
 across the same filesystem and is independent of the loader: free-cluster search,
 chain and directory updates, mirroring every FAT copy, and crash ordering
-(`TODO(fat32-write)`). Real processes are the other axis: a shell command that
-loads a named program on demand, argv on the new stack, a `SYS_EXIT` that returns
-to a parent instead of halting, and reclaiming a dead task's frames.
+(`TODO(fat32-write)`). Real processes are the other axis, and the shell now makes
+the gaps concrete: argv on the new stack so `run` can pass arguments, a `SYS_EXIT`
+that returns to the shell instead of halting, reclaiming a dead task's frames, and
+a blocking `SYS_READKEY` so the shell sleeps instead of busy-waiting
+(`TODO(blocking-readkey)`).
 
 ## Known limitations
 
@@ -248,9 +276,11 @@ to a parent instead of halting, and reclaiming a dead task's frames.
   stack (per-process paging), so the old fixed four-task ceiling and the shared
   user-stack region are both gone: a stack overflow faults in the offending task
   instead of corrupting a neighbour. What remains: there is no blocking or
-  sleeping (a task yields only by being preempted), no task exit that returns
-  anywhere (`SYS_EXIT` halts the machine), and no reclamation (a task's frames and
-  tree are never freed, since tasks are never destroyed). Memory is also used
+  sleeping (a task yields only by being preempted), which is why the shell
+  busy-waits on `SYS_READKEY` instead of sleeping until a key arrives
+  (`TODO(blocking-readkey)`); no task exit that returns anywhere (`SYS_EXIT` halts
+  the machine); and no reclamation (a task's frames and tree are never freed, since
+  tasks are never destroyed). Memory is also used
   wastefully: the read-only user text is copied in full per task rather than
   shared (`TODO(shared-text)`). See
   [reference/scheduling.md](reference/scheduling.md),
