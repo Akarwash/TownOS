@@ -104,10 +104,11 @@ void sys_exit(void) {
     }
 }
 
-// SYS_READKEY: pop one buffered keystroke, or 0 if none is waiting right now.
-// NON-BLOCKING: the kernel cannot sleep a task yet, so this returns immediately and
-// the caller polls it in a loop (busy-wait) until it returns non-zero. See
-// TODO(blocking-readkey) in kernel/syscall.c. Returns the character (1..255) or 0.
+// SYS_READKEY: pop one buffered keystroke, waiting for one if none is ready.
+// BLOCKING: if the buffer is empty the kernel parks this task until a key arrives,
+// so the call costs no CPU while it waits and there is no reason to poll it. The
+// wait is invisible from here: it looks like one call that took a while. Always
+// returns a real character (1..255).
 static inline __attribute__((always_inline))
 unsigned long sys_readkey(void) {
     return syscall0(SYS_READKEY);

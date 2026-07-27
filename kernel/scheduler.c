@@ -290,6 +290,29 @@ void task_block(registers_t *r, wait_reason_t reason) {
     // kernel entry now belongs to another task and ends at that iretq.
 }
 
+void scheduler_wake(wait_reason_t reason) {
+    // The block and the wake are a matched pair, and the pairing rule is that
+    // whoever CAUSES an event wakes the tasks waiting on it. A blocked task cannot
+    // wake itself: it is not running, so it cannot notice anything. That is the
+    // whole point, and it is why this lives here and is called from the driver that
+    // produced the event rather than from anything the sleeper does.
+    //
+    // A linear scan over every task, which is fine at this scale (a handful of
+    // tasks) and is the honest simple thing. A kernel with many blocked tasks would
+    // keep a per-reason wait queue instead and wake off the head in constant time.
+    for (uint32_t i = 0; i < num_tasks; i++) {
+        if (tasks[i]->state == TASK_BLOCKED && tasks[i]->wait_reason == reason) {
+            tasks[i]->state = TASK_READY;
+            tasks[i]->wait_reason = WAIT_NONE;
+        }
+    }
+
+    // Deliberately no context switch here. This runs in interrupt context, where
+    // the live pile belongs to whatever was interrupted, not to the task we just
+    // woke, so switching would be both wrong and unnecessary: the woken task is
+    // back in the rotation and the next tick's schedule() will reach it.
+}
+
 void schedule(registers_t *r) {
     // Ignore ticks that fire before task 0 has been entered (see the flag above).
     if (!scheduler_running) {

@@ -1,6 +1,7 @@
 #include "keyboard.h"
 #include "ports.h"
 #include "../kernel/isr.h"
+#include "../kernel/scheduler.h"
 #include "../include/vectors.h"
 
 #define KEYBOARD_DATA_PORT 0x60
@@ -98,6 +99,17 @@ static void keyboard_callback(registers_t *regs) {
     char c = scancode_to_ascii[scancode];
     if (c != 0) {
         kbd_buffer_push(c);
+
+        // This IRQ is what CAUSES the event tasks blocked on WAIT_KEY are waiting
+        // for, so waking them is its job: a sleeping task cannot notice a key
+        // arriving, because it is not running. Waking only marks them READY, it does
+        // not switch to them, which keeps this handler short and leaves the choice
+        // of what runs next where it belongs, in the scheduler on the next tick.
+        //
+        // Ordering matters: push first, wake second. A task woken before the
+        // character was in the buffer could be scheduled, re-issue its read, find
+        // nothing, and block again, turning one keypress into a wasted round trip.
+        scheduler_wake(WAIT_KEY);
     }
 }
 

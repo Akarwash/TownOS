@@ -89,6 +89,15 @@ void scheduler_start(void);
 // the blocking path.
 void task_block(registers_t *r, wait_reason_t reason);
 
+// Make every task blocked on `reason` runnable again. Called by whatever CAUSES
+// the event, which today means the keyboard IRQ calling scheduler_wake(WAIT_KEY)
+// once it has a key to hand over.
+//
+// This only changes state; it does NOT switch tasks. A woken task goes back into
+// the rotation and the next ordinary schedule() picks it up. That keeps the wake
+// safe to call from interrupt context, where switching would be wrong.
+void scheduler_wake(wait_reason_t reason);
+
 // The switch itself, called from the timer IRQ with a pointer to the live pile.
 // Only TASK_READY tasks are candidates: a blocked task is skipped entirely, and if
 // nothing at all is runnable this idles the CPU (see the hlt idle in scheduler.c)
