@@ -231,6 +231,65 @@ static void idle_until_runnable(void) {
     scheduler_idling = 0;
 }
 
+// Length in bytes of the `int 0x50` instruction that brings a task into a syscall.
+// The opcode is CD ib: one byte of opcode, one immediate byte carrying the vector.
+// Named, because a bare 2 buried in pointer arithmetic on a saved rip is unreadable
+// and unsearchable.
+#define INT_INSTR_LEN 2
+
+void task_block(registers_t *r, wait_reason_t reason) {
+    // (1) Take this task out of the rotation and record what it is waiting for, so
+    // the waker for that event can find it again (see scheduler_wake).
+    tasks[current]->state = TASK_BLOCKED;
+    tasks[current]->wait_reason = reason;
+
+    // (2) RE-ARM THE SYSCALL: resume ON the int, not after it, so the woken task
+    // re-issues the syscall.
+    //
+    // This is the heart of the design and the part worth understanding. We cannot
+    // freeze this task where it stands, half way through a C function in the
+    // kernel, and thaw it here later. Two things in this kernel forbid it. The
+    // saved pile holds the rip the CPU pushed on the ring-3 to ring-0 transition,
+    // so it is always a RING-3 address, never a kernel one: restoring a pile can
+    // only ever resume user code. And there is a single kernel stack shared by
+    // every task (tss.rsp0, see gdt.c), so the C frames we are standing on right
+    // now are abandoned the instant we switch away, and the next task to enter the
+    // kernel writes over them.
+    //
+    // So instead of resuming in the middle, we resume at the beginning. The CPU
+    // pushed the address of the instruction AFTER `int 0x50`; winding it back by
+    // the length of that instruction points it at the int itself. When this task is
+    // eventually woken and rescheduled, its iretq lands on the int, the syscall is
+    // issued again from scratch, and this time it finds what it was waiting for
+    // (that is precisely what being woken means) and returns normally.
+    //
+    // This only makes sense because the caller entered through `int 0x50`. A task
+    // that reached here any other way would have its rip wound back into the middle
+    // of whatever instruction happens to precede it, which is garbage. That
+    // invariant is enforced by convention, not by the type system: see the header.
+    r->rip -= INT_INSTR_LEN;
+
+    // (3) Switch away through the SAME routine the timer uses. schedule() saves the
+    // (now rewound) pile into this task, picks a READY task, overwrites the live
+    // pile and loads the new CR3, so the iretq at the end of syscall_common_stub
+    // returns into a different task. The only difference from the timer path is
+    // what prompted the call, which is why one routine serves both: involuntary
+    // preemption and a voluntary block are the same switch.
+    //
+    // No EOI concern here, unlike the timer path: `int 0x50` is a software
+    // interrupt, so the PIC has no in-service bit to acknowledge.
+    //
+    // Interrupt-flag discipline matches the timer path exactly. Both handlers are
+    // reached through interrupt gates, so IF is clear throughout, and the iretq
+    // restores the incoming task's own rflags (IF set) as it returns to ring 3.
+    // Nothing here leaves interrupts disabled across the yield, which matters: the
+    // keyboard IRQ that will wake this task has to be able to fire.
+    schedule(r);
+
+    // Unreachable on the blocking path: schedule() redirected the pile, so this
+    // kernel entry now belongs to another task and ends at that iretq.
+}
+
 void schedule(registers_t *r) {
     // Ignore ticks that fire before task 0 has been entered (see the flag above).
     if (!scheduler_running) {

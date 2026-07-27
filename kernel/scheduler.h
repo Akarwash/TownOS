@@ -76,6 +76,19 @@ int task_create_from_file(const char *name);
 // the kernel through an interrupt, where schedule() runs).
 void scheduler_start(void);
 
+// Block the current task on `reason` and switch away NOW, rather than waiting for
+// the next timer tick. `r` is the live on-stack pile of the syscall the caller is
+// serving, the same kind of frame the timer hands schedule().
+//
+// CALLABLE ONLY FROM A SYSCALL HANDLER. The task is resumed by re-entering the
+// syscall from the top (see the re-arm in scheduler.c), which is only meaningful
+// for a task that arrived through `int 0x50`. Today the one caller is SYS_READKEY.
+//
+// This does not return in any useful sense: control leaves through the redirected
+// iretq, and this kernel entry is over. Nothing a caller writes after it runs on
+// the blocking path.
+void task_block(registers_t *r, wait_reason_t reason);
+
 // The switch itself, called from the timer IRQ with a pointer to the live pile.
 // Only TASK_READY tasks are candidates: a blocked task is skipped entirely, and if
 // nothing at all is runnable this idles the CPU (see the hlt idle in scheduler.c)
