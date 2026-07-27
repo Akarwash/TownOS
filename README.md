@@ -3,18 +3,19 @@
 A hobby x86-64 operating system kernel built from scratch in C and assembly.
 
 MiniOS boots via Multiboot, climbs the CPU into 64-bit long mode, sets up the GDT
-and TSS, and is being built toward an interrupt-driven interactive shell. It is a
-learning kernel: one address space, everything at ring 0, no processes and no
-filesystem. The point is to understand how an operating system works by building a
-small real one, not to be a production OS.
+and TSS, and boots into an interrupt-driven interactive shell. It is a learning
+kernel: ring-3 tasks preempted round-robin on the timer tick, each in its own
+address space, running ELF64 programs read by name off a read-only FAT32 disk. The
+point is to understand how an operating system works by building a small real one,
+not to be a production OS.
 
 ## Status
 
-MiniOS **compiles and assembles but does not yet link**, so it does not run yet.
-This is expected. The link fails on the interrupt entry symbols `isr0`-`isr31` and
-`irq0`-`irq15`, which live in `kernel/isr_stubs.asm`. That file and `kernel/idt.c`
-are the two remaining hand-written stubs. Full status is in
-[docs/README.md](docs/README.md).
+MiniOS **builds, links, and boots**. The kernel links into `minios.elf`, is
+repackaged as the Multiboot-loadable `minios.bin`, and under QEMU boots into an
+interactive shell that is itself a ring-3 program (`SHELL.ELF`) loaded off the disk
+image. What works, what was deliberately never built, and what is next are in
+[docs/project-status.md](docs/project-status.md).
 
 ## Quick start
 
@@ -51,11 +52,15 @@ concepts.
 
 ```
 boot/       Multiboot header and the 32 to 64 long-mode climb (assembly)
-kernel/     GDT/TSS, IDT, interrupt dispatch, timer, memory allocator, kernel_main
-drivers/    hardware drivers: screen, keyboard, I/O ports
+kernel/     GDT/TSS, IDT, interrupt and syscall dispatch, timer, frame allocator,
+            heap, per-process paging, ELF loader, scheduler, kernel_main
+drivers/    hardware drivers: screen, keyboard, ATA PIO disk, I/O ports
+fs/         read-only FAT32 filesystem
 libc/       minimal freestanding C library (string, mem)
-shell/      interactive command shell
-include/    shared type definitions
+user/       ring-3 programs (shell, A/B/C) and their runtime, built as standalone
+            ELF64 binaries that live on the disk image, not in minios.bin
+include/    shared types, the interrupt vector map, the syscall numbers
+tools/      mkdisk.sh: builds the FAT32 disk image on the host
 docs/       project documentation (factual)
 learnings/  OS concepts and teaching material
 linker.ld   section layout: kernel loads at 1M
