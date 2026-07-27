@@ -1,4 +1,5 @@
 #include "scheduler.h"
+#include "syscall.h"     // SYSCALL_ERROR: the value SYS_WAIT returns to a childless caller
 #include "gdt.h"
 #include "usermode.h"
 #include "heap.h"
@@ -359,6 +360,194 @@ void scheduler_wake(wait_reason_t reason) {
     // back in the rotation and the next tick's schedule() will reach it.
 }
 
+// Is there still somebody who could read a zombie's exit status?
+//
+// This is not simply "does the slot exist". A ZOMBIE PARENT DOES NOT COUNT. It has
+// exited itself, so it will never issue another SYS_WAIT, and treating it as a live
+// reader would keep its dead children's tombstones alive forever waiting on a call
+// that cannot come: a permanent leak of one task_t per orphan, invisible in a free
+// frame count because a task_t is a heap block rather than a frame.
+static int parent_alive(uint32_t parent_id) {
+    if (parent_id == TASK_NO_PARENT) {
+        return 0;              // kernel_main started this task; nobody can wait on it
+    }
+    if (parent_id >= num_tasks) {
+        return 0;              // an id never handed out (defensive: cannot happen)
+    }
+    if (tasks[parent_id] == NULL) {
+        return 0;              // the parent has itself been reaped
+    }
+    return tasks[parent_id]->state != TASK_ZOMBIE;
+}
+
+// Free what the dead are still holding. Called from schedule() only, once per tick.
+//
+// The split of who frees what is the heart of this design. THE HEAVY RESOURCES (the
+// user frames, the page tables, the address_space_t) ARE FREED HERE; the light ones
+// (the task_t and its slot) are freed by the parent at wait time, because they hold
+// the exit status the parent has not read yet. Splitting them is what lets the
+// memory come back promptly without losing the answer to "how did it end".
+static void reap_sweep(void) {
+    for (uint32_t i = 0; i < num_tasks; i++) {
+        task_t *t = tasks[i];
+        if (t == NULL || t->state != TASK_ZOMBIE) {
+            continue;
+        }
+
+        // THE SAFETY ARGUMENT OF THE ENTIRE RUNG IS THIS ONE LINE. On the tick where
+        // a task exits, `current` is STILL that task and ITS page tables are STILL
+        // loaded in CR3: task_exit does paperwork and calls schedule(), and the CR3
+        // write that moves off this tree happens at the very end of schedule(),
+        // below. Destroying the tree here would hand the frames the CPU is at this
+        // moment translating through back to the free pool. Nothing would fault now;
+        // the frames would be reissued to the next task's page tables and the
+        // machine would die later, somewhere unrelated. Skipping `current` means a
+        // task is only ever swept on a LATER tick, by which time CR3 has moved on.
+        if (i == current) {
+            continue;
+        }
+
+        if (t->aspace != NULL) {
+            paging_destroy_address_space(t->aspace);
+            t->aspace = NULL;   // the tree is gone: never load or free it twice
+            t->cr3 = 0;         // and never let this stale value reach CR3
+        }
+
+        // An orphan loses its tombstone. With nobody left to call SYS_WAIT, the
+        // exit status has no reader, so keeping the struct would keep a fact nobody
+        // will ever ask for. The id is NOT recycled: the slot stays NULL forever
+        // (see num_tasks above), so nothing can be confused about who this was.
+        if (!parent_alive(t->parent_id)) {
+            kfree(t);
+            tasks[i] = NULL;
+        }
+    }
+}
+
+void task_exit(registers_t *r, int status) {
+    task_t *t = tasks[current];
+
+    // (1) Record how it ended, MASKED TO 0..255. The mask is not cosmetic: SYS_WAIT
+    // returns the status in RAX and returns SYSCALL_ERROR (-1) when the caller has
+    // no children at all, so an unmasked status of -1 would be indistinguishable
+    // from "you have no children" and a parent would mis-report a child that exited
+    // perfectly normally. Masking makes the two value ranges disjoint by
+    // construction rather than by hoping no program picks the wrong number.
+    t->exit_status = status & 0xFF;
+
+    // (2) Off the rotation for good. TASK_ZOMBIE is not TASK_BLOCKED: nothing will
+    // ever wake it, and find_next_ready only ever returns TASK_READY slots, so the
+    // CPU can never be handed back to it. wait_reason is cleared because it is only
+    // meaningful while BLOCKED, and a zombie carrying a stale reason would be woken
+    // by the next scheduler_wake for that reason and marked READY again.
+    t->state = TASK_ZOMBIE;
+    t->wait_reason = WAIT_NONE;
+
+    // (3) Wake the parent if it is asleep in SYS_WAIT, BY ID, not by reason.
+    //
+    // scheduler_wake(WAIT_CHILD) would be wrong here, and would look right. It
+    // readies EVERY task blocked on WAIT_CHILD, town-wide; the other waiting parents'
+    // children have not exited, so each would be scheduled, re-issue its wait, find
+    // no zombie among its own children, and block again. Worse, the wake is what
+    // publishes "your child is ready to be reaped", so broadcasting it announces
+    // something untrue to everyone but one task. WAIT_CHILD is the first wait reason
+    // whose event belongs to ONE specific sleeper rather than to whoever is
+    // listening, which is why it is the first one woken by id.
+    //
+    // THIS MUST HAPPEN BEFORE schedule(). If the parent is still BLOCKED when
+    // schedule() runs and it is the only other task in the town, find_next_ready
+    // returns -1, schedule() parks in idle_until_runnable, and nothing can ever make
+    // anyone ready again: the only task that could have woken the parent is this one,
+    // and it is already dead. The machine sits in `hlt` forever with no message. That
+    // is a deadlock built out of two individually correct pieces, so the ordering is
+    // load-bearing and not merely tidy.
+    if (parent_alive(t->parent_id)) {
+        task_t *p = tasks[t->parent_id];
+        if (p->state == TASK_BLOCKED && p->wait_reason == WAIT_CHILD) {
+            p->state = TASK_READY;
+            p->wait_reason = WAIT_NONE;
+        }
+    }
+
+    // (4) Switch away, through the same routine the timer drives.
+    //
+    // NOTE WHAT IS NOT HERE. There is no rip rewind: that is task_block's trick, for
+    // a task that will run again and re-issue its syscall, and this task must never
+    // run again. Nothing is freed: this task's page tables are still in CR3 right
+    // now, so the frames go back on a later tick, from the sweeper above, which is
+    // the only context that is guaranteed not to be standing on them. And rax is not
+    // written, because there is nobody left to return a value to.
+    schedule(r);
+
+    // Unreachable: schedule() redirected the pile into another task, and no path
+    // will ever pick a TASK_ZOMBIE again.
+}
+
+void task_wait(registers_t *r) {
+    int have_child = 0;
+
+    for (uint32_t i = 0; i < num_tasks; i++) {
+        task_t *t = tasks[i];
+        if (t == NULL || t->parent_id != current) {
+            continue;
+        }
+        have_child = 1;
+
+        if (t->state != TASK_ZOMBIE) {
+            continue;           // alive: keep looking, it may not be the only child
+        }
+
+        // A child has already exited. Take its status, then take it apart.
+        int32_t status = t->exit_status;
+
+        // Freeing the address space HERE as well as in the sweeper is DELIBERATE and
+        // is not a duplicated responsibility to be tidied away. A parent can call
+        // SYS_WAIT on the very tick its child exited, before the sweeper has had a
+        // chance to run, and this path is about to free the task_t: without this the
+        // struct (and with it the only pointer to the tree) would be gone and the
+        // whole address space would leak. Both paths guard on aspace != NULL, so
+        // whichever arrives first does the work and the other does nothing.
+        //
+        // It is safe here for the same reason the sweeper's skip of `current` makes
+        // it safe there: this is a CHILD of the caller, and a child is by definition
+        // not the task running right now, so this tree is not the one in CR3.
+        if (t->aspace != NULL) {
+            paging_destroy_address_space(t->aspace);
+            t->aspace = NULL;
+            t->cr3 = 0;
+        }
+
+        kfree(t);
+        tasks[i] = NULL;        // a permanent hole; the id is never reused
+
+        r->rax = (uint64_t)(int64_t)status;
+        return;
+    }
+
+    if (!have_child) {
+        // Nothing to wait for, and nothing that could ever arrive. Blocking here
+        // would be an unbreakable sleep: only task_exit wakes a WAIT_CHILD sleeper,
+        // and with no children nothing can ever call it on this task's behalf. Fail
+        // loudly-in-RAX instead. SYSCALL_ERROR is safe to write because this path
+        // does NOT block (see below).
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+
+    // Children exist but none has exited yet. Sleep until one does.
+    //
+    // NOTHING MAY WRITE r->rax ON THIS PATH, and this is the second syscall to carry
+    // that rule (the first is sys_readkey, kernel/syscall.c, where it is documented
+    // at length). task_block rewinds rip onto the `int 0x50`, so when the woken task
+    // re-executes that instruction the CPU reads the SYSCALL NUMBER out of RAX.
+    // Leaving a return value there makes the woken task issue a DIFFERENT syscall,
+    // and here the accident is spectacular rather than subtle: SYS_EXIT is 0, so
+    // writing 0 (a perfectly ordinary "child exited successfully" status) would make
+    // the woken parent kill itself instead of reporting the result. The shell is
+    // usually that parent.
+    task_block(r, WAIT_CHILD);
+}
+
 void schedule(registers_t *r) {
     // Ignore ticks that fire before task 0 has been entered (see the flag above).
     if (!scheduler_running) {
@@ -371,6 +560,21 @@ void schedule(registers_t *r) {
     if (scheduler_idling) {
         return;
     }
+
+    // Collect what the dead are still holding, before anything else happens.
+    //
+    // THE PLACEMENT IS THE DESIGN, not a convenience. It has to be INSIDE schedule()
+    // because schedule() is the only code in the kernel that runs after a CR3 switch
+    // has moved off a dead task's tree; anywhere else (in task_exit, in the syscall
+    // dispatcher, in a timer callback) would still be standing on the address space
+    // it is trying to free. And it has to skip `current`, which it does, because on
+    // the tick where a task exits, `current` is still that very task.
+    //
+    // It runs after the two guards above so it never fires before the scheduler is
+    // armed or while a nested tick is unwinding out of the idle loop, and before the
+    // save below so a freed task's memory is out of the way before this tick starts
+    // shuffling piles around.
+    reap_sweep();
 
     // DEFENSIVE, AND IT SHOULD BE UNREACHABLE. Every other loop over tasks[] skips
     // NULL because a reaped task leaves a hole, but the CURRENT slot is different:
