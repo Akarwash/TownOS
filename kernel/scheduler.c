@@ -7,10 +7,20 @@
 #include "elf.h"
 #include "../libc/mem.h"
 
-// Pointers to the heap-allocated tasks, in creation order (ids 0, 1, ...). Slots
-// 0..num_tasks-1 are non-NULL; the rest are unused. Each task_t is kmalloc'd in
-// task_create. A flat pointer array (rather than a linked list) keeps schedule()'s
-// O(1) round-robin indexing a mechanical change from the old fixed array.
+// Pointers to the heap-allocated tasks, in creation order (ids 0, 1, ...). Each
+// task_t is kmalloc'd in task_register. A flat pointer array (rather than a linked
+// list) keeps schedule()'s O(1) round-robin indexing a mechanical change from the
+// old fixed array.
+//
+// SLOTS 0..num_tasks-1 MAY CONTAIN NULL. This used to be a dense array where a
+// non-NULL pointer was guaranteed, and that assumption is now wrong: a reaped task
+// has its struct kfree'd and its slot set back to NULL, leaving a HOLE. The id is
+// never reused (a hole stays a hole forever, see num_tasks below), so an id remains
+// a permanent, unambiguous name for one task and a stale id can never silently
+// address a different one. The cost is that EVERY loop over this array must skip
+// NULL: a missing skip dereferences a freed pointer and page-faults at a low
+// address, tens of seconds after the task that made the hole exited, which reads
+// like a fault with no cause. All of them are marked below.
 //
 // A task_t is kernel-only bookkeeping (only the code here reads it), never touched
 // by ring-3 code, so it is safe on kernel (non-PG_USER) heap pages. That is why
@@ -47,8 +57,13 @@ static int map_user_stack(address_space_t *as) {
 // Index of the task currently on the CPU.
 static uint32_t current = 0;
 
-// How many slots task_create has filled. Tasks are handed ids 0, 1, ... in call
-// order and never freed, so this only grows.
+// A HIGH WATER MARK, not a count of live tasks. Tasks are handed ids 0, 1, ... in
+// creation order and this only ever grows: reaping a task frees its struct and
+// NULLs its slot, but does NOT decrement this, because doing so would let the next
+// creation hand out an id that is already the name of a dead task. A parent holding
+// the id of a child it has not waited for would then be pointed at a stranger. So
+// the walks below are bounded by this and skip the holes, and the array fills up
+// over the life of the machine even though the live task count may not grow at all.
 static uint32_t num_tasks = 0;
 
 // Set while schedule() is parked in its all-blocked idle loop (idle_until_runnable
@@ -191,6 +206,9 @@ void scheduler_start(void) {
 // whole table rather than about a position in the rotation.
 static int any_task_ready(void) {
     for (uint32_t i = 0; i < num_tasks; i++) {
+        if (tasks[i] == NULL) {
+            continue;               // a reaped task's hole (see tasks[] above)
+        }
         if (tasks[i]->state == TASK_READY) {
             return 1;
         }
@@ -206,10 +224,20 @@ static int any_task_ready(void) {
 // cursor comes round, until whatever it waits for marks it READY again. Candidate
 // num_tasks is `from` itself, so a task that is still runnable keeps the CPU when
 // nothing else wants it, and a task that has just BLOCKED itself does not match
-// and so cannot be handed back the CPU it just gave up.
+// and so cannot be handed back the CPU it just gave up. The same test also makes a
+// TASK_ZOMBIE unreachable: a dead task is never READY, so the rotation can never
+// hand the CPU back to one, and no separate check for it is needed here.
+//
+// The walk is bounded by num_tasks, which is a HIGH WATER MARK and no longer the
+// count of live tasks: slots 0..num_tasks-1 used to be exactly the live tasks, and
+// since reaping began that is false. The cursor therefore steps over NULL holes as
+// well as blocked tasks, and the array is scanned in full even when few tasks live.
 static int find_next_ready(uint32_t from) {
     for (uint32_t i = 1; i <= num_tasks; i++) {
         uint32_t cand = (from + i) % num_tasks;
+        if (tasks[cand] == NULL) {
+            continue;               // a reaped task's hole (see tasks[] above)
+        }
         if (tasks[cand]->state == TASK_READY) {
             return (int)cand;
         }
@@ -316,6 +344,9 @@ void scheduler_wake(wait_reason_t reason) {
     // tasks) and is the honest simple thing. A kernel with many blocked tasks would
     // keep a per-reason wait queue instead and wake off the head in constant time.
     for (uint32_t i = 0; i < num_tasks; i++) {
+        if (tasks[i] == NULL) {
+            continue;               // a reaped task's hole (see tasks[] above)
+        }
         if (tasks[i]->state == TASK_BLOCKED && tasks[i]->wait_reason == reason) {
             tasks[i]->state = TASK_READY;
             tasks[i]->wait_reason = WAIT_NONE;
@@ -338,6 +369,18 @@ void schedule(registers_t *r) {
     // nothing useful to do and must not park as well (see scheduler_idling above).
     // Returning here unwinds it straight back into that hlt loop, which re-checks.
     if (scheduler_idling) {
+        return;
+    }
+
+    // DEFENSIVE, AND IT SHOULD BE UNREACHABLE. Every other loop over tasks[] skips
+    // NULL because a reaped task leaves a hole, but the CURRENT slot is different:
+    // it should never be a hole by construction. Only two things free a task_t, and
+    // neither can free this one. The sweeper below explicitly refuses to touch
+    // `current`, and task_wait only ever frees a CHILD of the caller, which by
+    // definition is not the caller. If this ever fires, one of those two invariants
+    // has been broken and the alternative is dereferencing a freed pointer as the
+    // very first act of the switch, so it returns rather than reads.
+    if (tasks[current] == NULL) {
         return;
     }
 
@@ -364,8 +407,9 @@ void schedule(registers_t *r) {
     }
 
     // (2) Pick the next TASK_READY slot, round-robin, wrapping around. num_tasks
-    // (not the MAX_TASKS_LIMIT cap) bounds the walk: tasks are created contiguously
-    // and never freed, so slots 0..num_tasks-1 are exactly the live tasks.
+    // (not the MAX_TASKS_LIMIT cap) bounds the walk: it is the high water mark of
+    // ids ever handed out, so every task that exists is inside it, and the walk
+    // steps over the NULL holes reaping leaves behind.
     int picked = find_next_ready(current);
 
     // (2a) Nothing is runnable: every task is blocked waiting for something. Do not
