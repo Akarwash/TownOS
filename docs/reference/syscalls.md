@@ -54,7 +54,7 @@ not do (kernel pages are not user-readable).
 |--------|------|-----------|---------|--------|
 | 0 | `SYS_EXIT` | none | does not return | Halts the machine with `cli; hlt`. |
 | 1 | `SYS_WRITE` | RDI = pointer to a NUL-terminated string | 0 on success, `(uint64_t)-1` if rejected | Prints the string via the VGA driver. |
-| 2 | `SYS_READKEY` | none | one character, or 0 if none waiting | Pops one key from the keyboard ring buffer. |
+| 2 | `SYS_READKEY` | none | one character (never 0) | Pops one key from the keyboard ring buffer, sleeping the caller until one arrives. |
 | 3 | `SYS_LIST` | RDI = buffer, RSI = size | number of names, or -1 | Writes the root directory's file names into the buffer, newline-separated. |
 | 4 | `SYS_RUN` | RDI = filename pointer | 0 on success, -1 on failure | Loads and starts the named program as a new task. |
 | 5 | `SYS_READFILE` | RDI = filename, RSI = buffer, RDX = size | bytes read, or -1 | Reads a whole file into the buffer. |
@@ -64,10 +64,22 @@ nowhere for an exit to go, so it stops the machine, the same terminal state the
 exception handlers use.
 
 `SYS_READKEY` is the consumer end of the keyboard ring buffer (`drivers/keyboard.c`,
-documented in [shell.md](shell.md)). It is **non-blocking**: on an empty buffer it
-returns 0 immediately rather than sleeping the caller, because the kernel has no
-task-sleeping. A caller polls it in a loop (`TODO(blocking-readkey)`). 0 is a safe
-"nothing waiting" sentinel because a real 0 never enters the buffer.
+documented in [shell.md](shell.md)). It is **blocking**: on an empty buffer the
+kernel parks the calling task and the keyboard IRQ wakes it when a key arrives, so
+the call costs nothing while it waits and there is no reason to poll it. From ring
+3 the wait is invisible, one `int 0x50` that took a while to come back, and the
+call always returns a real character. It used to return 0 immediately on an empty
+buffer and be polled in a loop, which burned every slice the caller was given; see
+[blocking.md](blocking.md) and
+[decision 0017](../decisions/0017-blocking-and-sleep.md).
+
+It is also the only syscall so far that does not return through the dispatcher.
+The blocking path rewinds the saved `rip` onto the `int` so the woken task
+re-issues the call, and the CPU reads the syscall number from `rax` when it does,
+so nothing may write `rax` on that path. `sys_readkey` therefore takes the
+register pile and writes `regs->rax` itself, only on the path that has an answer,
+rather than returning a value for the dispatcher to store. Since `SYS_EXIT` is 0,
+a stray `return 0` here would halt the machine on the next keypress.
 
 `SYS_LIST`, `SYS_RUN`, and `SYS_READFILE` are the shell's data calls. `SYS_LIST`
 fills a buffer through `fat32_list_names`; `SYS_READFILE` fills one through
@@ -151,10 +163,10 @@ check above and fault a ring-3 read; that is why the old build forced them into 
 
 ## What a run looks like
 
-The machine boots into `SHELL.ELF`, which prints a prompt and loops on
-`SYS_READKEY`, echoing with `SYS_WRITE`, tokenizing each line, and dispatching the
-commands in [shell.md](shell.md). Booted under QEMU and driven with a scripted key
-sequence, it behaves like this:
+The machine boots into `SHELL.ELF`, which prints a prompt and blocks in
+`SYS_READKEY`, echoing each key with `SYS_WRITE`, tokenizing each line, and
+dispatching the commands in [shell.md](shell.md). Booted under QEMU and driven
+with a scripted key sequence, it behaves like this:
 
 ```
 > help
@@ -181,8 +193,9 @@ tick A's `SYS_WRITE` output interleaves with the live prompt, which is the
 scheduler running the shell and A together. Over the session `-d int` shows only
 timer (`v=40`), keyboard (`v=41`), and syscall (`v=50`) vectors, all at `cpl=3` for
 the ring-3 traps, with no `#GP` (0x0D), no `#PF` (0x0E), no double fault (0x08), no
-triple fault, and no disk IRQ (0x4E). The idle shell's busy-wait on `SYS_READKEY`
-is why `v=50` dominates the log.
+triple fault, and no disk IRQ (0x4E). `v=50` now appears only when the shell has
+something to do: over a six second idle window at the prompt the kernel services
+three syscalls, down from 362,648 when `SYS_READKEY` was polled.
 
 Passing a kernel address (for example `0x100000`) to `SYS_WRITE` still prints
 `syscall: SYS_WRITE rejected an out-of-bounds pointer` and returns `-1`, and the
@@ -203,3 +216,6 @@ nothing from kernel memory. (`SYS_EXIT` stays implemented; it halts with
 - The shell that uses `SYS_READKEY`/`SYS_LIST`/`SYS_RUN`/`SYS_READFILE`, and the
   keyboard ring buffer behind `SYS_READKEY`: [shell.md](shell.md) and
   [decision 0016](../decisions/0016-interactive-shell.md).
+- How a syscall sleeps its caller and is re-issued on wake:
+  [blocking.md](blocking.md) and
+  [decision 0017](../decisions/0017-blocking-and-sleep.md).

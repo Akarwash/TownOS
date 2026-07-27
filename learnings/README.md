@@ -25,9 +25,10 @@ grab onto.
 > deliberately **not** rewritten; where such a chapter and
 > [`../docs/`](../docs/README.md) disagree on a fact, `../docs/` is the current
 > truth. **Written:** chapters that still hold. **Stubbed:** chapters 08 through 15
-> cover subsystems the kernel grew after the 32-bit era (long mode, the 64-bit
-> GDT/TSS, user mode, syscalls, the scheduler, the heap, per-process paging, the
-> disk driver). Each of these has a factual [`../docs/reference/`](../docs/README.md)
+> and chapter 19 cover subsystems the kernel grew after the 32-bit era (long mode,
+> the 64-bit GDT/TSS, user mode, syscalls, the scheduler, the heap, per-process
+> paging, the disk driver, blocking and sleep). Each of these has a factual
+> [`../docs/reference/`](../docs/README.md)
 > page today but no hand-written teaching chapter yet, so it exists only as a
 > stub: a title, a scope sentence, a status marker, and a link to its reference
 > page. The teaching prose for these is written by hand, later; the stubs mark the
@@ -87,6 +88,7 @@ chapter states are:
 | 16 | The filesystem | [16-the-filesystem.md](16-the-filesystem.md) | written | [../docs/reference/fat32.md](../docs/reference/fat32.md) |
 | 17 | Loading a program (the ELF loader) | [17-loading-a-program.md](17-loading-a-program.md) | written | [../docs/reference/elf-loading.md](../docs/reference/elf-loading.md) |
 | 18 | The shell (interactive, ring 3) | [18-the-shell.md](18-the-shell.md) | written | [../docs/reference/shell.md](../docs/reference/shell.md) |
+| 19 | Blocking and sleep | [19-blocking-and-sleep.md](19-blocking-and-sleep.md) | stubbed | [../docs/reference/blocking.md](../docs/reference/blocking.md) |
 
 Chapters 1, 2, 3, and 5 (frozen-32bit) and chapters 8, 9, and 14 (stubbed)
 overlap on purpose: the frozen chapter teaches the original 32-bit take on boot,
@@ -118,7 +120,7 @@ kernel/paging.c ............ per-process page tables, CR3 switch        → ch.8
 kernel/heap.c .............. kmalloc/kfree (explicit free list)         → ch.13
 kernel/usermode.c .......... drop to ring 3 (forged iretq frame)        → ch.10
 kernel/syscall.c ........... the int 0x50 syscall dispatcher            → ch.11
-kernel/scheduler.c ......... round-robin preemptive scheduler          → ch.12
+kernel/scheduler.c ......... round-robin preemptive scheduler          → ch.12, ch.19
 drivers/screen.c ........... VGA text-mode output                      → ch.4
 drivers/keyboard.c ......... PS/2 keyboard input (IRQ1)                → ch.4
 drivers/disk.c ............. polled ATA PIO disk driver                 → ch.15

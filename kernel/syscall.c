@@ -85,19 +85,44 @@ static uint64_t sys_write(uint64_t user_ptr) {
     return 0;
 }
 
-// SYS_READKEY: pop one character from the keyboard ring buffer, or 0 if none is
-// waiting (drivers/keyboard.c). No pointer crosses the ring boundary here, so
+// SYS_READKEY: pop one character from the keyboard ring buffer, sleeping until one
+// arrives if the buffer is empty. No pointer crosses the ring boundary here, so
 // there is nothing to bounds-check: the character is returned by value in RAX.
 //
-// NON-BLOCKING BY DESIGN. This kernel has no way to sleep a task, so a blocking
-// read (park the caller until a key arrives, wake it from the keyboard IRQ) cannot
-// be built yet. Returning 0 on an empty buffer instead means the shell must
-// busy-wait, calling this in a tight loop until it returns non-zero, burning a
-// timeslice it could have yielded. That is the deliberate tradeoff; a real OS
-// would block the task. TODO(blocking-readkey): block the caller once tasks can
-// sleep, so the shell stops spinning on an empty buffer.
-static uint64_t sys_readkey(void) {
-    return (uint64_t)keyboard_getchar();
+// BLOCKING. On an empty buffer the caller is parked (TASK_BLOCKED, WAIT_KEY) and
+// the CPU goes to another task, or idles if there is none. The keyboard IRQ wakes
+// it once it has a key. The caller cannot tell: from ring 3 this is one `int 0x50`
+// that took a long time to come back.
+//
+// THERE IS NO LOOP HERE, and that is the point. Re-checking the buffer in a loop
+// inside this handler would just move the shell's old busy-wait into ring 0, where
+// it is worse: the kernel would spin with the scheduler unable to run and every
+// other task starved. Instead this function is entered, finds nothing, blocks, and
+// ENDS. What resumes the task is a fresh entry into this same handler later.
+//
+// Unlike this call's own arguments, the "did a key arrive" question is answered by
+// the wake itself: a WAIT_KEY task is only ever woken by a push into the buffer, so
+// the retry finds a key. If a wake ever proved spurious, the retry would simply
+// block again, which is one more clean yield rather than a spin.
+//
+// Writing to regs->rax is done HERE rather than by the dispatcher, and only on the
+// path that actually has an answer. On the blocking path rax must be left holding
+// SYS_READKEY, because task_block rewinds rip onto the `int 0x50` and the CPU takes
+// the syscall number from rax when that instruction runs again. Overwriting it with
+// a return value would make the woken task issue a DIFFERENT call: rax = 0 is
+// SYS_EXIT, so a stray "return 0" here would halt the machine on the next keypress.
+static void sys_readkey(registers_t *regs) {
+    int c = keyboard_getchar();
+    if (c != 0) {
+        regs->rax = (uint64_t)c;
+        return;
+    }
+
+    task_block(regs, WAIT_KEY);
+
+    // Unreachable on the blocking path: task_block redirected the pile through
+    // schedule(), so this kernel entry now belongs to another task and ends at its
+    // iretq. Nothing may be added after this call, least of all a write to rax.
 }
 
 // SYS_LIST: write the root directory's file names into a ring-3 buffer, one per
@@ -191,7 +216,7 @@ void syscall_handler(registers_t *regs) {
             regs->rax = sys_write(regs->rdi);
             break;
         case SYS_READKEY:
-            regs->rax = sys_readkey();
+            sys_readkey(regs);   // writes rax itself, and must not on the block path
             break;
         case SYS_LIST:
             regs->rax = sys_list(regs->rdi, regs->rsi);

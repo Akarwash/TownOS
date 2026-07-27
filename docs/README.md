@@ -23,6 +23,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 | [reference/fat32.md](reference/fat32.md) | The read-only FAT32 filesystem: the on-disk layout, the boot sector fields, cluster-to-block arithmetic, FAT chains and the 28-bit mask, directory entries and 8.3 names, and the read path |
 | [reference/elf-loading.md](reference/elf-loading.md) | The ELF64 program loader: the manifest, the header and program header fields used, validation and the segment bounds check, the load loop and the zero-fill, and the separate user build |
 | [reference/shell.md](reference/shell.md) | The interactive shell (a ring-3 program): the read-match-do loop, the keyboard ring buffer, the four shell syscalls and their pointer checks, the tokenizer, and the command table |
+| [reference/blocking.md](reference/blocking.md) | Blocking and sleep: the blocked state and wait reason, the syscall re-arm that makes a block possible on one shared kernel stack, the `hlt` idle path, and the block/wake pairing rule |
 | [project-status.md](project-status.md) | What works, what was never built, and the natural next steps |
 | [decisions/](decisions/) | Architecture decision records (ADRs) for the load-bearing choices |
 
@@ -44,6 +45,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 - [0014 — A read-only FAT32 filesystem](decisions/0014-read-only-fat32.md) — Give the raw blocks names: parse the boot sector, follow FAT cluster chains, and read a file by 8.3 name, read-only (first FAT copy, root directory, no long filenames), with the image formatted by the host build system.
 - [0015 — Load programs from disk as ELF64 binaries](decisions/0015-elf-program-loading.md) — User programs become separately linked static ELF64 files on the FAT32 image, loaded at runtime by an in-kernel loader that validates every field and bounds-checks every segment address; changing a program no longer means rebuilding the kernel.
 - [0016 — An interactive shell as a ring-3 program](decisions/0016-interactive-shell.md) — The shell becomes a fenced-in ring-3 program (`SHELL.ELF`) that reads commands and runs them using four new syscalls (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`) and a keyboard ring buffer, proving the syscall boundary is complete; the old in-kernel shell is removed.
+- [0017 — Blocking and sleep, by re-arming the syscall](decisions/0017-blocking-and-sleep.md) — Give a task a blocked state and a wait reason, skip blocked tasks in the rotation, and let a task sleep at a syscall boundary by rewinding its saved `rip` onto the `int 0x50` so waking re-issues the call; an idle shell drops from 362,648 syscalls per six seconds to three.
 
 ## Status
 
@@ -57,7 +59,8 @@ disk as ELF64 binaries. The shell itself is one of those ring-3 programs.
   `minios.bin`. `make run` boots it under QEMU: the banner appears, the timer ticks
   on IRQ 0, the keyboard delivers keypresses on IRQ 1, and `SHELL.ELF` runs at
   ring 3, dispatching `list`, `read`, `run`, `help`, `clear`, and `return` through
-  the syscall gate.
+  the syscall gate. With nobody typing, the shell sleeps and the CPU halts between
+  timer ticks rather than spinning.
 
 The full feature list, the things that are still deliberately absent (writing to
 the filesystem, argv, dynamic linking, demand paging), and the natural next steps

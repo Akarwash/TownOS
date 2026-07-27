@@ -51,6 +51,16 @@ static uint32_t current = 0;
 // order and never freed, so this only grows.
 static uint32_t num_tasks = 0;
 
+// Set while schedule() is parked in its all-blocked idle loop (idle_until_runnable
+// below). The idle loop runs with interrupts ENABLED, which is the whole point, so
+// timer ticks keep arriving and keep calling schedule() while we sit there. Those
+// nested calls must do nothing and return: if a nested call parked in the idle loop
+// too, every tick would nest one level deeper on the single shared kernel stack and
+// a long idle would overflow it. With this flag the nesting depth stays at one, the
+// nested tick unwinds back into the hlt loop, and the OUTER call (which owns the
+// live pile we are going to overwrite) is the one that performs the switch.
+static int scheduler_idling = 0;
+
 // Guard against a startup race. The timer starts ticking the instant isr_install
 // runs sti (long before scheduler_start), and each tick calls schedule(). Until
 // task 0 has actually been entered, those early ticks fire in kernel (CPL 0)
@@ -104,6 +114,7 @@ static int task_register(address_space_t *as, uint64_t entry) {
 
     t->id = id;
     t->state = TASK_READY;
+    t->wait_reason = WAIT_NONE;   // only meaningful once the task blocks
     return (int)id;
 }
 
@@ -161,9 +172,157 @@ void scheduler_start(void) {
     enter_user_mode(tasks[0]->regs.rip, tasks[0]->regs.user_rsp);
 }
 
+// Is any task runnable at all? Used only by the idle loop, which asks about the
+// whole table rather than about a position in the rotation.
+static int any_task_ready(void) {
+    for (uint32_t i = 0; i < num_tasks; i++) {
+        if (tasks[i]->state == TASK_READY) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// The round-robin pick. Walk forward from the task after `from`, wrapping, and
+// return the first TASK_READY slot, or -1 if there is none.
+//
+// Testing for TASK_READY (rather than "not UNUSED") is what makes a blocked task
+// invisible to the rotation: it is stepped straight over, however many times the
+// cursor comes round, until whatever it waits for marks it READY again. Candidate
+// num_tasks is `from` itself, so a task that is still runnable keeps the CPU when
+// nothing else wants it, and a task that has just BLOCKED itself does not match
+// and so cannot be handed back the CPU it just gave up.
+static int find_next_ready(uint32_t from) {
+    for (uint32_t i = 1; i <= num_tasks; i++) {
+        uint32_t cand = (from + i) % num_tasks;
+        if (tasks[cand]->state == TASK_READY) {
+            return (int)cand;
+        }
+    }
+    return -1;
+}
+
+// Everyone is blocked. Park the CPU until an interrupt makes someone runnable.
+//
+// INTERRUPTS MUST BE ENABLED HERE. This is the one place in the kernel where that
+// is not just preferable but load-bearing: the ONLY thing that can produce a READY
+// task is an interrupt handler (today the keyboard IRQ waking a WAIT_KEY task), so
+// halting with interrupts masked would mean nothing could ever wake anyone and the
+// machine would be dead, not idle. That is the deadlock to avoid.
+//
+// `hlt` with interrupts enabled is what makes "everyone asleep" cost ZERO CPU
+// rather than spin. The CPU stops executing entirely and draws no power until a
+// hardware interrupt arrives, instead of whirling through a loop that re-reads a
+// variable nothing in this thread can change. Spinning here would be the same
+// mistake as the busy-wait this whole change exists to remove, just moved into the
+// scheduler.
+//
+// `sti; hlt` in one breath is deliberate and must stay adjacent. sti takes effect
+// only AFTER the following instruction, precisely so this pair is atomic: an
+// interrupt cannot slip into the gap, find nothing to wake, and leave us halted
+// forever with the wakeup already spent. The condition is re-read with interrupts
+// off (we enter with IF clear from the interrupt gate, and cli again after each
+// wake), so a wakeup cannot be missed between the test and the halt.
+static void idle_until_runnable(void) {
+    scheduler_idling = 1;
+    while (!any_task_ready()) {
+        __asm__ __volatile__("sti; hlt; cli");
+    }
+    scheduler_idling = 0;
+}
+
+// Length in bytes of the `int 0x50` instruction that brings a task into a syscall.
+// The opcode is CD ib: one byte of opcode, one immediate byte carrying the vector.
+// Named, because a bare 2 buried in pointer arithmetic on a saved rip is unreadable
+// and unsearchable.
+#define INT_INSTR_LEN 2
+
+void task_block(registers_t *r, wait_reason_t reason) {
+    // (1) Take this task out of the rotation and record what it is waiting for, so
+    // the waker for that event can find it again (see scheduler_wake).
+    tasks[current]->state = TASK_BLOCKED;
+    tasks[current]->wait_reason = reason;
+
+    // (2) RE-ARM THE SYSCALL: resume ON the int, not after it, so the woken task
+    // re-issues the syscall.
+    //
+    // This is the heart of the design and the part worth understanding. We cannot
+    // freeze this task where it stands, half way through a C function in the
+    // kernel, and thaw it here later. Two things in this kernel forbid it. The
+    // saved pile holds the rip the CPU pushed on the ring-3 to ring-0 transition,
+    // so it is always a RING-3 address, never a kernel one: restoring a pile can
+    // only ever resume user code. And there is a single kernel stack shared by
+    // every task (tss.rsp0, see gdt.c), so the C frames we are standing on right
+    // now are abandoned the instant we switch away, and the next task to enter the
+    // kernel writes over them.
+    //
+    // So instead of resuming in the middle, we resume at the beginning. The CPU
+    // pushed the address of the instruction AFTER `int 0x50`; winding it back by
+    // the length of that instruction points it at the int itself. When this task is
+    // eventually woken and rescheduled, its iretq lands on the int, the syscall is
+    // issued again from scratch, and this time it finds what it was waiting for
+    // (that is precisely what being woken means) and returns normally.
+    //
+    // This only makes sense because the caller entered through `int 0x50`. A task
+    // that reached here any other way would have its rip wound back into the middle
+    // of whatever instruction happens to precede it, which is garbage. That
+    // invariant is enforced by convention, not by the type system: see the header.
+    r->rip -= INT_INSTR_LEN;
+
+    // (3) Switch away through the SAME routine the timer uses. schedule() saves the
+    // (now rewound) pile into this task, picks a READY task, overwrites the live
+    // pile and loads the new CR3, so the iretq at the end of syscall_common_stub
+    // returns into a different task. The only difference from the timer path is
+    // what prompted the call, which is why one routine serves both: involuntary
+    // preemption and a voluntary block are the same switch.
+    //
+    // No EOI concern here, unlike the timer path: `int 0x50` is a software
+    // interrupt, so the PIC has no in-service bit to acknowledge.
+    //
+    // Interrupt-flag discipline matches the timer path exactly. Both handlers are
+    // reached through interrupt gates, so IF is clear throughout, and the iretq
+    // restores the incoming task's own rflags (IF set) as it returns to ring 3.
+    // Nothing here leaves interrupts disabled across the yield, which matters: the
+    // keyboard IRQ that will wake this task has to be able to fire.
+    schedule(r);
+
+    // Unreachable on the blocking path: schedule() redirected the pile, so this
+    // kernel entry now belongs to another task and ends at that iretq.
+}
+
+void scheduler_wake(wait_reason_t reason) {
+    // The block and the wake are a matched pair, and the pairing rule is that
+    // whoever CAUSES an event wakes the tasks waiting on it. A blocked task cannot
+    // wake itself: it is not running, so it cannot notice anything. That is the
+    // whole point, and it is why this lives here and is called from the driver that
+    // produced the event rather than from anything the sleeper does.
+    //
+    // A linear scan over every task, which is fine at this scale (a handful of
+    // tasks) and is the honest simple thing. A kernel with many blocked tasks would
+    // keep a per-reason wait queue instead and wake off the head in constant time.
+    for (uint32_t i = 0; i < num_tasks; i++) {
+        if (tasks[i]->state == TASK_BLOCKED && tasks[i]->wait_reason == reason) {
+            tasks[i]->state = TASK_READY;
+            tasks[i]->wait_reason = WAIT_NONE;
+        }
+    }
+
+    // Deliberately no context switch here. This runs in interrupt context, where
+    // the live pile belongs to whatever was interrupted, not to the task we just
+    // woke, so switching would be both wrong and unnecessary: the woken task is
+    // back in the rotation and the next tick's schedule() will reach it.
+}
+
 void schedule(registers_t *r) {
     // Ignore ticks that fire before task 0 has been entered (see the flag above).
     if (!scheduler_running) {
+        return;
+    }
+
+    // A tick that landed while the outer call is parked in idle_until_runnable has
+    // nothing useful to do and must not park as well (see scheduler_idling above).
+    // Returning here unwinds it straight back into that hlt loop, which re-checks.
+    if (scheduler_idling) {
         return;
     }
 
@@ -178,22 +337,32 @@ void schedule(registers_t *r) {
 
     // (1) Save the pile the timer interrupted into the current task's slot.
     tasks[current]->regs = *r;
-    tasks[current]->state = TASK_READY;
 
-    // (2) Pick the next TASK_READY slot, round-robin, wrapping around. Starting at
-    // current+1 means we only land back on current (which we just set READY) at
-    // i == num_tasks, i.e. when nothing else is runnable. num_tasks (not the
-    // MAX_TASKS_LIMIT cap) bounds the walk: tasks are created contiguously and
-    // never freed, so slots 0..num_tasks-1 are exactly the live tasks.
-    uint32_t next = current;
-    for (uint32_t i = 1; i <= num_tasks; i++) {
-        uint32_t cand = (current + i) % num_tasks;
-        if (tasks[cand]->state == TASK_READY) {
-            next = cand;
-            break;
-        }
+    // Put the outgoing task back into the rotation ONLY if it was actually running.
+    // This used to be an unconditional TASK_READY, which is now wrong: task_block
+    // marks the current task TASK_BLOCKED and then drives this very function to
+    // switch away, so clobbering the state here would put the task straight back
+    // into the rotation and undo the block on the spot, and the "blocked" task
+    // would be handed the CPU again a tick later having waited for nothing.
+    if (tasks[current]->state == TASK_RUNNING) {
+        tasks[current]->state = TASK_READY;
     }
 
+    // (2) Pick the next TASK_READY slot, round-robin, wrapping around. num_tasks
+    // (not the MAX_TASKS_LIMIT cap) bounds the walk: tasks are created contiguously
+    // and never freed, so slots 0..num_tasks-1 are exactly the live tasks.
+    int picked = find_next_ready(current);
+
+    // (2a) Nothing is runnable: every task is blocked waiting for something. Do not
+    // spin, and do not fall back on a blocked task, which would resume a program in
+    // the middle of a wait it has not finished. Sleep the CPU until an interrupt
+    // makes someone ready, then ask again, which now succeeds.
+    if (picked < 0) {
+        idle_until_runnable();
+        picked = find_next_ready(current);
+    }
+
+    uint32_t next = (uint32_t)picked;
     tasks[next]->state = TASK_RUNNING;
 
     // If the only ready task is the one we interrupted, there is nothing to switch

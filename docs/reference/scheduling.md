@@ -47,10 +47,11 @@ it runs in, a state, and an id:
 
 ```c
 typedef struct {
-    registers_t regs;         // the saved/forged interrupt frame: IS the task
-    address_space_t *aspace;  // this task's private page-table tree
-    uint64_t cr3;             // physical PML4 base to load on switch
-    task_state_t state;       // TASK_UNUSED / TASK_READY / TASK_RUNNING
+    registers_t regs;          // the saved/forged interrupt frame: IS the task
+    address_space_t *aspace;   // this task's private page-table tree
+    uint64_t cr3;              // physical PML4 base to load on switch
+    task_state_t state;        // TASK_UNUSED / READY / RUNNING / BLOCKED
+    wait_reason_t wait_reason; // what it is blocked on, only while BLOCKED
     uint32_t id;
 } task_t;
 ```
@@ -114,14 +115,17 @@ is never preempted: it would own the machine forever and no other task would run
 `schedule(registers_t *r)` (`kernel/scheduler.c`) is the whole scheduler:
 
 ```c
-tasks[current]->regs = *r;             // 1. save interrupted frame
-tasks[current]->state = TASK_READY;
-
-uint32_t next = current;               // 2. round-robin pick
-for (uint32_t i = 1; i <= num_tasks; i++) {
-    uint32_t cand = (current + i) % num_tasks;
-    if (tasks[cand]->state == TASK_READY) { next = cand; break; }
+tasks[current]->regs = *r;                       // 1. save interrupted frame
+if (tasks[current]->state == TASK_RUNNING) {     //    ...but do not undo a block
+    tasks[current]->state = TASK_READY;
 }
+
+int picked = find_next_ready(current);           // 2. round-robin pick, READY only
+if (picked < 0) {                                // 2a. everyone blocked: sleep
+    idle_until_runnable();
+    picked = find_next_ready(current);
+}
+uint32_t next = (uint32_t)picked;
 tasks[next]->state = TASK_RUNNING;
 
 if (next == current) return;           // only one ready: do not switch to self
@@ -131,9 +135,24 @@ __asm__ ("mov %0, %%cr3" :: "r"(tasks[next]->cr3));  // 4. SWITCH ADDRESS SPACES
 ```
 
 Indexing is through the pointer array (`tasks[i]->regs`), and the round-robin
-walk is bounded by `num_tasks` (the count actually created) rather than the old
-fixed `MAX_TASKS`. The save, pick, and overwrite are otherwise identical to the
-pre-heap version; the one addition is step 4, the CR3 load.
+walk in `find_next_ready` is bounded by `num_tasks` (the count actually created)
+rather than the old fixed `MAX_TASKS`. The save, pick, and overwrite are
+otherwise identical to the pre-heap version; the additions are step 4, the CR3
+load, and the two blocking-related changes marked above.
+
+**The save is conditional now.** It used to set `TASK_READY` unconditionally,
+which became wrong once a task could block: `task_block` marks the current task
+`TASK_BLOCKED` and *then* drives this same function to switch away, so an
+unconditional write here would put it straight back into the rotation and undo
+the block on the spot. See [blocking.md](blocking.md).
+
+**The pick tests for `TASK_READY`,** not "not unused", which is what makes a
+blocked task invisible: the cursor steps over it however many times it comes
+round, until whatever it waits for marks it `READY` again. If nothing at all is
+runnable, `find_next_ready` returns -1 and `schedule()` parks in
+`idle_until_runnable`, which sits in `sti; hlt` until an interrupt makes someone
+ready. It does not spin, and it does not fall back on a blocked task, which would
+resume a program in the middle of a wait it has not finished.
 
 **Step 4: load the incoming task's CR3.** With per-process paging, switching the
 register frame is only half the switch: the next task's code and stack live in
@@ -176,9 +195,16 @@ touching the frame, so a lone task simply resumes.
 | `TASK_UNUSED` | Value 0. A freshly `kmalloc`'d `task_t` is set straight to `TASK_READY` by `task_create`, so a live task is never seen in this state; it exists as the zero value. |
 | `TASK_READY` | Runnable, waiting for a slice. Set by `task_create` and by `schedule` when a task is preempted. |
 | `TASK_RUNNING` | Currently on the CPU. Exactly one task at a time. |
+| `TASK_BLOCKED` | Waiting for an event, skipped by the rotation entirely. Set by `task_block`, cleared back to `TASK_READY` by `scheduler_wake`. |
 
-There is no blocked or sleeping state: a task yields the CPU only by being
-preempted, never voluntarily.
+A task therefore yields the CPU two ways: involuntarily, by being preempted on a
+timer tick, or voluntarily, by calling `task_block` at a syscall boundary. Both
+go through this same `schedule()`; only the thing that prompted the call differs.
+A blocked task also carries a `wait_reason_t` saying what it waits for, so the
+right waker can find it. The mechanism, including why a block rewinds the saved
+`rip` onto the `int 0x50` rather than resuming mid-syscall, is in
+[blocking.md](blocking.md) and
+[decision 0017](../decisions/0017-blocking-and-sleep.md).
 
 ## Starting, and the startup race
 
@@ -261,6 +287,9 @@ half (see [paging.md](paging.md)).
   [user-mode.md](user-mode.md).
 - The syscall gate the tasks print through:
   [syscalls.md](syscalls.md).
+- The blocked state, the re-arm, and the wakers:
+  [blocking.md](blocking.md) and
+  [decision 0017](../decisions/0017-blocking-and-sleep.md).
 - The per-task address space the switch loads:
   [paging.md](paging.md).
 - The fixed user virtual layout each task's stack sits in:

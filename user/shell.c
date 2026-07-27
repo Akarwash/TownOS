@@ -136,15 +136,11 @@ static void read_line(void) {
     unsigned int len = 0;
 
     for (;;) {
-        unsigned long k = sys_readkey();
-        if (k == 0) {
-            // Nothing typed yet. BUSY-WAIT: readkey is non-blocking (the kernel
-            // cannot sleep a task yet, TODO(blocking-readkey)), so the shell spins
-            // here until a key arrives. A real OS would block instead of spinning.
-            continue;
-        }
-
-        char c = (char)k;
+        // Blocks until a key is actually available, so this loop turns exactly once
+        // per keystroke and the shell costs nothing while the user is thinking. It
+        // used to spin here, calling a non-blocking read over and over and burning
+        // every slice it was given; the kernel now sleeps the task instead.
+        char c = (char)sys_readkey();
 
         if (c == '\n') {
             sys_write("\n");   // echo the newline that ends the line

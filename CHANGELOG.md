@@ -7,6 +7,60 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- Blocking and sleep in the scheduler, so a task with nothing to do gives up the
+  CPU entirely instead of spinning, and is woken by whatever causes the event it
+  waited for. `task_state_t` gained `TASK_BLOCKED` and `task_t` gained a
+  `wait_reason_t` (`WAIT_NONE`, `WAIT_KEY`): the state takes a task out of the
+  rotation, and the reason is what lets the right waker find it, since a keypress
+  should ready the tasks waiting for a key and leave the others asleep.
+  `schedule()` now picks only `TASK_READY` slots, so a blocked task is stepped
+  over however many times the cursor comes round, and it no longer forces the
+  outgoing task back to `TASK_READY` on save, which would have undone a block on
+  the spot. When nothing at all is runnable it parks in `sti; hlt` (interrupts
+  must be enabled there: an interrupt handler is the only thing that can produce a
+  ready task, so halting with them masked would be a dead machine rather than an
+  idle one, and the two instructions must stay adjacent because `sti` takes effect
+  only after the following instruction, so a wakeup cannot slip into the gap), with
+  a `scheduler_idling` guard so timer ticks landing during the park do not stack up
+  on the single shared kernel stack. A task puts itself to sleep with
+  `task_block(regs, reason)`, which **re-arms the syscall** rather than freezing
+  mid-handler: it winds the saved `rip` back by `INT_INSTR_LEN` (2, the length of
+  `int 0x50`) so the pile points at the int rather than after it, then drives the
+  same `schedule()` the timer drives. A woken task's `iretq` therefore lands on the
+  int, the syscall is issued again from scratch, and this time it finds what it was
+  waiting for, because that is precisely what being woken means. Re-arming rather
+  than resuming in the middle is forced by two facts about this kernel: the saved
+  pile's `rip` is always a ring-3 address, so restoring a pile can never resume
+  inside a C function in the kernel; and `tss.rsp0` points at one static buffer
+  shared by every task, so the C frames a handler stands on are abandoned the
+  moment it switches away. Mid-operation blocking would need a per-task kernel
+  stack, recorded as `TODO(per-task-kernel-stack)`. `scheduler_wake(reason)` marks
+  every task blocked on that reason `TASK_READY` and is called by whatever causes
+  the event, today `keyboard_callback` after it pushes a character (push first,
+  wake second, so a woken task cannot be scheduled before the character it was
+  promised is there); the waker only changes state and does not switch tasks, which
+  keeps it safe to call from interrupt context. `SYS_READKEY` became blocking:
+  `sys_readkey` now takes the register pile, writes `regs->rax` itself on the path
+  that has an answer, and calls `task_block(regs, WAIT_KEY)` on an empty buffer,
+  with no re-check loop anywhere (a loop inside the handler would be the same
+  busy-wait moved into ring 0, where the kernel spins with interrupts masked and
+  every other task starves). Writing `rax` moved out of the dispatcher because the
+  re-armed pile re-executes only the `int`, so the CPU reads the syscall number
+  from whatever `rax` holds, and since `SYS_EXIT` is 0 a stray `return 0` on the
+  blocking path would halt the machine on the next keypress. `user/shell.c` lost
+  its `if (k == 0) continue;` poll, closing `TODO(blocking-readkey)`. Measured
+  under QEMU with `-d int` over a six second window with the shell idle at its
+  prompt and nobody typing, the kernel went from servicing **362,648** `int 0x50`
+  syscalls (a 494MB interrupt log) to **3**: one `SYS_WRITE` for the banner, one
+  for the prompt, and one `SYS_READKEY` that goes to sleep, with the log down to
+  848KB and only timer (`v=40`) and syscall (`v=50`) vectors appearing at all, no
+  page fault (`0x0E`), `#GP` (`0x0D`), double fault (`0x08`), or triple fault. The
+  shell behaves exactly as before (`help`, `list`, `read HELLO.TXT`, `return`, and
+  `run A.ELF` all work, and a launched program interleaves with the now sleeping
+  shell). There is still no timed sleep, so nothing can ask to be woken after a
+  duration and a blocking call has no timeout (`TODO(timed-sleep)`), and wakeup is
+  a linear scan rather than a per-reason wait queue. See
+  `docs/decisions/0017-blocking-and-sleep.md` and `docs/reference/blocking.md`.
 - An interactive shell, built as a ring-3 program (`user/shell.c`, booted off the
   disk as `SHELL.ELF`) rather than kernel code. It reads typed commands and runs
   them using nothing but syscalls, which is the point: a fully fenced-in program,

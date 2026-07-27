@@ -111,6 +111,9 @@ the shell can start one with `run A.ELF`.
   the syscall gate, which is why `-d int` logs `v=50` millions of times over a few
   seconds of idle. It is correct but wasteful, and it is the one obvious thing a
   scheduler with sleeping would fix (`TODO(blocking-readkey)`).
+  **Since closed** by [0017](0017-blocking-and-sleep.md), which gave the scheduler
+  a blocked state and made `SYS_READKEY` sleep the caller. The same idle window now
+  costs three syscalls instead of 362,648.
 
 - **No argv to launched programs.** `SYS_RUN` starts a program with the same empty,
   argument-less frame the loader always forges. The shell can say which program to
