@@ -17,10 +17,14 @@ shell boots alone, and `run A.ELF` starts another task that interleaves with it.
 Each task is a heap-allocated `task_t` with its OWN page-table tree (per-process
 paging): the scheduler loads that task's CR3 on every switch, so two tasks share
 virtual addresses but not physical memory. That is real address-space isolation,
-not a single shared space. See [reference/user-mode.md](reference/user-mode.md),
+not a single shared space. A task with nothing to do leaves the rotation entirely
+rather than spinning: it blocks at a syscall boundary, and whatever causes the
+event it waits for wakes it, so an idle machine halts the CPU instead of burning
+it. See [reference/user-mode.md](reference/user-mode.md),
 [reference/syscalls.md](reference/syscalls.md),
 [reference/shell.md](reference/shell.md),
-[reference/scheduling.md](reference/scheduling.md), and
+[reference/scheduling.md](reference/scheduling.md),
+[reference/blocking.md](reference/blocking.md), and
 [reference/paging.md](reference/paging.md).
 
 This page is a map, not a tutorial. For the concepts behind each subsystem, see
@@ -47,7 +51,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `kernel/gdt.c`, `kernel/gdt.h` | Kernel GDT (null, kernel code/data, user code/data) and 64-bit TSS; selector constants. | Implemented |
 | `kernel/usermode.c`, `kernel/usermode.h` | `enter_user_mode`: forge the `iretq` frame and drop to ring 3. | Implemented |
 | `kernel/syscall.c`, `kernel/syscall.h` | Syscall dispatcher: `syscall_handler` switches on RAX (`SYS_WRITE`, `SYS_EXIT`, `SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`), with `user_range_ok`/`copy_user_string` bounding the untrusted pointers. | Implemented |
-| `kernel/scheduler.c`, `kernel/scheduler.h` | Round-robin scheduler: `task_create_from_file` heap-allocates and forges a task, builds its private address space and loads a program file into it, `schedule` swaps the interrupt frame and loads the next task's CR3, `scheduler_start` enters task 0. | Implemented |
+| `kernel/scheduler.c`, `kernel/scheduler.h` | Round-robin scheduler: `task_create_from_file` heap-allocates and forges a task, builds its private address space and loads a program file into it, `schedule` swaps the interrupt frame and loads the next task's CR3, `scheduler_start` enters task 0. `task_block` puts a task to sleep at a syscall boundary and `scheduler_wake` readies the sleepers on a reason; with nothing runnable, `schedule` parks the CPU in `hlt`. | Implemented |
 | `kernel/paging.c`, `kernel/paging.h` | Per-process paging: `paging_create_address_space` (private tree, kernel half cloned by value), `paging_map_page` (4KB user mappings), `paging_switch` (load CR3). | Implemented |
 | `kernel/elf.c`, `kernel/elf.h` | ELF64 program loader: validate a file, bounds-check and map each `PT_LOAD` segment, copy and zero-fill it, report the entry point. | Implemented |
 | `user/shell.c` | The interactive shell: a ring-3 program (`SHELL.ELF`) that reads a line via `SYS_READKEY`, tokenizes it, and dispatches `list`/`read`/`run`/`help`/`clear`/`return` through syscalls. | Implemented |
@@ -62,7 +66,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `kernel/memory.c`, `kernel/memory.h` | Bitmap physical frame allocator, plus `alloc_frames_contiguous` for multi-page runs. | Implemented |
 | `kernel/heap.c`, `kernel/heap.h` | Kernel heap (`kmalloc`/`kfree`): explicit free list with boundary tags and coalescing, ported from p5, on top of the frame allocator. | Implemented |
 | `drivers/screen.c`, `drivers/screen.h` | VGA text output: `print_char`/`print_string`/`print_int`/`print_hex`, scrolling, cursor. | Implemented |
-| `drivers/keyboard.c`, `drivers/keyboard.h` | PS/2 keyboard driver on IRQ 1: scancode to ASCII, pushed into a ring buffer the IRQ fills and `SYS_READKEY` drains. | Implemented |
+| `drivers/keyboard.c`, `drivers/keyboard.h` | PS/2 keyboard driver on IRQ 1: scancode to ASCII, pushed into a ring buffer the IRQ fills and `SYS_READKEY` drains, then `scheduler_wake(WAIT_KEY)` to rouse a sleeping reader. | Implemented |
 | `drivers/disk.c`, `drivers/disk.h` | Polled ATA PIO disk driver: `disk_init`/`disk_read`/`disk_write` move 512-byte LBA28 blocks on the primary bus. | Implemented |
 | `drivers/ports.c`, `drivers/ports.h` | `in`/`out` port I/O wrappers (byte and word, in and out). | Implemented |
 | `fs/fat32.c`, `fs/fat32.h` | Read-only FAT32: `fat32_init` parses the boot sector, `fat32_list_root` lists the root directory, `fat32_read_file` reads a file by 8.3 name, `fat32_stat` reports a size without reading. | Implemented (read-only; the ELF loader reads programs through it) |
@@ -136,9 +140,13 @@ From power-on to the idle loop:
    resumes a different task in its own address space. The shell loops, reading keys
    through `SYS_READKEY` and running commands through the `int 0x50` gate; a `run
    A.ELF` command calls `SYS_RUN`, which loads a second task that then interleaves
-   with the shell on the timer tick (neither calls `SYS_EXIT`). `scheduler_start`
-   does not return, so the `hlt` idle loop below it is unreachable in this build. See
+   with the shell on the timer tick (neither calls `SYS_EXIT`). With nobody typing,
+   the shell is blocked inside `SYS_READKEY` and, if it is the only task, nothing is
+   runnable, so `schedule()` halts the CPU until the keyboard IRQ wakes it.
+   `scheduler_start` does not return, so the `hlt` idle loop below it is unreachable
+   in this build. See
    [reference/scheduling.md](reference/scheduling.md),
+   [reference/blocking.md](reference/blocking.md),
    [reference/paging.md](reference/paging.md),
    [reference/user-mode.md](reference/user-mode.md), and
    [reference/syscalls.md](reference/syscalls.md).
@@ -155,6 +163,7 @@ task and drive the switch.
 - Interrupts and the IDT: [reference/idt.md](reference/idt.md)
 - Ring 3 and syscalls: [reference/user-mode.md](reference/user-mode.md), [reference/syscalls.md](reference/syscalls.md)
 - The scheduler: [reference/scheduling.md](reference/scheduling.md)
+- Blocking and sleep: [reference/blocking.md](reference/blocking.md)
 - Per-process paging: [reference/paging.md](reference/paging.md)
 - Memory layout: [reference/memory-map.md](reference/memory-map.md)
 - The kernel heap: [reference/heap.md](reference/heap.md)

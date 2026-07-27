@@ -76,7 +76,8 @@ the known limitations. It is a factual snapshot, not a roadmap.
 - System calls (`kernel/syscall.c`, `include/syscalls.h`): the ring-3 programs
   call back into the kernel through one `int 0x50` gate, the only DPL 3 gate in
   the IDT. Six calls: `SYS_WRITE` prints a string; `SYS_EXIT` halts; `SYS_READKEY`
-  pops one key from the keyboard ring buffer (non-blocking); `SYS_LIST` writes the
+  pops one key from the keyboard ring buffer, sleeping the caller until one
+  arrives; `SYS_LIST` writes the
   root directory's names into a caller buffer; `SYS_RUN` loads and starts a named
   program; `SYS_READFILE` reads a whole file into a caller buffer. The dispatcher
   switches on RAX and returns its result in RAX; an unknown number is rejected, not
@@ -87,8 +88,9 @@ the known limitations. It is a factual snapshot, not a roadmap.
   [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
 - An interactive shell (`user/shell.c`, booted as `SHELL.ELF`): a ring-3 program,
   loaded off the disk like any other, that reads typed commands and runs them using
-  only syscalls. It reads a line a key at a time through `SYS_READKEY` (busy-waiting,
-  echoing, with backspace), tokenizes it in place with a reentrant `next_token`, and
+  only syscalls. It reads a line a key at a time through `SYS_READKEY` (blocking, so
+  it costs nothing while the user is thinking, echoing, with backspace), tokenizes
+  it in place with a reentrant `next_token`, and
   dispatches the custom commands `list`, `read`, `run`, `help`, `clear`, and
   `return` (deliberately not the Unix names). The keyboard IRQ was reduced to a
   producer that only pushes a decoded character into a 128-slot ring buffer; the old
@@ -109,6 +111,16 @@ the known limitations. It is a factual snapshot, not a roadmap.
   [reference/scheduling.md](reference/scheduling.md),
   [decisions/0008-round-robin-preemptive-scheduler.md](decisions/0008-round-robin-preemptive-scheduler.md),
   and [decisions/0011-dynamic-tasks-and-stacks.md](decisions/0011-dynamic-tasks-and-stacks.md).
+- Blocking and sleep (`kernel/scheduler.c`): a task with nothing to do leaves the
+  rotation instead of spinning. `TASK_BLOCKED` plus a `wait_reason_t` takes it out
+  of the round-robin walk; `task_block` puts it to sleep at a syscall boundary by
+  rewinding its saved `rip` onto the `int 0x50`, so waking re-issues the call
+  (there is no per-task kernel stack to resume into); `scheduler_wake(reason)`
+  readies the sleepers and is called by whatever causes the event, today the
+  keyboard IRQ. With nothing runnable, `schedule()` halts the CPU rather than
+  spinning. An idle shell went from 362,648 syscalls per six seconds to three. See
+  [reference/blocking.md](reference/blocking.md) and
+  [decisions/0017-blocking-and-sleep.md](decisions/0017-blocking-and-sleep.md).
 - Per-process paging (`kernel/paging.c`): each task has its own page-table tree,
   loaded into CR3 on every context switch, so two tasks use the same virtual
   addresses (code `0x400000`, stack top `0x800000`) backed by different physical
@@ -139,7 +151,9 @@ under QEMU by a scripted key session: the prompt appears at boot, `help`/`list`/
 `read`/`return`/`run`/unknown-command all behave, `run A.ELF` starts A.ELF whose
 output interleaves with the live prompt, and `-d int` over the session shows only
 timer, keyboard, and syscall vectors with no page fault, `#GP`, double fault, triple
-fault, or disk IRQ. See [building.md](building.md).
+fault, or disk IRQ. Left alone at the prompt the shell blocks in `SYS_READKEY` and
+the machine sits in `hlt` between timer ticks, servicing three syscalls over six
+idle seconds. See [building.md](building.md).
 
 ## What was never built
 
@@ -248,14 +262,22 @@ commands and runs them through four syscalls (`SYS_READKEY`, `SYS_LIST`, `SYS_RU
 so the fixed program list in `kernel_main` is gone. See
 [decisions/0016-interactive-shell.md](decisions/0016-interactive-shell.md).
 
+**Blocking and sleep.** Done. A task can leave the rotation and be woken by the
+event it waits for, so an idle machine halts rather than spins: an idle shell
+dropped from 362,648 syscalls per six seconds to three. The mechanism is a block
+at a syscall boundary that rewinds the saved `rip` onto the `int 0x50`, so waking
+re-issues the call. See
+[decisions/0017-blocking-and-sleep.md](decisions/0017-blocking-and-sleep.md).
+
 **Filesystem writing, then real processes.** Next. Writing is the other direction
 across the same filesystem and is independent of the loader: free-cluster search,
 chain and directory updates, mirroring every FAT copy, and crash ordering
 (`TODO(fat32-write)`). Real processes are the other axis, and the shell now makes
 the gaps concrete: argv on the new stack so `run` can pass arguments, a `SYS_EXIT`
-that returns to the shell instead of halting, reclaiming a dead task's frames, and
-a blocking `SYS_READKEY` so the shell sleeps instead of busy-waiting
-(`TODO(blocking-readkey)`).
+that returns to the shell instead of halting, and reclaiming a dead task's frames.
+Blocking is the rung those stand on: a parent waiting for a child is the same
+shape as the keyboard wait, a new `wait_reason_t` and a waker in the right place
+rather than a new mechanism. The same is true of pipes and of waiting on the disk.
 
 ## Known limitations
 
@@ -271,21 +293,27 @@ a blocking `SYS_READKEY` so the shell sleeps instead of busy-waiting
   check still only tests the start pointer against the fixed region constants.
   Recorded as a TODO in `kernel/syscall.c`. Do not read the region check as real
   pointer safety. See [reference/syscalls.md](reference/syscalls.md).
-- **The scheduler still has no blocking, sleeping, or task exit.** Task structs
+- **The scheduler still has no task exit, and blocking is narrow.** Task structs
   are heap-allocated and each task now has its own address space with a private
   stack (per-process paging), so the old fixed four-task ceiling and the shared
   user-stack region are both gone: a stack overflow faults in the offending task
-  instead of corrupting a neighbour. What remains: there is no blocking or
-  sleeping (a task yields only by being preempted), which is why the shell
-  busy-waits on `SYS_READKEY` instead of sleeping until a key arrives
-  (`TODO(blocking-readkey)`); no task exit that returns anywhere (`SYS_EXIT` halts
-  the machine); and no reclamation (a task's frames and tree are never freed, since
-  tasks are never destroyed). Memory is also used
+  instead of corrupting a neighbour. Blocking exists, but only at a syscall entry
+  point and only for a handler whose work can be redone from the top, because a
+  block rewinds the caller onto its `int 0x50` rather than resuming mid-handler;
+  blocking part way through a multi-block disk transfer would need
+  `TODO(per-task-kernel-stack)`. There is also no timed sleep, so nothing can ask
+  to be woken after a duration and a blocking call has no timeout
+  (`TODO(timed-sleep)`), and wakeup is a linear scan rather than a per-reason wait
+  queue. What remains beyond that: no task exit that returns anywhere (`SYS_EXIT`
+  halts the machine); and no reclamation (a task's frames and tree are never freed,
+  since tasks are never destroyed). Memory is also used
   wastefully: the read-only user text is copied in full per task rather than
   shared (`TODO(shared-text)`). See
   [reference/scheduling.md](reference/scheduling.md),
-  [reference/paging.md](reference/paging.md), and
-  [decisions/0012-per-process-paging.md](decisions/0012-per-process-paging.md).
+  [reference/blocking.md](reference/blocking.md),
+  [reference/paging.md](reference/paging.md),
+  [decisions/0012-per-process-paging.md](decisions/0012-per-process-paging.md), and
+  [decisions/0017-blocking-and-sleep.md](decisions/0017-blocking-and-sleep.md).
 - **Disk transfers freeze the machine.** The disk driver polls, so the CPU spins
   in the wait loops for the whole transfer and nothing else runs, including the
   scheduler: the timer tick cannot preempt a task while a block is moving. This is

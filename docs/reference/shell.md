@@ -43,9 +43,11 @@ Filenames are 8.3 and case-insensitive, so `read hello.txt` finds `HELLO.TXT`.
    `return` are handled with `SYS_WRITE` alone.
 4. Reprint the prompt and loop.
 
-Because `SYS_READKEY` is non-blocking (see below), step 1 is a busy-wait: the shell
-spins on the syscall until a key arrives. That is the deliberate cost of having no
-task-sleeping in the kernel (`TODO(blocking-readkey)`).
+Step 1 costs nothing while the user is thinking. `SYS_READKEY` blocks (see below),
+so the read loop turns exactly once per keystroke and the shell is asleep the rest
+of the time. It used to be a busy-wait, spinning on the syscall until a key
+arrived, because the kernel had no way to sleep a task; see
+[blocking.md](blocking.md).
 
 ## The keyboard ring buffer
 
@@ -56,13 +58,24 @@ consumer is `SYS_READKEY`. They are connected by a fixed circular buffer in
 **The producer.** The keyboard IRQ (`keyboard_callback`) runs with interrupts
 masked and must be short, so it does the least possible work: it reads one
 scancode, ignores key-release events, decodes the make code to ASCII, and pushes
-the character into the ring buffer. It does not echo and does not run any command.
-Before the shell became a ring-3 program, this callback called
-`shell_handle_keypress` and did the whole line edit and dispatch inside the
-interrupt; the ring buffer is what keeps that out of interrupt context now.
+the character into the ring buffer, then wakes any task asleep waiting for a key.
+It does not echo and does not run any command. Before the shell became a ring-3
+program, this callback called `shell_handle_keypress` and did the whole line edit
+and dispatch inside the interrupt; the ring buffer is what keeps that out of
+interrupt context now.
+
+**The wake, and its ordering.** The IRQ is what *causes* the event a sleeping
+reader waits for, so waking is its job: a blocked task cannot notice a key
+arriving, because it is not running. `kbd_buffer_push` comes first and
+`scheduler_wake(WAIT_KEY)` second, and the order matters. A task woken before the
+character was in the buffer could be scheduled, re-issue its read, find nothing,
+and go back to sleep, turning one keypress into a wasted round trip. The wake only
+marks tasks ready, it does not switch to them, which keeps this handler short. See
+[blocking.md](blocking.md).
 
 **The consumer.** `SYS_READKEY` (`kernel/syscall.c`) calls `keyboard_getchar`,
-which pops one character from the ring, or returns 0 if it is empty.
+which pops one character from the ring, or returns 0 if it is empty. That 0 never
+reaches ring 3: it is the signal for the handler to block the caller.
 
 **The two indices.** `write_index` is the slot the next produced character goes
 into; `read_index` is the slot the next consumed character comes out of. They chase
@@ -96,14 +109,15 @@ in `user/userlib.h`.
 
 | Number | Name | Arguments | Returns |
 |--------|------|-----------|---------|
-| 2 | `SYS_READKEY` | none | one character, or 0 if none waiting |
+| 2 | `SYS_READKEY` | none | one character (never 0) |
 | 3 | `SYS_LIST` | RDI = buffer, RSI = size | number of names, or -1 |
 | 4 | `SYS_RUN` | RDI = filename pointer | 0 on success, -1 on failure |
 | 5 | `SYS_READFILE` | RDI = filename, RSI = buffer, RDX = size | bytes read, or -1 |
 
-- **`SYS_READKEY`** pops one buffered key (above). Non-blocking: it returns 0
-  immediately on an empty buffer rather than sleeping the caller, because there is
-  no task-sleeping. `TODO(blocking-readkey)`.
+- **`SYS_READKEY`** pops one buffered key (above). Blocking: on an empty buffer the
+  kernel parks the calling task, and the keyboard IRQ wakes it when it pushes a
+  character. From ring 3 the wait is invisible, so the call always returns a real
+  character. See [blocking.md](blocking.md).
 - **`SYS_LIST`** walks the FAT32 root directory (through `fat32_list_names`, the
   buffer-filling sibling of `fat32_list_root`) and writes the file names into the
   caller's buffer, one per line, NUL-terminated. Names that do not all fit are
@@ -177,4 +191,6 @@ launches it. See [../building.md](../building.md).
 - The filesystem `SYS_LIST` and `SYS_READFILE` read through:
   [fat32.md](fat32.md), [decision 0014](../decisions/0014-read-only-fat32.md).
 - The scheduler a launched program joins: [scheduling.md](scheduling.md).
+- The sleep behind a blocking `SYS_READKEY`: [blocking.md](blocking.md),
+  [decision 0017](../decisions/0017-blocking-and-sleep.md).
 - The decision behind all of this: [decision 0016](../decisions/0016-interactive-shell.md).
