@@ -159,7 +159,11 @@ static uint64_t sys_run(uint64_t user_name) {
         print_string("syscall: SYS_RUN rejected a bad filename pointer\n");
         return SYSCALL_ERROR;
     }
-    if (task_create_from_file(name) < 0) {
+    // The caller becomes the new task's parent, which is what later lets it wait
+    // for the program it started. The id has to be taken HERE, inside the syscall,
+    // because `current` is only the requesting task while its own syscall is being
+    // served; by the next timer tick it means somebody else.
+    if (task_create_from_file(name, scheduler_current_id()) < 0) {
         print_string("syscall: SYS_RUN could not start ");
         print_string(name);
         print_string("\n");

@@ -56,7 +56,11 @@ void kernel_main(uint64_t multiboot_info_addr) {
     // to run. A bad file on the disk is not a reason to take the kernel down.
     uint32_t started = 0;
     for (uint32_t i = 0; i < USER_PROGRAM_COUNT; i++) {
-        if (task_create_from_file(user_programs[i]) >= 0) {
+        // TASK_NO_PARENT: kernel_main started this, not another task. There is no
+        // task in existence yet that could be its parent, so nothing will ever
+        // call SYS_WAIT on it and its tombstone is dropped by the sweeper rather
+        // than collected. See task_exit and reap_sweep in kernel/scheduler.c.
+        if (task_create_from_file(user_programs[i], TASK_NO_PARENT) >= 0) {
             started++;
         }
     }

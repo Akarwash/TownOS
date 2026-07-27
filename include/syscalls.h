@@ -13,11 +13,12 @@
 // follow in RDI, RSI, RDX (System V order); the return value comes back in RAX.
 // The vector the program raises is SYSCALL_VECTOR (0x50) from include/vectors.h.
 
-#define SYS_EXIT     0   // no args; stop the machine (no scheduler to return to)
+#define SYS_EXIT     0   // RDI = exit status (masked to 0..255); ends the calling task. Never returns.
 #define SYS_WRITE    1   // RDI = pointer to a NUL-terminated string; print it
 #define SYS_READKEY  2   // no args; return one buffered key in RAX, or 0 if none
 #define SYS_LIST     3   // RDI = buffer, RSI = size; list root dir names, return count
 #define SYS_RUN      4   // RDI = filename ptr; load and start it, return 0 or -1
 #define SYS_READFILE 5   // RDI = filename ptr, RSI = buffer, RDX = size; return bytes read
+#define SYS_WAIT     6   // no args; block until any child exits; RAX = that child's exit status, or SYSCALL_ERROR if the caller has no children
 
 #endif

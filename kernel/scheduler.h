@@ -27,7 +27,10 @@ typedef enum {
     TASK_UNUSED = 0,   // slot never filled (.bss zero-init lands here)
     TASK_READY,        // runnable, waiting for its slice
     TASK_RUNNING,      // currently on the CPU
-    TASK_BLOCKED       // waiting for an event, skipped by the rotation entirely
+    TASK_BLOCKED,      // waiting for an event, skipped by the rotation entirely
+    TASK_ZOMBIE        // exited; off the rotation for good. Heavy resources may already
+                       // be freed; the struct survives only as a tombstone holding
+                       // exit_status until the parent reads it.
 } task_state_t;
 
 // WHAT a blocked task is waiting for, so the right waker can find it. A task with
@@ -35,14 +38,26 @@ typedef enum {
 // IRQ has to be able to pick out the tasks waiting for a KEY and leave alone the
 // ones waiting for something else. The reason is that discriminator.
 //
-// One real reason today. The enum (rather than a bare flag) is the seam where the
-// next reasons slot in as the kernel grows: WAIT_CHILD when a parent waits on a
-// process to exit, WAIT_DISK when a task waits on a block to arrive. Each new
-// reason gets a waker at whatever causes that event.
+// Two reasons today, and they show the shape generalises: the waker does not have
+// to be a driver. WAIT_KEY is woken by the keyboard IRQ, an outside event arriving;
+// WAIT_CHILD is woken by task_exit, another TASK reaching a point in its own life.
+// Both are "a task cannot proceed until something else happens", which is why one
+// mechanism serves both. The enum (rather than a bare flag) is still the seam where
+// the next reason slots in: WAIT_DISK when a task waits on a block to arrive. Each
+// new reason gets a waker at whatever causes that event.
 typedef enum {
     WAIT_NONE = 0,     // not waiting for anything (the only valid value when READY)
-    WAIT_KEY           // waiting for a keypress, woken by the keyboard IRQ
+    WAIT_KEY,          // waiting for a keypress, woken by the keyboard IRQ
+    WAIT_CHILD         // waiting for a child to exit, woken by task_exit
 } wait_reason_t;
+
+// The parent id of a task nobody started: task 0, which kernel_main creates before
+// any task exists to be its parent. It is deliberately an impossible id rather than
+// a valid one (0 would mean "task 0 is its own parent", and reaping would then look
+// for a tombstone reader that is really itself). parent_alive rejects it outright,
+// so an exiting task with no parent is reaped by the sweeper rather than waiting
+// forever for a wait() that nobody can issue.
+#define TASK_NO_PARENT  0xFFFFFFFFu
 
 // One task is its saved register pile plus a little bookkeeping. The pile is the
 // context to restore; the address space is the memory the task runs in. Each task
@@ -51,11 +66,36 @@ typedef enum {
 // stack of its own (see the limitations in the ADR).
 typedef struct {
     registers_t regs;         // the saved/forged interrupt frame: IS the task
-    address_space_t *aspace;  // this task's private page-table tree
-    uint64_t cr3;             // physical PML4 base to load on switch (== aspace->pml4_phys)
+
+    // This task's private page-table tree, and the CR3 value that loads it.
+    //
+    // BOTH BECOME ZERO ONCE THE TASK HAS BEEN SWEPT. A task that exits is left as a
+    // TASK_ZOMBIE, and the reap sweeper (scheduler.c) later frees its whole tree and
+    // then sets `aspace = NULL` and `cr3 = 0`, because the memory those two fields
+    // described has gone back to the frame pool and will be handed to somebody else.
+    // Leaving a stale pointer here would be a use-after-free waiting to be loaded
+    // into CR3. NULL is also the flag the two freeing paths (the sweeper and
+    // task_wait) test to decide whether the tree still needs tearing down, so
+    // whichever runs first wins and the other does nothing.
+    address_space_t *aspace;  // private page-table tree, NULL once swept
+    uint64_t cr3;             // physical PML4 base to load on switch (== aspace->pml4_phys), 0 once swept
+
     task_state_t state;
     wait_reason_t wait_reason;  // meaningful only while state == TASK_BLOCKED
     uint32_t id;
+
+    // Who called SYS_RUN to create this task, or TASK_NO_PARENT. This is what makes
+    // the task table a forest rather than a flat list, and it is read by exactly two
+    // things: task_wait, to find the caller's children, and the sweeper, to decide
+    // whether a zombie still has somebody who might read its exit status.
+    uint32_t parent_id;
+
+    // The status this task passed to SYS_EXIT, masked to 0..255. MEANINGFUL ONLY
+    // WHILE state == TASK_ZOMBIE: before the exit it is 0 and means nothing, and
+    // after the parent has read it the struct is freed. The mask is what keeps a
+    // status distinguishable from the SYSCALL_ERROR (-1) that SYS_WAIT returns when
+    // the caller has no children at all.
+    int32_t exit_status;
 } task_t;
 
 // Forge a never-run task from a program FILE: read `name` (an 8.3 filename such
@@ -66,11 +106,18 @@ typedef struct {
 // address space is private, every task's stack sits at the SAME virtual address
 // on different physical frames.
 //
+// `parent_id` is the task that asked for this one (SYS_RUN passes the caller's id
+// via scheduler_current_id), or TASK_NO_PARENT for a task the kernel started
+// itself before there was any task to be its parent. It is recorded now because it
+// cannot be recovered later: it is what lets the creator wait for this task to
+// exit, and what tells the sweeper whether anybody is still going to read this
+// task's exit status.
+//
 // Returns the task id, or -1 if the file is missing, is not a program this
 // kernel accepts, or the heap or frame pool is out of memory. A failed load
 // creates no task and must not disturb the ones that succeeded. Implemented in
 // scheduler.c.
-int task_create_from_file(const char *name);
+int task_create_from_file(const char *name, uint32_t parent_id);
 
 // Pick task 0 and enter it. Does not return (control only ever comes back into
 // the kernel through an interrupt, where schedule() runs).
@@ -97,6 +144,46 @@ void task_block(registers_t *r, wait_reason_t reason);
 // the rotation and the next ordinary schedule() picks it up. That keeps the wake
 // safe to call from interrupt context, where switching would be wrong.
 void scheduler_wake(wait_reason_t reason);
+
+// End the current task with `status` and switch away for good. `r` is the live
+// on-stack pile of the SYS_EXIT the caller is serving.
+//
+// CALLABLE ONLY FROM A SYSCALL HANDLER, for the same reason task_block is: it
+// hands `r` straight to schedule(), which overwrites that pile in place with
+// another task's, so `r` must be the live interrupt frame the stub is about to pop
+// rather than a copy. Reached any other way it would redirect a frame nobody is
+// going to iretq from.
+//
+// Unlike task_block this does NOT rewind rip: the task is never going to run
+// again, so there is nothing to re-issue. It does paperwork only (status, state,
+// waking a waiting parent) and frees NOTHING, because the dying task's page tables
+// are still loaded in CR3 at this moment; the freeing happens later, from the
+// sweeper in schedule(), once the switch has moved CR3 off this task's tree.
+//
+// Does not return in any useful sense: control leaves through the redirected
+// iretq into a different task, and this kernel entry is over.
+void task_exit(registers_t *r, int status);
+
+// Block the caller until one of its children exits, and deliver that child's exit
+// status in `r->rax`. If a child has ALREADY exited this returns immediately with
+// its status; if the caller has no children at all it returns SYSCALL_ERROR rather
+// than blocking forever on something that can never happen.
+//
+// CALLABLE ONLY FROM A SYSCALL HANDLER, and for a sharper reason than task_exit:
+// on the waiting path this calls task_block, which rewinds the saved rip by the
+// length of `int 0x50` so the woken task re-issues SYS_WAIT. A caller that arrived
+// any other way would have its rip wound back into the middle of whatever precedes
+// it. It also inherits task_block's rule that the handler's work must be safe to
+// redo from the top, which it is: the scan is a pure read of the task table.
+//
+// This is any-child, not waitpid: it takes no argument and reaps whichever child
+// exited first. See docs/decisions/0018-process-lifecycle-exit-and-wait.md.
+void task_wait(registers_t *r);
+
+// The id of the task currently on the CPU. Exists so a syscall handler can record
+// who made a request (SYS_RUN stamps the new task's parent_id with it) without
+// scheduler.c having to export the whole task table.
+uint32_t scheduler_current_id(void);
 
 // The switch itself, called from the timer IRQ with a pointer to the live pile.
 // Only TASK_READY tasks are candidates: a blocked task is skipped entirely, and if

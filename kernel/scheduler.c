@@ -76,8 +76,13 @@ static int scheduler_running = 0;
 // only thing that differs between a compiled-in program and one loaded from a
 // file is where `entry` came from: a linker symbol, or an ELF header.
 //
+// `parent_id` is stamped on the new task and never changes. It is recorded at
+// creation because it cannot be recovered afterwards, and two things read it: the
+// parent's SYS_WAIT, to find its children, and the reap sweeper, to decide whether
+// a zombie still has anybody who might read its exit status.
+//
 // Returns the task id, or -1 if the heap is full or the task table is.
-static int task_register(address_space_t *as, uint64_t entry) {
+static int task_register(address_space_t *as, uint64_t entry, uint32_t parent_id) {
     if (num_tasks >= MAX_TASKS_LIMIT) {
         return -1;                          // bookkeeping array full (arbitrary cap)
     }
@@ -115,10 +120,12 @@ static int task_register(address_space_t *as, uint64_t entry) {
     t->id = id;
     t->state = TASK_READY;
     t->wait_reason = WAIT_NONE;   // only meaningful once the task blocks
+    t->parent_id = parent_id;     // who to wake and who may read the status below
+    t->exit_status = 0;           // only meaningful once the task is a TASK_ZOMBIE
     return (int)id;
 }
 
-int task_create_from_file(const char *name) {
+int task_create_from_file(const char *name, uint32_t parent_id) {
     // Same shape as task_create, and deliberately so: private address space,
     // user half filled, stack mapped, frame forged. The ONLY differences are
     // where the program's bytes come from (a file on the disk rather than a
@@ -139,7 +146,15 @@ int task_create_from_file(const char *name) {
         return -1;
     }
 
-    return task_register(as, entry);
+    return task_register(as, entry, parent_id);
+}
+
+uint32_t scheduler_current_id(void) {
+    // `current` is file-static on purpose: nothing outside this file may index the
+    // task table. A syscall handler still needs to know WHO is asking (SYS_RUN
+    // stamps the new task's parent_id with it), so the id is exported and the table
+    // is not.
+    return current;
 }
 
 void scheduler_start(void) {
