@@ -26,8 +26,23 @@
 typedef enum {
     TASK_UNUSED = 0,   // slot never filled (.bss zero-init lands here)
     TASK_READY,        // runnable, waiting for its slice
-    TASK_RUNNING       // currently on the CPU
+    TASK_RUNNING,      // currently on the CPU
+    TASK_BLOCKED       // waiting for an event, skipped by the rotation entirely
 } task_state_t;
+
+// WHAT a blocked task is waiting for, so the right waker can find it. A task with
+// nothing to do is not enough on its own: when a keypress arrives, the keyboard
+// IRQ has to be able to pick out the tasks waiting for a KEY and leave alone the
+// ones waiting for something else. The reason is that discriminator.
+//
+// One real reason today. The enum (rather than a bare flag) is the seam where the
+// next reasons slot in as the kernel grows: WAIT_CHILD when a parent waits on a
+// process to exit, WAIT_DISK when a task waits on a block to arrive. Each new
+// reason gets a waker at whatever causes that event.
+typedef enum {
+    WAIT_NONE = 0,     // not waiting for anything (the only valid value when READY)
+    WAIT_KEY           // waiting for a keypress, woken by the keyboard IRQ
+} wait_reason_t;
 
 // One task is its saved register pile plus a little bookkeeping. The pile is the
 // context to restore; the address space is the memory the task runs in. Each task
@@ -39,6 +54,7 @@ typedef struct {
     address_space_t *aspace;  // this task's private page-table tree
     uint64_t cr3;             // physical PML4 base to load on switch (== aspace->pml4_phys)
     task_state_t state;
+    wait_reason_t wait_reason;  // meaningful only while state == TASK_BLOCKED
     uint32_t id;
 } task_t;
 
@@ -61,6 +77,9 @@ int task_create_from_file(const char *name);
 void scheduler_start(void);
 
 // The switch itself, called from the timer IRQ with a pointer to the live pile.
+// Only TASK_READY tasks are candidates: a blocked task is skipped entirely, and if
+// nothing at all is runnable this idles the CPU (see the hlt idle in scheduler.c)
+// rather than spinning or resuming a task that is still waiting.
 void schedule(registers_t *r);
 
 #endif
