@@ -395,13 +395,33 @@ void scheduler_wake(wait_reason_t reason) {
     // back in the rotation and the next tick's schedule() will reach it.
 }
 
+// The two labels a reap report can carry, WHICH PATH DID THE FREEING. They are not
+// cosmetic. Two different pieces of code can tear a dead task's address space down
+// (see task_wait for why there are two), and in every ordinary test it is the
+// parent's SYS_WAIT, every single time: the sweeper's own free path is reached only
+// when a zombie's parent is gone, which needs a fixture built for it
+// (user/tests/D.c). Without the label the two are indistinguishable on screen, so
+// "the sweeper freed it" and "something else got there first" look identical and
+// the only test of that code cannot tell whether it passed.
+//
+// Padded to the same width so the numbers after them line up in a column. A free
+// frame count that drifts is the failure this reporting exists to catch, and a
+// drift is obvious in an aligned column and easy to miss in a ragged one.
+#define REAP_BY_WAIT     "reap (wait):    "
+#define REAP_BY_SWEEPER  "reap (sweeper): "
+
 // Called at the moment a dead task's address space has just gone back to the pools,
-// from whichever of the two teardown paths got there first (see task_wait for why
-// there are two). It is a function rather than a line in each path so the two
-// cannot drift into reporting different things.
-static void lifecycle_report_reap(uint32_t id, int32_t status) {
+// by whichever of the two teardown paths got there first. It is a function rather
+// than a line in each path so the two cannot drift into reporting different things.
+//
+// CALL IT ONLY WHERE THE FREE ACTUALLY HAPPENED. Both paths guard on
+// `aspace != NULL`, so for any one task exactly one of them does real work and the
+// other finds nothing to do; a report from the second would name a path that freed
+// nothing and print a free frame count that says so, which is worse than silence.
+static void lifecycle_report_reap(char *by, uint32_t id, int32_t status) {
 #if LIFECYCLE_DEBUG
-    print_string("reap: task ");
+    print_string(by);
+    print_string("task ");
     print_int(id);
     print_string(" exited (status ");
     print_int((uint32_t)status);
@@ -409,6 +429,7 @@ static void lifecycle_report_reap(uint32_t id, int32_t status) {
     print_int((uint32_t)frame_free_count());
     print_string("\n");
 #else
+    (void)by;
     (void)id;
     (void)status;
 #endif
@@ -441,6 +462,14 @@ static int parent_alive(uint32_t parent_id) {
 // (the task_t and its slot) are freed by the parent at wait time, because they hold
 // the exit status the parent has not read yet. Splitting them is what lets the
 // memory come back promptly without losing the answer to "how did it end".
+//
+// HOW TO ACTUALLY REACH THE FREE BELOW: `run d.elf`. In every ordinary case the
+// parent's SYS_WAIT gets here first (task_wait explains why it nearly always wins
+// the race), so this loop finds the zombie already stripped and does nothing, and a
+// test that only runs normal programs never executes a line of it. D.ELF exists to
+// break that: it starts E.ELF and exits without waiting, leaving E with a dead
+// parent and nobody who can ever collect it. Watch for `reap (sweeper):` rather
+// than `reap (wait):` in the output. See user/tests/README.md.
 static void reap_sweep(void) {
     for (uint32_t i = 0; i < num_tasks; i++) {
         task_t *t = tasks[i];
@@ -465,7 +494,7 @@ static void reap_sweep(void) {
             paging_destroy_address_space(t->aspace);
             t->aspace = NULL;   // the tree is gone: never load or free it twice
             t->cr3 = 0;         // and never let this stale value reach CR3
-            lifecycle_report_reap(t->id, t->exit_status);
+            lifecycle_report_reap(REAP_BY_SWEEPER, t->id, t->exit_status);
         }
 
         // An orphan loses its tombstone. With nobody left to call SYS_WAIT, the
@@ -577,7 +606,7 @@ void task_wait(registers_t *r) {
             paging_destroy_address_space(t->aspace);
             t->aspace = NULL;
             t->cr3 = 0;
-            lifecycle_report_reap(t->id, status);
+            lifecycle_report_reap(REAP_BY_WAIT, t->id, status);
         }
 
         kfree(t);

@@ -85,7 +85,8 @@ USER_LDFLAGS = -T $(USER_LD_SCRIPT) -Wl,-z,max-page-size=4096 -Wl,--build-id=non
 # the kernel works and would be pointless on a machine anybody used. They build
 # identically and land on the same disk; the split is about what a reader should
 # conclude when one of them looks strange. See user/tests/README.md.
-USER_PROGRAMS = user/tests/A.ELF user/tests/B.ELF user/tests/C.ELF user/SHELL.ELF
+USER_PROGRAMS = user/tests/A.ELF user/tests/B.ELF user/tests/C.ELF \
+                user/tests/D.ELF user/tests/E.ELF user/SHELL.ELF
 
 user/%.ELF: user/%.c user/userlib.h $(USER_LD_SCRIPT) include/syscalls.h include/vectors.h
 	$(CC) $(USER_CFLAGS) $(USER_LDFLAGS) -o $@ $<
