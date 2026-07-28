@@ -27,6 +27,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 | [reference/elf-loading.md](reference/elf-loading.md) | The ELF64 program loader: the manifest, the header and program header fields used, validation and the segment bounds check, the load loop and the zero-fill, and the separate user build |
 | [reference/shell.md](reference/shell.md) | The interactive shell (a ring-3 program): the read-match-do loop, the keyboard ring buffer, the five shell syscalls and their pointer checks, the tokenizer, and the command table |
 | [reference/blocking.md](reference/blocking.md) | Blocking and sleep: the blocked state and wait reason, the syscall re-arm that makes a block possible on one shared kernel stack, the `hlt` idle path, and the block/wake pairing rule |
+| [reference/keyboard.md](reference/keyboard.md) | The PS/2 keyboard driver: scancode set 1 and the release bit, the two translation tables, shift and caps-lock state and the XOR that combines them, the ring buffer, the `WAIT_KEY` wake, and the extended-scancode gap |
 | [project-status.md](project-status.md) | What works, what was never built, and the natural next steps |
 | [decisions/](decisions/) | Architecture decision records (ADRs) for the load-bearing choices |
 
@@ -50,6 +51,7 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 - [0016 — An interactive shell as a ring-3 program](decisions/0016-interactive-shell.md) — The shell becomes a fenced-in ring-3 program (`SHELL.ELF`) that reads commands and runs them using four new syscalls (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`) and a keyboard ring buffer, proving the syscall boundary is complete; the old in-kernel shell is removed.
 - [0017 — Blocking and sleep, by re-arming the syscall](decisions/0017-blocking-and-sleep.md) — Give a task a blocked state and a wait reason, skip blocked tasks in the rotation, and let a task sleep at a syscall boundary by rewinding its saved `rip` onto the `int 0x50` so waking re-issues the call; an idle shell drops from 362,648 syscalls per six seconds to three.
 - [0018 — Process lifecycle: exit, wait, and two-phase death](decisions/0018-process-lifecycle-exit-and-wait.md) — Let a task end: `SYS_EXIT` takes a status and does paperwork only (mark `TASK_ZOMBIE`, wake the parent), a sweeper in `schedule()` frees the address space of any zombie that is not the running task, and the parent frees the tombstone at `SYS_WAIT`; `run` now waits and reports an exit status.
+- [0019 — Keyboard modifier state in the driver](decisions/0019-keyboard-modifier-state-in-the-driver.md) — Track shift and caps lock in `drivers/keyboard.c` and keep resolved ASCII in the ring buffer, rather than pushing raw scancodes for ring 3 to decode; uppercase and the shifted symbols become typeable, and a modifier press pushes nothing and wakes nobody.
 
 ## Status
 

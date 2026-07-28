@@ -5,10 +5,22 @@
 #include "../include/vectors.h"
 
 #define KEYBOARD_DATA_PORT 0x60
+
+// Scancode set 1 packs press and release into one byte: bit 7 clear is a press,
+// bit 7 set is the release of the key whose code is in the low seven bits.
 #define KEY_RELEASE_MASK   0x80
+#define KEY_CODE_MASK      0x7F
+
+#define KEY_LSHIFT         0x2A
+#define KEY_RSHIFT         0x36
+#define KEY_CAPSLOCK       0x3A
 
 // US QWERTY scan code (set 1) to ASCII. Index = scan code, 0 = unmapped/ignored.
-// Key releases (bit 7 set) are handled before this table is consulted.
+// Key releases (bit 7 set) are handled before either table is consulted.
+//
+// THE TWO TABLES ARE KEPT ADJACENT AND IDENTICALLY LAID OUT, one row of eight per
+// line with the same index comments, so that a wrong entry shows up as a column
+// that does not line up rather than as a character nobody can type.
 static const char scancode_to_ascii[128] = {
     0,    0,   '1',  '2',  '3',  '4',  '5',  '6',   // 0x00 - 0x07
     '7',  '8', '9',  '0',  '-',  '=',  '\b', '\t',  // 0x08 - 0x0F
@@ -20,6 +32,37 @@ static const char scancode_to_ascii[128] = {
     0,    ' ', 0,    0,    0,    0,    0,    0,      // 0x38 - 0x3F  (0x38 alt, 0x39 space)
     /* remaining entries default to 0 */
 };
+
+// The same keys with shift held. Same indices, same unmapped entries: a key that
+// produces nothing plain produces nothing shifted either, and the keys that are not
+// characters at all (backspace, tab, enter, space, keypad *) are unchanged, because
+// shift does not change what they mean.
+static const char scancode_to_ascii_shift[128] = {
+    0,    0,   '!',  '@',  '#',  '$',  '%',  '^',   // 0x00 - 0x07
+    '&',  '*', '(',  ')',  '_',  '+',  '\b', '\t',  // 0x08 - 0x0F
+    'Q',  'W', 'E',  'R',  'T',  'Y',  'U',  'I',   // 0x10 - 0x17
+    'O',  'P', '{',  '}',  '\n', 0,    'A',  'S',   // 0x18 - 0x1F  (0x1C enter, 0x1D ctrl)
+    'D',  'F', 'G',  'H',  'J',  'K',  'L',  ':',   // 0x20 - 0x27
+    '"',  '~', 0,    '|',  'Z',  'X',  'C',  'V',   // 0x28 - 0x2F  (0x2A lshift)
+    'B',  'N', 'M',  '<',  '>',  '?',  0,    '*',   // 0x30 - 0x37  (0x36 rshift)
+    0,    ' ', 0,    0,    0,    0,    0,    0,      // 0x38 - 0x3F  (0x38 alt, 0x39 space)
+    /* remaining entries default to 0 */
+};
+
+// ---------------------------------------------------------------------------
+// Modifier state.
+// ---------------------------------------------------------------------------
+// Held here in the driver, not sent to ring 3. The ring buffer carries resolved
+// ASCII, so a program reads 'A' and never learns that a shift key was involved.
+// See docs/decisions/0019-keyboard-modifier-state-in-the-driver.md for why, and
+// for what that costs (arrow keys, key repeat, per-program key handling).
+//
+// The difference between the two is that shift is a state of the hardware and caps
+// lock is a state of the driver: shift_held tracks whether a physical key is down
+// right now, so it is set on press and cleared on release, while caps_on is a flag
+// the press of caps lock toggles and nothing clears.
+static int shift_held = 0;
+static int caps_on    = 0;
 
 // ---------------------------------------------------------------------------
 // The keyboard ring buffer: a fixed circular queue between the keyboard IRQ
@@ -80,6 +123,29 @@ int keyboard_getchar(void) {
     return (int)(unsigned char)c;
 }
 
+// Which of the two tables decodes this scancode, given the modifier state.
+//
+// Shift applies to every key. Caps lock applies to letters and to nothing else,
+// which is why the two are not simply OR'd together.
+//
+// THE XOR IS DELIBERATE AND READS LIKE A BUG. For a letter the shifted table is
+// chosen when shift_held differs from caps_on, so with caps lock on, holding shift
+// gives a LOWERCASE letter. That is what every real keyboard does — shift means
+// "the other case", not "upper case" — and writing it as `shift_held || caps_on`
+// would make shift+A with caps on produce 'A', which is wrong and which nobody
+// would notice until they tried it.
+//
+// Whether a key is a letter is asked of the UNSHIFTED table, where letters are
+// spelled a..z. The shifted table would answer the same question correctly today,
+// but only because its letters are the same keys; the plain table is the one where
+// "is this a letter" is a property of the key rather than a coincidence.
+static const char *table_for(uint8_t scancode) {
+    char plain = scancode_to_ascii[scancode];
+    int is_letter = (plain >= 'a' && plain <= 'z');
+    int use_shifted = is_letter ? (shift_held != caps_on) : shift_held;
+    return use_shifted ? scancode_to_ascii_shift : scancode_to_ascii;
+}
+
 // The producer. An interrupt handler runs with interrupts held off (the gate is an
 // interrupt gate, so the CPU cleared IF on entry), so it must be short: decode one
 // scancode, drop the character into the ring buffer, and return. It must NOT echo
@@ -87,16 +153,46 @@ int keyboard_getchar(void) {
 // SYS_READKEY and decides what to do with each key. (Before the shell became a
 // ring-3 program this called shell_handle_keypress and did real work inside the
 // IRQ, which is exactly what the ring buffer now keeps out of interrupt context.)
+//
+// EXTENDED SCANCODES ARE NOT HANDLED, and this is where they would go. The arrow
+// keys, right ctrl, right alt and a few others send 0xE0 first and the real code
+// second. 0xE0 has bit 7 set, so the release branch below swallows it, and the byte
+// after it is then decoded as if it were an ordinary key. That is harmless today
+// only by luck: the arrows' codes (0x48, 0x4B, 0x4D, 0x50) fall past the populated
+// part of the table and decode to 0, and the two that do land on entries (keypad
+// enter, keypad slash) happen to produce the character they should. Handling this
+// properly means a "saw 0xE0" flag and a third table, and it belongs with whatever
+// first needs an arrow key. `TODO(extended-scancodes)`.
 static void keyboard_callback(registers_t *regs) {
     (void)regs;
     uint8_t scancode = port_byte_in(KEYBOARD_DATA_PORT);
 
-    // Ignore key-release events (high bit set).
+    // A release. MASK BIT 7 OFF BEFORE COMPARING: the release of left shift arrives
+    // as 0xAA, not 0x2A, so comparing the raw byte would never match and shift would
+    // turn on and stay on forever. Every other release is still ignored.
     if (scancode & KEY_RELEASE_MASK) {
+        uint8_t released = scancode & KEY_CODE_MASK;
+        if (released == KEY_LSHIFT || released == KEY_RSHIFT) {
+            shift_held = 0;
+        }
         return;
     }
 
-    char c = scancode_to_ascii[scancode];
+    // Modifier presses change state and produce no character. Returning here is
+    // what keeps them out of the ring buffer AND away from scheduler_wake below:
+    // a shift press that woke every task blocked on WAIT_KEY would have them all
+    // re-issue SYS_READKEY, find an empty buffer, and block again, which is exactly
+    // the busy-wait that blocking exists to remove.
+    if (scancode == KEY_LSHIFT || scancode == KEY_RSHIFT) {
+        shift_held = 1;
+        return;
+    }
+    if (scancode == KEY_CAPSLOCK) {
+        caps_on = !caps_on;
+        return;
+    }
+
+    char c = table_for(scancode)[scancode];
     if (c != 0) {
         kbd_buffer_push(c);
 

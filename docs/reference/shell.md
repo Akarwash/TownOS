@@ -25,6 +25,13 @@ The names are MiniOS's own and deliberately not the Unix ones.
 An empty line does nothing. Any other first word prints `unknown command: <word>`.
 Filenames are 8.3 and case-insensitive, so `read hello.txt` finds `HELLO.TXT`.
 
+**Command names are case-SENSITIVE and filenames are not.** `str_eq` compares
+bytes, so `RUN a.elf` prints `unknown command: RUN`, while `run A.ELF` and
+`run a.elf` both work because the FAT32 layer uppercases the name before looking
+it up. This is only reachable now that shift exists (see
+[keyboard.md](keyboard.md)); it is left as it is, because the shell's commands are
+its own vocabulary and matching them loosely buys nothing.
+
 ## The read-match-do loop
 
 `_start` (`user/shell.c`) prints a prompt and then loops:
@@ -36,6 +43,13 @@ Filenames are 8.3 and case-insensitive, so `read hello.txt` finds `HELLO.TXT`.
    is guarded so it cannot chew back into the prompt. The line buffer is fixed at
    `SHELL_LINE_MAX` (128); once full, further printable characters are dropped
    rather than overflowed.
+
+   **What can be typed** is the whole of printable US-layout ASCII: shift and caps
+   lock are handled in the driver, so uppercase letters and the shifted symbols
+   (`!@#$%^&*()_+{}|:"<>?~`) all arrive as ordinary characters. Arrow keys and
+   function keys do not arrive at all, so there is no line history and no cursor
+   movement within the line — backspace is the only edit. See
+   [keyboard.md](keyboard.md).
 2. **Tokenize.** `next_token` splits the line on spaces, in place. The first token
    is the command; a second token, where a command takes one, is the argument.
 3. **Match and do.** A chain of string compares dispatches to one of the commands
@@ -57,9 +71,11 @@ consumer is `SYS_READKEY`. They are connected by a fixed circular buffer in
 
 **The producer.** The keyboard IRQ (`keyboard_callback`) runs with interrupts
 masked and must be short, so it does the least possible work: it reads one
-scancode, ignores key-release events, decodes the make code to ASCII, and pushes
-the character into the ring buffer, then wakes any task asleep waiting for a key.
-It does not echo and does not run any command. Before the shell became a ring-3
+scancode, updates the shift and caps-lock state if that is what the scancode was,
+decodes the make code to ASCII through one of two tables, and pushes the character
+into the ring buffer, then wakes any task asleep waiting for a key. A modifier key
+does none of that and returns early, pushing nothing and waking nobody
+([keyboard.md](keyboard.md)). It does not echo and does not run any command. Before the shell became a ring-3
 program, this callback called `shell_handle_keypress` and did the whole line edit
 and dispatch inside the interrupt; the ring buffer is what keeps that out of
 interrupt context now.
