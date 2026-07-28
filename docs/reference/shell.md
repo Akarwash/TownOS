@@ -17,13 +17,20 @@ The names are MiniOS's own and deliberately not the Unix ones.
 |---------|----------|--------|
 | `list` | none | List the files in the root directory. |
 | `read` | a filename | Print that file's contents. |
-| `run` | a filename | Load and start that program. |
+| `run` | a filename | Run that program and wait for it to finish, then report its exit status. |
 | `help` | none | Print the command list. |
 | `clear` | none | Clear the screen (scroll it away with newlines). |
 | `return` | text | Print the text back. |
 
 An empty line does nothing. Any other first word prints `unknown command: <word>`.
 Filenames are 8.3 and case-insensitive, so `read hello.txt` finds `HELLO.TXT`.
+
+**Command names are case-SENSITIVE and filenames are not.** `str_eq` compares
+bytes, so `RUN a.elf` prints `unknown command: RUN`, while `run A.ELF` and
+`run a.elf` both work because the FAT32 layer uppercases the name before looking
+it up. This is only reachable now that shift exists (see
+[keyboard.md](keyboard.md)); it is left as it is, because the shell's commands are
+its own vocabulary and matching them loosely buys nothing.
 
 ## The read-match-do loop
 
@@ -36,6 +43,13 @@ Filenames are 8.3 and case-insensitive, so `read hello.txt` finds `HELLO.TXT`.
    is guarded so it cannot chew back into the prompt. The line buffer is fixed at
    `SHELL_LINE_MAX` (128); once full, further printable characters are dropped
    rather than overflowed.
+
+   **What can be typed** is the whole of printable US-layout ASCII: shift and caps
+   lock are handled in the driver, so uppercase letters and the shifted symbols
+   (`!@#$%^&*()_+{}|:"<>?~`) all arrive as ordinary characters. Arrow keys and
+   function keys do not arrive at all, so there is no line history and no cursor
+   movement within the line — backspace is the only edit. See
+   [keyboard.md](keyboard.md).
 2. **Tokenize.** `next_token` splits the line on spaces, in place. The first token
    is the command; a second token, where a command takes one, is the argument.
 3. **Match and do.** A chain of string compares dispatches to one of the commands
@@ -57,9 +71,11 @@ consumer is `SYS_READKEY`. They are connected by a fixed circular buffer in
 
 **The producer.** The keyboard IRQ (`keyboard_callback`) runs with interrupts
 masked and must be short, so it does the least possible work: it reads one
-scancode, ignores key-release events, decodes the make code to ASCII, and pushes
-the character into the ring buffer, then wakes any task asleep waiting for a key.
-It does not echo and does not run any command. Before the shell became a ring-3
+scancode, updates the shift and caps-lock state if that is what the scancode was,
+decodes the make code to ASCII through one of two tables, and pushes the character
+into the ring buffer, then wakes any task asleep waiting for a key. A modifier key
+does none of that and returns early, pushing nothing and waking nobody
+([keyboard.md](keyboard.md)). It does not echo and does not run any command. Before the shell became a ring-3
 program, this callback called `shell_handle_keypress` and did the whole line edit
 and dispatch inside the interrupt; the ring buffer is what keeps that out of
 interrupt context now.
@@ -101,9 +117,9 @@ guard.
 table maps every unmapped key to 0 and the producer only pushes non-zero
 characters, so a real 0 never enters the ring.
 
-## The four syscalls
+## The five syscalls
 
-All four follow the calling convention in [syscalls.md](syscalls.md): RAX carries
+All five follow the calling convention in [syscalls.md](syscalls.md): RAX carries
 the number in and the result out, arguments in RDI/RSI/RDX. The ring-3 wrappers are
 in `user/userlib.h`.
 
@@ -113,6 +129,7 @@ in `user/userlib.h`.
 | 3 | `SYS_LIST` | RDI = buffer, RSI = size | number of names, or -1 |
 | 4 | `SYS_RUN` | RDI = filename pointer | 0 on success, -1 on failure |
 | 5 | `SYS_READFILE` | RDI = filename, RSI = buffer, RDX = size | bytes read, or -1 |
+| 6 | `SYS_WAIT` | none | a child's exit status (0..255), or -1 |
 
 - **`SYS_READKEY`** pops one buffered key (above). Blocking: on an empty buffer the
   kernel parks the calling task, and the keyboard IRQ wakes it when it pushes a
@@ -124,15 +141,70 @@ in `user/userlib.h`.
   dropped from the end. Returns the count.
 - **`SYS_RUN`** copies the filename into the kernel and calls
   `task_create_from_file`, which loads the program into a fresh address space and
-  registers it with the scheduler. The launched program joins the round-robin and
-  interleaves with the shell; the shell keeps running. A missing or malformed
-  program is reported and skipped, so a failed run returns -1 and never faults the
-  kernel.
+  registers it with the scheduler, recording the shell as its parent. The launched
+  program joins the round-robin. A missing or malformed program is reported and
+  skipped, so a failed run returns -1 and never faults the kernel.
+- **`SYS_WAIT`** blocks until any child of the shell exits and returns that child's
+  exit status. This is what makes `run` a command rather than a detach: `cmd_run`
+  calls it straight after a successful `SYS_RUN`, so the prompt does not reappear
+  until the program is finished. The shell costs no CPU while it waits, and the
+  program's output appears during the wait. See
+  [decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md).
 - **`SYS_READFILE`** reads a whole file (through `fat32_read_file`) into the
   caller's buffer and returns the byte count. The bytes are raw and not
   NUL-terminated; the shell terminates them before printing the buffer as a
   string. `read` needs this because the shell is ring 3 and cannot call
   `fat32_read_file` itself.
+
+### `read` and files that do not fit
+
+The shell's file buffer is `SHELL_FILE_MAX` (32768) bytes and it asks
+`SYS_READFILE` for at most 32767 of them, holding one back for the NUL it appends
+before printing.
+
+**A file larger than that is not read at all.** `fat32_read_file` compares the
+directory entry's size against the buffer size before reading a cluster and returns
+`-1` if the file is bigger, so `SYS_READFILE` fails and `read` prints:
+
+```
+> read huge.txt
+read: cannot read huge.txt
+```
+
+`HUGE.TXT` is 40981 bytes and is on the disk for exactly this reason: the Makefile
+generates it and copies it on every `make run`. Before it, nothing on the disk was
+over 16KB and this path had never once run.
+
+Refusing rather than truncating is defensible on its own — a caller gets the whole
+file or an error, never a prefix it has no way to recognise as a prefix — but at
+the shell it is indistinguishable from "no such file" and from a disk error, which
+produce the same line.
+
+**`read` also carries a truncation notice, and it is unreachable.** After printing
+the contents, `cmd_read` checks whether the returned count filled the buffer
+exactly and, if so, prints:
+
+```
+read: showing the first 32767 bytes, the file may be longer
+```
+
+That was written for a `SYS_READFILE` that fills the buffer and stops. It does not.
+The count can only equal 32767 for a file of *exactly* 32767 bytes, which is
+complete — so the single case that reaches the notice is the one case where the
+notice is wrong. `TODO(read-truncation)`: either the read path truncates and
+reports the file's true size, or the notice goes. Both change `SYS_READFILE`'s
+contract and every caller of it, so neither is a small edit.
+
+**The child must exit.** There is no way to kill a task and there are no signals,
+so a program with an unbounded loop leaves the shell blocked in `SYS_WAIT` forever
+and the only way back is a reboot. That is why every program under `user/` runs a
+fixed number of rounds and calls `sys_exit` at the bottom.
+
+**Printing the status needs a number printer.** There is no libc and the only way
+out is `SYS_WRITE`, which takes a string, so `user/shell.c` has a small
+`print_uint` that builds the digits backwards into a stack buffer. Its `do`/`while`
+is deliberate: a plain `while (value)` prints nothing for zero, which is the most
+common status there is.
 
 **The untrusted pointers.** Every pointer these take comes from ring 3 and is
 checked before the kernel touches it. Buffers go through `user_range_ok`, which
@@ -174,6 +246,68 @@ compiles a single freestanding translation unit and links no kernel objects, so
 would be dead code there. See
 [decision 0016](../decisions/0016-interactive-shell.md).
 
+## What there is to run
+
+The shell is the only program the machine is *for*. Everything else on the disk is
+a kernel test fixture: a ring-3 program that exists to prove a piece of the kernel
+works, kept in `user/tests/` and documented one paragraph each in
+[user/tests/README.md](../../user/tests/README.md). They land in the disk's root
+directory alongside `SHELL.ELF`, because `fs/fat32.c` can only look up a bare 8.3
+name in the root, so `run a.elf` finds them (the lookup is case-insensitive).
+
+| Program | What it does | Exit status | What it proves |
+|---------|--------------|-------------|----------------|
+| `A.ELF` | prints `A` 20 times | 0 | the ordinary case, and a real `.bss` for the loader's zero-fill |
+| `B.ELF` | prints `B` 60 times | 0 | a second, longer binary for the loader and the interleave |
+| `C.ELF` | prints `C` 40 times | 3 | a non-zero status survives the trip back to the prompt |
+| `D.ELF` | starts `E.ELF`, exits without waiting | 0 | orphans E; see below |
+| `E.ELF` | prints `E` 15 times | 7 | the orphan nobody reaps |
+
+### What `run d.elf` demonstrates
+
+D and E exist together to reach code that no other test can. In every ordinary
+case a child is reaped by its parent's `SYS_WAIT` before the scheduler's sweeper
+ever sees it: the exiting child wakes its parent and switches straight to it, so
+the parent re-enters `SYS_WAIT` before a timer tick has gone by. That leaves the
+free path inside `reap_sweep`, and the branch of `parent_alive` that answers "no",
+unreachable. A zombie whose parent is already dead is the only way in — hence D,
+whose entire program is that it does *not* call `sys_wait`.
+
+```
+> run d.elf
+D: starting E
+run: started d.elf
+D: not waiting, exiting
+reap (sweeper): task 1 exited (status 0), free frames: 30520
+run: d.elf exited with status 0
+> EEEEEEEEEEEEEEE
+reap (sweeper): task 2 exited (status 7), free frames: 30592
+```
+
+Four things to read out of that:
+
+- **The prompt comes back while E is still printing.** The shell waited for D, not
+  for E, and stays usable throughout — typing while the E's arrive buffers the keys
+  normally.
+- **E's line says `reap (sweeper):`, not `reap (wait):`.** The label names the path
+  that freed the address space, and the two are otherwise indistinguishable on
+  screen. If E's line ever says `reap (wait):`, something collected a zombie that
+  should have had no reader.
+- **Nobody reads E's status 7.** By the time E exits its parent's slot is NULL, so
+  the sweeper drops the tombstone rather than keeping a fact nobody can ask for.
+  Seven is distinctive purely so it would be obvious, not plausible, if it ever
+  turned up at the prompt.
+- **The free frame count comes back to the baseline** — 30592 here — from a path
+  that had never executed before.
+
+One timing quirk worth knowing: if the machine is completely idle when the orphan
+exits (nothing runnable, the shell blocked in `SYS_READKEY`), the sweeper's line
+does not appear until the next wake event, such as a keypress. `schedule()` returns
+at its idling guard before `reap_sweep` runs, and during the idle loop the zombie is
+still `current`, which the sweeper skips by design. The memory comes back on the
+next scheduling event, so this is deferred, not leaked. See
+[scheduling.md](scheduling.md).
+
 ## Building and running the shell
 
 `user/shell.c` is built exactly like the other user programs (`-mcmodel=small`,
@@ -190,7 +324,9 @@ launches it. See [../building.md](../building.md).
   [decision 0015](../decisions/0015-elf-program-loading.md).
 - The filesystem `SYS_LIST` and `SYS_READFILE` read through:
   [fat32.md](fat32.md), [decision 0014](../decisions/0014-read-only-fat32.md).
-- The scheduler a launched program joins: [scheduling.md](scheduling.md).
+- The scheduler a launched program joins, and how it leaves again:
+  [scheduling.md](scheduling.md),
+  [decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md).
 - The sleep behind a blocking `SYS_READKEY`: [blocking.md](blocking.md),
   [decision 0017](../decisions/0017-blocking-and-sleep.md).
 - The decision behind all of this: [decision 0016](../decisions/0016-interactive-shell.md).

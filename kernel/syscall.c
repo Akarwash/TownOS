@@ -6,10 +6,6 @@
 #include "../fs/fat32.h"
 #include "../include/syscalls.h"
 
-// The value returned to ring 3 on any rejected or unknown request. Written into
-// the saved frame's RAX, so iretq delivers it as the caller's return value.
-#define SYSCALL_ERROR  ((uint64_t)-1)
-
 // The longest filename SYS_RUN and SYS_READFILE will copy in from ring 3. An 8.3
 // name needs at most 12 characters plus a terminator; 16 leaves a little slack.
 // The cap is what stops an unterminated user string from walking off the region.
@@ -159,9 +155,27 @@ static uint64_t sys_run(uint64_t user_name) {
         print_string("syscall: SYS_RUN rejected a bad filename pointer\n");
         return SYSCALL_ERROR;
     }
-    if (task_create_from_file(name) < 0) {
-        print_string("syscall: SYS_RUN could not start ");
+    // The caller becomes the new task's parent, which is what later lets it wait
+    // for the program it started. The id has to be taken HERE, inside the syscall,
+    // because `current` is only the requesting task while its own syscall is being
+    // served; by the next timer tick it means somebody else.
+    if (task_create_from_file(name, scheduler_current_id()) < 0) {
+        // REPORT THE FREE FRAME COUNT, not just the failure. A create can fail after
+        // it has already built a page-table tree and mapped part of a program into
+        // it, so "it did not start" and "it did not cost anything" are different
+        // claims and only the first one is obvious from the screen. This number is
+        // what makes the second one checkable: run a name that does not exist ten
+        // times over and every count must be the same. A count that steps down each
+        // time means a failure path is stranding an address space, which is what
+        // this kernel did until docs/decisions/0018's teardown was wired into
+        // task_create_from_file. Guarded by LIFECYCLE_DEBUG (kernel/scheduler.h)
+        // alongside the reap reports, since it is the same measurement.
+        print_string("run failed: ");
         print_string(name);
+#if LIFECYCLE_DEBUG
+        print_string(", free frames: ");
+        print_int((uint32_t)frame_free_count());
+#endif
         print_string("\n");
         return SYSCALL_ERROR;
     }
@@ -195,14 +209,33 @@ static uint64_t sys_readfile(uint64_t user_name, uint64_t user_buf, uint64_t buf
     return read_size;
 }
 
-// SYS_EXIT: there is no scheduler and no parent to return to, so "exit" can only
-// mean stop the machine. Halt with interrupts disabled, the same terminal state
-// the exception handlers use.
-static void sys_exit(void) {
-    print_string("syscall: SYS_EXIT, halting.\n");
-    for (;;) {
-        __asm__ __volatile__("cli; hlt");
-    }
+// SYS_EXIT: end the calling task with the status in RDI.
+//   RDI = exit status, masked to 0..255 by task_exit.
+// This used to halt the machine, because there was no way for a task to stop
+// without stopping everything: no parent to return to and no way to reclaim what
+// the task held. Now it is a real exit. The task is marked TASK_ZOMBIE and leaves
+// the rotation permanently, its parent is woken if it was waiting, and its memory
+// is returned to the pools later by the scheduler's sweeper, from a tick that is no
+// longer standing on the dying task's page tables.
+//
+// Does not return: task_exit ends in schedule(), which redirects the register pile
+// into a different task, so this kernel entry finishes at that task's iretq.
+static void sys_exit(registers_t *regs) {
+    task_exit(regs, (int)regs->rdi);
+}
+
+// SYS_WAIT: block until any child of the caller exits, and return its exit status.
+// No arguments: this is any-child, not waitpid, so a parent with several children
+// gets whichever finished first and cannot ask for a particular one. Returns that
+// child's status (0..255), or SYSCALL_ERROR if the caller has no children at all,
+// which is the one case that cannot be answered by waiting.
+//
+// BLOCKING, and therefore subject to the same rule as SYS_READKEY: on the waiting
+// path task_wait leaves RAX alone so the re-armed `int 0x50` still reads SYS_WAIT
+// out of it. RAX is written only on the two paths that have an answer. See the long
+// comment on sys_readkey above, and task_wait in kernel/scheduler.c.
+static void sys_wait(registers_t *regs) {
+    task_wait(regs);
 }
 
 // Dispatch on the call number in RAX. Unknown numbers are reported and rejected
@@ -210,7 +243,7 @@ static void sys_exit(void) {
 void syscall_handler(registers_t *regs) {
     switch (regs->rax) {
         case SYS_EXIT:
-            sys_exit();                     // does not return
+            sys_exit(regs);   // does not return; deliberately not `regs->rax = ...`
             break;
         case SYS_WRITE:
             regs->rax = sys_write(regs->rdi);
@@ -226,6 +259,9 @@ void syscall_handler(registers_t *regs) {
             break;
         case SYS_READFILE:
             regs->rax = sys_readfile(regs->rdi, regs->rsi, regs->rdx);
+            break;
+        case SYS_WAIT:
+            sys_wait(regs);   // writes rax itself, and must not on the block path
             break;
         default:
             print_string("syscall: unknown number ");

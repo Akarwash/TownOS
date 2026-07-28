@@ -2,7 +2,20 @@
 
 ## Status
 
-Accepted.
+Accepted. Partly superseded — the decision stands, two details of the body do not.
+
+- **How the user half is filled** was superseded by
+  [0015](0015-elf-program-loading.md). The body describes `task_create` copying
+  the whole linked ring-3 image (`_user_text_start` to `_user_rodata_end`, all
+  three programs) into every task. Programs are now separate ELF files and
+  `elf_load_file` maps one program's own `PT_LOAD` segments.
+- **Three tasks at boot** was superseded by
+  [0016](0016-interactive-shell.md). `kernel_main` starts `SHELL.ELF` alone;
+  everything else is launched by `run`.
+
+The private tree per task, the by-value kernel-half clone, the 4KB/2MB split and
+the CR3 switch are all unchanged and still describe the code. See
+[reference/paging.md](../reference/paging.md) for the current state.
 
 ## Context
 

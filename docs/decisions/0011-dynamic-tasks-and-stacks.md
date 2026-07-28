@@ -2,7 +2,20 @@
 
 ## Status
 
-Accepted.
+Accepted. Half superseded — the two halves of the title had different fates.
+
+- **Heap-allocated task structs** stand. `kmalloc(sizeof(task_t))` and the flat
+  pointer array are still exactly how tasks are tracked, now in `task_register`
+  rather than `task_create` ([0015](0015-elf-program-loading.md) split that
+  function in two).
+- **Bump-allocated user stacks were superseded outright** by
+  [0012](0012-per-process-paging.md). `alloc_user_stack`, `USER_STACK_REGION_*`
+  and the eight-stack ceiling are gone: every task's stack now sits at the same
+  virtual address (`USER_STACK_TOP`) in its own private tree, on its own frames.
+  The no-guard-page hazard this ADR accepted went with them.
+
+See [reference/scheduling.md](../reference/scheduling.md) and
+[reference/paging.md](../reference/paging.md) for the current state.
 
 ## Context
 

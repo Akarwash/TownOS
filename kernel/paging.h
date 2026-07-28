@@ -47,6 +47,24 @@ address_space_t *paging_create_address_space(void);
 // paging.c. This is the workhorse for the private user half.
 int paging_map_page(address_space_t *as, uint64_t virt, uint64_t phys, uint64_t flags);
 
+// Tear down an address space built by paging_create_address_space: return every
+// frame the task privately owns (its user pages, the page tables beneath the two
+// user PD slots, and its own PML4/PDPT/PD) to the frame pool, then kfree the
+// handle. After this the pointer is dangling and must not be used again.
+//
+// PRECONDITION, AND IT IS THE WHOLE DANGER OF THIS FUNCTION: `as` MUST NOT BE THE
+// ADDRESS SPACE CURRENTLY LOADED IN CR3. Calling this on the live tree hands the
+// frames the CPU is at that very moment translating through back to the free pool.
+// Nothing fails at the call. The frames are then handed out again to some later
+// allocation, which writes over the page tables still in use, and the machine dies
+// somewhere else entirely, on an unrelated line, tens of seconds later. Switch CR3
+// away first (in MiniOS that means letting schedule() move to another task) and
+// only then destroy.
+//
+// It deliberately does NOT free the shared kernel mappings this tree points at:
+// see the comment in paging.c. Implemented in paging.c.
+void paging_destroy_address_space(address_space_t *as);
+
 // Load `as` into CR3, switching the active address space. Writing CR3 flushes the
 // TLB (we use no global pages), so stale translations are dropped automatically.
 void paging_switch(address_space_t *as);

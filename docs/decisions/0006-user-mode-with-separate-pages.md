@@ -2,7 +2,23 @@
 
 ## Status
 
-Accepted.
+Accepted. Partly superseded — the ring-3 drop stands, where the ring-3 code comes
+from does not.
+
+- **`user/user_program.c`, `.user_text`, and `.user_rodata`** were superseded by
+  [0015](0015-elf-program-loading.md). The body describes a ring-3 function
+  compiled into the kernel image and placed at `0x400000` by `linker.ld`. That
+  file, those sections and those linker symbols no longer exist: programs are
+  separate ELF files read off the disk at runtime.
+- **A single shared user region** was superseded by
+  [0012](0012-per-process-paging.md). The 4-8MB user region is no longer one set
+  of pages every ring-3 thing shares; each task has a private tree, and the
+  region's physical frames are reserved from the allocator rather than executed
+  out of.
+
+The `iretq` forge, the selectors and RPL 3, `RFLAGS = 0x202`, the TSS `rsp0`
+requirement, and the user bit as the isolation boundary are all unchanged. See
+[reference/user-mode.md](../reference/user-mode.md) for the current state.
 
 ## Context
 

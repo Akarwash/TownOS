@@ -35,4 +35,9 @@ uint64_t alloc_frames_contiguous(uint32_t count);
 void free_frame(uint64_t addr);
 uint32_t frames_used(void);
 
+// DIAGNOSTIC ONLY: how many frames are free right now. Nothing decides anything on
+// this; it exists so a leak can be observed, by printing it where memory has just
+// been returned and checking it comes back to the same value. See memory.c.
+uint64_t frame_free_count(void);
+
 #endif

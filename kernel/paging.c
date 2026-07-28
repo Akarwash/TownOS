@@ -35,6 +35,12 @@ extern uint64_t pd_table[512];
 // One page directory is 512 entries (512 * 2MB = 1GB), matching kernel/memory.c.
 #define PD_ENTRIES  512
 
+// One page table is likewise 512 entries (512 * 4KB = 2MB, exactly the span of the
+// PD entry above it). Spelled separately from PD_ENTRIES because they are the same
+// number for different reasons, and a teardown walk that confuses the two levels is
+// precisely the bug worth making unspellable.
+#define PT_ENTRIES  512
+
 // The two PD slots that describe the ring-3 region (boot.asm PD[2]/PD[3]):
 //   PD[2]  0x400000-0x5FFFFF : user code
 //   PD[3]  0x600000-0x7FFFFF : user stack
@@ -100,9 +106,19 @@ address_space_t *paging_create_address_space(void) {
     uint64_t *pdpt = alloc_table();
     uint64_t *pd   = alloc_table();
     if (pml4 == NULL || pdpt == NULL || pd == NULL) {
-        // Best-effort cleanup: hand any frames we did get back to the pool. Tasks
-        // are never destroyed once built, so this only runs on a create that fails
-        // partway (out of memory), and keeping it simple is fine.
+        // Hand any frames we did get back to the pool, BY HAND, one at a time.
+        //
+        // This is the one teardown in the kernel that cannot be delegated to
+        // paging_destroy_address_space, and the reason is the contract this
+        // function is about to fulfil: on failure it returns NULL, so the caller
+        // never receives a handle and has nothing to pass to the teardown. The
+        // three frames below are known to this function and to nothing else, and if
+        // they are not returned here they are stranded for the life of the machine.
+        //
+        // The tree is also not walkable yet: pml4[0] and pdpt[0] are wired up after
+        // this block, so at this moment the three frames are unlinked siblings, not
+        // a tree. Handing them to a walker that follows entries would free whichever
+        // of them it could reach through links that do not exist, which is none.
         if (pml4 != NULL) { free_frame((uint64_t)pml4); }
         if (pdpt != NULL) { free_frame((uint64_t)pdpt); }
         if (pd   != NULL) { free_frame((uint64_t)pd);   }
@@ -160,6 +176,107 @@ int paging_map_page(address_space_t *as, uint64_t virt, uint64_t phys, uint64_t 
     // passes PG_PRESENT | PG_WRITABLE | PG_USER for a ring-3 page).
     pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | flags;
     return 0;
+}
+
+// Free every present leaf in one page table, then the table's own frame. `pt_phys`
+// is the physical (== virtual, identity mapped) base of a 512-entry page table
+// hanging under one of the two user PD slots, so every present entry in it is a
+// 4KB frame this task privately owns: a page of its loaded program image, or a page
+// of its stack. Nothing here is shared with any other task or with the kernel.
+//
+// Freeing the leaves BEFORE the table itself matters: the table is the only record
+// of where the leaves are, so returning it to the pool first loses the addresses of
+// 512 frames, which then never come back. That is the leak this rung exists to
+// close, so it would be a quiet way to fail the whole thing.
+static void destroy_page_table(uint64_t pt_phys) {
+    uint64_t *pt = (uint64_t *)pt_phys;
+    for (int i = 0; i < PT_ENTRIES; i++) {
+        if (pt[i] & PG_PRESENT) {
+            free_frame(pt[i] & PTE_ADDR_MASK);
+        }
+    }
+    free_frame(pt_phys);
+}
+
+void paging_destroy_address_space(address_space_t *as) {
+    if (as == NULL) {
+        return;
+    }
+
+    // PRECONDITION: `as` IS NOT THE TREE CURRENTLY IN CR3. See paging.h. Everything
+    // below hands frames the CPU may still be translating through back to the free
+    // pool, so calling this on the live tree does not fault here; it faults later,
+    // somewhere unrelated, once those frames have been reissued to somebody else.
+    // The scheduler upholds this by only ever destroying a tree that belongs to a
+    // task other than the one running (kernel/scheduler.c: reap_sweep skips
+    // `current`, and task_wait only frees a child).
+
+    // Mirror paging_create_address_space exactly in reverse: it allocated a PML4, a
+    // PDPT and a PD, wired pml4[0] -> pdpt -> pd, and left the two user PD slots
+    // empty for paging_map_page to fill with private page tables. So the tree comes
+    // apart leaves first, then the two user page tables, then the three spine
+    // frames, then the handle.
+    //
+    // Every level is tested for PG_PRESENT before it is followed. That is not
+    // paranoia about a tree the kernel built correctly: paging_create_address_space
+    // can fail partway on out-of-memory, and elf_load_file or map_user_stack can
+    // fail after only some of the tree exists, so a task's tree can legitimately be
+    // missing a level. Following an absent entry would take the low bits of a zero
+    // as a frame address and free frame 0.
+    uint64_t *pml4 = (uint64_t *)as->pml4_phys;
+    if (pml4[0] & PG_PRESENT) {
+        uint64_t *pdpt = (uint64_t *)(pml4[0] & PTE_ADDR_MASK);
+        if (pdpt[0] & PG_PRESENT) {
+            uint64_t pd_phys = pdpt[0] & PTE_ADDR_MASK;
+            uint64_t *pd = (uint64_t *)pd_phys;
+
+            // ONLY THESE TWO PD SLOTS, BY NAME, AND NOTHING ELSE. THIS IS THE MOST
+            // DANGEROUS LINE IN THE KERNEL TO GET WRONG.
+            //
+            // The obvious implementation, "walk all 512 PD entries and free every
+            // present one", is catastrophic here and gives no warning at all. Every
+            // other present entry in this PD is a copy of a boot huge-page entry
+            // (see the by-value clone in paging_create_address_space above) pointing
+            // at SHARED KERNEL PHYSICAL MEMORY: the kernel's own code, its data, its
+            // heap, the frame bitmap, this very function. They are copies of a
+            // pointer, not a private allocation, and this task does not own a single
+            // one of them. Freeing them marks the kernel's own frames available, the
+            // allocator hands them out to the next task's page tables or heap block,
+            // and the whole town is overwritten while it runs, with no message and
+            // no fault at the point of the mistake.
+            //
+            // The PG_HUGE test below is a SECOND lock on the same door, not the
+            // primary guard. The primary guard is that this loop has exactly two
+            // iterations over two named indices.
+            const int user_pd_slots[2] = { USER_PD_INDEX_CODE, USER_PD_INDEX_STACK };
+            for (int s = 0; s < 2; s++) {
+                int idx = user_pd_slots[s];
+                uint64_t entry = pd[idx];
+
+                // Absent: nothing was ever mapped here (a create that failed before
+                // this slot was filled). Huge: this is not a page table at all but a
+                // 2MB mapping, which in this kernel can only be a leftover shared
+                // kernel entry, so it is not ours to free and must not be walked as
+                // if it pointed at a table.
+                if (!(entry & PG_PRESENT) || (entry & PG_HUGE)) {
+                    continue;
+                }
+
+                destroy_page_table(entry & PTE_ADDR_MASK);
+                pd[idx] = 0;   // no dangling entry in a tree being torn down
+            }
+
+            free_frame(pd_phys);
+        }
+        free_frame((uint64_t)pdpt);
+    }
+    free_frame((uint64_t)pml4);
+
+    // The handle came from kmalloc (not the frame allocator), so it goes back to the
+    // heap rather than the frame pool. Forgetting this leaks a small block per dead
+    // task, which is invisible in a free-FRAME count and so is exactly the kind of
+    // leak that survives the obvious test.
+    kfree(as);
 }
 
 // Load an address space into CR3. CR3 holds a PHYSICAL address; everything below

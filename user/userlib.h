@@ -94,14 +94,35 @@ unsigned long sys_write(const char *string) {
     return syscall1(SYS_WRITE, (unsigned long)string);
 }
 
-// SYS_EXIT: ask the kernel to halt. Never returns, so neither do we; the
-// infinite loop only satisfies the compiler that control does not fall off the
-// end.
+// SYS_EXIT: end THIS PROGRAM with `status` (masked by the kernel to 0..255). It no
+// longer halts the machine, which is what it used to mean when there was no parent
+// to return to: the task leaves the scheduler for good, its memory goes back to the
+// kernel's pools, and a parent blocked in sys_wait is woken with this status.
+//
+// Never returns, and the infinite loop below is now GENUINELY unreachable rather
+// than a formality for the compiler: the kernel never schedules this task again, so
+// control does not come back to the instruction after the trap.
+//
+// A program must call this itself at the bottom of _start. There is no crt0 and
+// nothing wraps the entry point, so a program that simply falls off the end of
+// _start runs into whatever bytes follow it.
 static inline __attribute__((always_inline))
-void sys_exit(void) {
-    syscall1(SYS_EXIT, 0);
+void sys_exit(int status) {
+    syscall1(SYS_EXIT, (unsigned long)(long)status);
     for (;;) {
     }
+}
+
+// SYS_WAIT: block until any child of this program exits, and return its exit status
+// (0..255). Returns (unsigned long)-1 if this program has no children at all.
+//
+// ANY-CHILD, NOT waitpid: it takes no argument, so a program with several children
+// is told about whichever finished first and cannot ask about a particular one.
+// BLOCKING, like sys_readkey: waiting costs no CPU, and from here it looks like one
+// call that took a while to come back.
+static inline __attribute__((always_inline))
+long sys_wait(void) {
+    return (long)syscall0(SYS_WAIT);
 }
 
 // SYS_READKEY: pop one buffered keystroke, waiting for one if none is ready.

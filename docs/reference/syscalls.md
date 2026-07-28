@@ -2,7 +2,7 @@
 
 MiniOS lets a ring-3 program request kernel services through a single software
 interrupt, `int 0x50`. This page documents the gate, the calling convention, the
-six calls that exist, and the pointer checks that guard the untrusted ones. Read
+seven calls that exist, and the pointer checks that guard the untrusted ones. Read
 from `kernel/syscall.c`, `kernel/isr_stubs.asm`, `kernel/isr.c`,
 `include/syscalls.h`, `drivers/keyboard.c`, and `user/userlib.h`. For the
 rationale and the alternatives considered, see
@@ -52,16 +52,42 @@ not do (kernel pages are not user-readable).
 
 | Number | Name | Arguments | Returns | Effect |
 |--------|------|-----------|---------|--------|
-| 0 | `SYS_EXIT` | none | does not return | Halts the machine with `cli; hlt`. |
+| 0 | `SYS_EXIT` | RDI = exit status | does not return | Ends the calling task with that status. |
 | 1 | `SYS_WRITE` | RDI = pointer to a NUL-terminated string | 0 on success, `(uint64_t)-1` if rejected | Prints the string via the VGA driver. |
 | 2 | `SYS_READKEY` | none | one character (never 0) | Pops one key from the keyboard ring buffer, sleeping the caller until one arrives. |
 | 3 | `SYS_LIST` | RDI = buffer, RSI = size | number of names, or -1 | Writes the root directory's file names into the buffer, newline-separated. |
 | 4 | `SYS_RUN` | RDI = filename pointer | 0 on success, -1 on failure | Loads and starts the named program as a new task. |
 | 5 | `SYS_READFILE` | RDI = filename, RSI = buffer, RDX = size | bytes read, or -1 | Reads a whole file into the buffer. |
+| 6 | `SYS_WAIT` | none | a child's exit status (0..255), or -1 | Blocks until any child of the caller exits. |
 
-`SYS_EXIT` can only halt: with no scheduler and no parent to return to, there is
-nowhere for an exit to go, so it stops the machine, the same terminal state the
-exception handlers use.
+`SYS_EXIT` **ends the calling task**, and no longer halts the machine. That was
+what it meant when there was no scheduler and no parent to return to; now the task
+leaves the rotation for good, its address space goes back to the frame allocator,
+and a parent blocked in `SYS_WAIT` is woken with its status.
+
+The status is **masked to 0..255**. That is not tidiness: `SYS_WAIT` returns the
+status in RAX and returns `(uint64_t)-1` for "you have no children", so an
+unmasked status of -1 would be indistinguishable from the error. Masking makes the
+two ranges disjoint by construction.
+
+Exiting is a **two-phase death**. `task_exit` does paperwork only — mask the
+status, mark the task `TASK_ZOMBIE`, wake the parent, switch away — and frees
+nothing at all, because the task calling it is the task currently on the CPU and
+its address space is the one CR3 points at. The freeing happens later, from the
+scheduler's sweeper and from the parent's `SYS_WAIT`. See
+[scheduling.md](scheduling.md) and
+[decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md).
+
+`SYS_WAIT` is **any-child, not `waitpid`**. It takes no argument: a caller with
+several children is told about whichever it finds finished first and cannot ask
+about a particular one. If a finished child is already waiting, it returns that
+child's status immediately and frees the tombstone; if the caller has children but
+none has finished, it blocks with `WAIT_CHILD` until one exits; if the caller has
+no children at all, it returns `(uint64_t)-1` rather than blocking forever on
+something that can never happen.
+
+There is no crt0 and nothing wraps `_start`, so **a program must call `SYS_EXIT`
+itself**. One that falls off the end of `_start` executes whatever bytes follow it.
 
 `SYS_READKEY` is the consumer end of the keyboard ring buffer (`drivers/keyboard.c`,
 documented in [shell.md](shell.md)). It is **blocking**: on an empty buffer the
@@ -73,13 +99,16 @@ buffer and be polled in a loop, which burned every slice the caller was given; s
 [blocking.md](blocking.md) and
 [decision 0017](../decisions/0017-blocking-and-sleep.md).
 
-It is also the only syscall so far that does not return through the dispatcher.
-The blocking path rewinds the saved `rip` onto the `int` so the woken task
-re-issues the call, and the CPU reads the syscall number from `rax` when it does,
-so nothing may write `rax` on that path. `sys_readkey` therefore takes the
-register pile and writes `regs->rax` itself, only on the path that has an answer,
-rather than returning a value for the dispatcher to store. Since `SYS_EXIT` is 0,
-a stray `return 0` here would halt the machine on the next keypress.
+`SYS_READKEY` and `SYS_WAIT` do not return through the dispatcher, and `SYS_EXIT`
+does not return at all. The blocking path rewinds the saved `rip` onto the `int` so
+the woken task re-issues the call, and the CPU reads the syscall number from `rax`
+when it does, so **nothing may write `rax` on a blocking path**. Both blocking
+handlers therefore take the register pile and write `regs->rax` themselves, only on
+the path that has an answer, rather than returning a value for the dispatcher to
+store. Since `SYS_EXIT` is 0, a stray `return 0` here would not merely corrupt a
+result: the re-armed `int` would read 0 out of RAX and kill the caller. The
+dispatcher's cases for these three are bare statements with no `regs->rax =` in
+front of them, and that is load-bearing, not style.
 
 `SYS_LIST`, `SYS_RUN`, and `SYS_READFILE` are the shell's data calls. `SYS_LIST`
 fills a buffer through `fat32_list_names`; `SYS_READFILE` fills one through
@@ -87,6 +116,12 @@ fills a buffer through `fat32_list_names`; `SYS_READFILE` fills one through
 `task_create_from_file`, which loads the program and registers it with the
 scheduler (a failed load returns -1 and never faults the kernel). Each takes an
 untrusted pointer from ring 3, checked as described below.
+
+`SYS_RUN` also records **who is running the program**: it passes
+`scheduler_current_id()` as the new task's `parent_id`, which is what makes a later
+`SYS_WAIT` from the same task find it. The id has to be read here, inside the
+syscall, where "the current task" still means the caller; by the time the new task
+runs, `current` is somebody else.
 
 An **unknown syscall number** is not fatal. `syscall_handler` prints the offending
 number and returns `(uint64_t)-1` in RAX; a bad request from ring 3 must never
@@ -144,8 +179,8 @@ length, which the stopgap does not.
 `user/userlib.h` shows the caller's half. The raw `int 0x50` is wrapped in
 `always_inline` helpers built on inline asm with explicit register constraints
 (`"a"` = RAX, `"D"` = RDI, `"S"` = RSI, `"d"` = RDX), one per arity: `syscall0`
-through `syscall3`, with `sys_write`, `sys_exit`, `sys_readkey`, `sys_list`,
-`sys_run`, and `sys_readfile` over them. `SYSCALL_VECTOR` reaches the `int`
+through `syscall3`, with `sys_write`, `sys_exit`, `sys_wait`, `sys_readkey`,
+`sys_list`, `sys_run`, and `sys_readfile` over them. `SYSCALL_VECTOR` reaches the `int`
 instruction as an immediate through an `"i"` constraint so the vector stays a named
 constant. `always_inline` is kept: it folds the trap
 directly into the caller, so every instruction the program runs is inside its own
@@ -185,12 +220,18 @@ SHELL.ELF
 Hello from FAT32!
 > run a.elf
 run: started a.elf
-> AAAAAAAAAA...
+AAAAAAAAAAAAAAAAAAAA
+run: a.elf exited with status 0
+>
 ```
 
-`run a.elf` calls `SYS_RUN`, which loads `A.ELF` as a new task; from the next timer
-tick A's `SYS_WRITE` output interleaves with the live prompt, which is the
-scheduler running the shell and A together. Over the session `-d int` shows only
+`run a.elf` calls `SYS_RUN`, which loads `A.ELF` as a new task with the shell as
+its parent, and then `SYS_WAIT`, which blocks the shell until A is finished. A's
+`SYS_WRITE` output appears while the shell sleeps, which is the scheduler running
+what is left after the shell steps out of the rotation; the prompt comes back only
+once `SYS_WAIT` returns A's status. `run c.elf` prints `exited with status 3`,
+which is the proof that the number survives the whole trip from the child's RDI to
+the parent's RAX. Over the session `-d int` shows only
 timer (`v=40`), keyboard (`v=41`), and syscall (`v=50`) vectors, all at `cpl=3` for
 the ring-3 traps, with no `#GP` (0x0D), no `#PF` (0x0E), no double fault (0x08), no
 triple fault, and no disk IRQ (0x4E). `v=50` now appears only when the shell has
@@ -200,8 +241,7 @@ three syscalls, down from 362,648 when `SYS_READKEY` was polled.
 Passing a kernel address (for example `0x100000`) to `SYS_WRITE` still prints
 `syscall: SYS_WRITE rejected an out-of-bounds pointer` and returns `-1`, and the
 shell syscalls reject an out-of-region buffer or filename the same way, printing
-nothing from kernel memory. (`SYS_EXIT` stays implemented; it halts with
-`cli; hlt`, but the shell never calls it.)
+nothing from kernel memory.
 
 ## Related
 
@@ -219,3 +259,6 @@ nothing from kernel memory. (`SYS_EXIT` stays implemented; it halts with
 - How a syscall sleeps its caller and is re-issued on wake:
   [blocking.md](blocking.md) and
   [decision 0017](../decisions/0017-blocking-and-sleep.md).
+- What `SYS_EXIT` and `SYS_WAIT` do to the task table, and who frees what:
+  [scheduling.md](scheduling.md) and
+  [decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md).

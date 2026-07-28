@@ -1,7 +1,7 @@
 # User mode (ring 3)
 
 This page documents how MiniOS drops to CPL 3 and how it proves the drop is
-real. Read from `kernel/usermode.c`, `user/A.c`, `boot/boot.asm`,
+real. Read from `kernel/usermode.c`, `user/shell.c`, `boot/boot.asm`,
 `linker.ld`, and `kernel/gdt.c`. For the rationale and trade-offs see
 [decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
 
@@ -9,7 +9,7 @@ real. Read from `kernel/usermode.c`, `user/A.c`, `boot/boot.asm`,
 
 | Piece | Location | Source |
 |-------|----------|--------|
-| Ring-3 program code | `0x400000` (loaded from an ELF file, PD[2]) | `user/A.c`, `user/user.ld`, `kernel/elf.c` |
+| Ring-3 program code | `0x400000` (loaded from an ELF file, PD[2]) | `user/shell.c`, `user/tests/*.c`, `user/user.ld`, `kernel/elf.c` |
 | Ring-3 stack top | `0x800000` (top of PD[3]) | `USER_STACK_TOP` in `kernel/usermode.h` |
 | Ring-0 stack on entry | `tss.rsp0` (top of `tss_stack`) | `kernel/gdt.c` |
 | Ring-3 code selector | `0x1B` (`GDT_SELECTOR_USER_CODE`, RPL 3) | `kernel/gdt.h` |
@@ -46,7 +46,7 @@ loaded across the drop is untidy.
 `RFLAGS = 0x202` keeps the interrupt flag set. This is not optional: if ring 3 ran
 with interrupts masked the timer and keyboard would go dead, and (now that a
 scheduler exists) the running task would never be preempted, owning the machine
-forever. The same 0x202 is what `task_create` forges into every task's saved
+forever. The same 0x202 is what `task_register` forges into every task's saved
 frame. See [scheduling.md](scheduling.md).
 
 `enter_user_mode` does not return. It is still the path into ring 3, now invoked
@@ -80,32 +80,36 @@ CPL-0-only instruction, and observing the #GP it raises at `cpl=3` with
 That verification, with the exact QEMU `-d int` output, is recorded in
 [decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
 
-The shipped programs (`user/A.c`, `user/B.c`, `user/C.c`, loaded from disk) no
-longer fault on purpose. Now that
-a syscall gate and a scheduler exist, they demonstrate the drop the constructive
-way: three of them run at CPL 3 and call the kernel through `int 0x50` (`SYS_WRITE`)
-in a loop, and the scheduler switches between them on the timer tick. Each task
-runs in its OWN page-table tree (per-process paging), so they share the same user
-virtual addresses but not the same physical memory. Under QEMU with `-d int`,
-vector `0x50` fires from all three tasks (three distinct RIPs, each in its own
-address space with its own `CR3`), each at `cpl=3`, with no #GP and no #PF; the
-three strings interleave on screen, printed by the kernel on the ring-3 programs'
-behalf. That a ring-3 pointer into a loaded program's rodata (4-8M) is accepted while a kernel
-address is rejected is the same leaf-level user-bit boundary, now exercised through
-the syscall path instead of a fault. See [syscalls.md](syscalls.md),
-[scheduling.md](scheduling.md), and [paging.md](paging.md).
+Nothing faults on purpose any more. The shipped programs — the shell
+(`user/shell.c`) and the kernel test fixtures (`user/tests/`), all loaded from
+disk as ELF files — demonstrate the drop the constructive way instead: they run
+at CPL 3 and call the kernel through `int 0x50` in a loop, and the scheduler
+switches between them on the timer tick. Each task runs in its OWN page-table
+tree (per-process paging), so they share the same user virtual addresses but not
+the same physical memory. Under QEMU with `-d int`, vector `0x50` fires from each
+live task, each at `cpl=3`, each under its own `CR3`, with no #GP and no #PF. The
+letters interleave on screen, printed by the kernel on the ring-3 programs'
+behalf. That a ring-3 pointer into a loaded program's rodata (4-8M) is accepted
+while a kernel address is rejected is the same leaf-level user-bit boundary, now
+exercised through the syscall path instead of a fault. See
+[syscalls.md](syscalls.md), [scheduling.md](scheduling.md), and
+[paging.md](paging.md).
 
 ## What this is not
 
-- **Not full multitasking.** Three hard-coded ring-3 tasks are preempted
-  round-robin by the timer (see [scheduling.md](scheduling.md)), but there is no
-  process abstraction and no program loading: the tasks are compiled into the
-  kernel image, not loaded from a filesystem.
-- **Not demand paging.** Each task now has real per-process isolation: its own
+- **Not full multitasking.** Programs are now loaded from the filesystem rather
+  than compiled into the kernel image, and they are created, preempted, exited and
+  reaped at runtime (see [scheduling.md](scheduling.md) and
+  [elf-loading.md](elf-loading.md)). What is still missing is the rest of the
+  process abstraction: no `fork`, no `exec`, no signals, no way to kill a task, and
+  no file descriptors — a program's only handle on the world is the fixed set of
+  syscalls in `include/syscalls.h`.
+- **Not demand paging.** Each task has real per-process isolation: its own
   page-table tree and a `CR3` switch on every context switch, so tasks share
   virtual addresses but not physical frames (see [paging.md](paging.md)). What is
-  still missing is laziness: every page is mapped eagerly at `task_create`, with no
-  page-fault-driven demand paging, copy-on-write, or swapping.
+  still missing is laziness: every page a program declares is mapped eagerly by
+  `task_create_from_file`, with no page-fault-driven demand paging, copy-on-write,
+  or swapping.
 
 ## Related
 
