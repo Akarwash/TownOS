@@ -144,27 +144,40 @@ in `user/userlib.h`.
 
 The shell's file buffer is `SHELL_FILE_MAX` (32768) bytes and it asks
 `SYS_READFILE` for at most 32767 of them, holding one back for the NUL it appends
-before printing. A file larger than that is read up to the cap and the rest is not
-read at all.
+before printing.
 
-When the returned count fills the buffer exactly, `read` prints a notice after the
-contents:
+**A file larger than that is not read at all.** `fat32_read_file` compares the
+directory entry's size against the buffer size before reading a cluster and returns
+`-1` if the file is bigger, so `SYS_READFILE` fails and `read` prints:
+
+```
+> read huge.txt
+read: cannot read huge.txt
+```
+
+`HUGE.TXT` is 40981 bytes and is on the disk for exactly this reason: the Makefile
+generates it and copies it on every `make run`. Before it, nothing on the disk was
+over 16KB and this path had never once run.
+
+Refusing rather than truncating is defensible on its own — a caller gets the whole
+file or an error, never a prefix it has no way to recognise as a prefix — but at
+the shell it is indistinguishable from "no such file" and from a disk error, which
+produce the same line.
+
+**`read` also carries a truncation notice, and it is unreachable.** After printing
+the contents, `cmd_read` checks whether the returned count filled the buffer
+exactly and, if so, prints:
 
 ```
 read: showing the first 32767 bytes, the file may be longer
 ```
 
-**"May be", not "is", and the hedge is the honest answer.** `SYS_READFILE` returns
-*bytes copied*, not *bytes available*, so a full buffer is what a too-large file
-looks like and also what a file of exactly 32767 bytes looks like. The shell has no
-number to compare against and cannot tell the two apart. Without the notice a
-truncated file would print with no error and no marker, indistinguishable from a
-complete one — a wrong answer with nothing about it that looks wrong, which is why
-the hedged notice beats silence.
-
-The real fix is for `SYS_READFILE` to report the file's true size so a caller can
-tell truncation from coincidence. That changes the syscall's contract and every
-caller of it, so it is a rung of its own and not part of this.
+That was written for a `SYS_READFILE` that fills the buffer and stops. It does not.
+The count can only equal 32767 for a file of *exactly* 32767 bytes, which is
+complete — so the single case that reaches the notice is the one case where the
+notice is wrong. `TODO(read-truncation)`: either the read path truncates and
+reports the file's true size, or the notice goes. Both change `SYS_READFILE`'s
+contract and every caller of it, so neither is a small edit.
 
 **The child must exit.** There is no way to kill a task and there are no signals,
 so a program with an unbounded loop leaves the shell blocked in `SYS_WAIT` forever
