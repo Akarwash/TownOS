@@ -2,7 +2,25 @@
 
 ## Status
 
-Accepted.
+Accepted. The decision is current; two notes on the body.
+
+- **Program paths.** `user/A.c`, `B.c` and `C.c` are now `user/tests/A.c`, `B.c`
+  and `C.c`. The on-disk names and the bounded-loop rule the body gives are
+  unchanged. See [user/tests/README.md](../../user/tests/README.md).
+- **The sweeper's free path is now reachable and tested.** The body notes that a
+  parent's `SYS_WAIT` almost always wins the race, leaving `reap_sweep`'s free and
+  the "no" branch of `parent_alive` unexecuted. `user/tests/D.c` and `E.c` were
+  added for exactly that: D starts E and exits without waiting, so E's zombie has
+  no possible reader and the sweeper is the only thing that can collect it. The
+  reap report now names which path did the freeing (`reap (wait):` or
+  `reap (sweeper):`) so the two are distinguishable on screen.
+
+One observed consequence of the two-phase design worth recording: if the machine
+is fully idle when an orphan exits, the sweeper's free is **deferred** to the next
+wake event. `schedule()` returns at its idling guard before `reap_sweep` runs, and
+during the idle loop the zombie is still `current`, which the sweeper skips by
+design. The memory returns on the next scheduling event, so this is a delay, not a
+leak. See [reference/shell.md](../reference/shell.md).
 
 ## Context
 

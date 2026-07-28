@@ -2,7 +2,22 @@
 
 ## Status
 
-Accepted.
+Accepted. Two details of the body have moved since.
+
+- **What is launched at boot** was superseded by
+  [0016](0016-interactive-shell.md). The body has `kernel_main` loading the
+  letter-printers at startup; it now loads `SHELL.ELF` alone, and everything else
+  is started by the shell's `run`.
+- **Where the program sources live.** The body cites `user/A.c`, `user/B.c` and
+  `user/C.c`. Those files are now `user/tests/A.c`, `B.c` and `C.c`: they are
+  kernel test fixtures rather than programs the machine is for, and the directory
+  says so. The build is otherwise identical and the on-disk names are unchanged.
+  See [user/tests/README.md](../../user/tests/README.md).
+
+The loader itself — validate, bounds-check each `PT_LOAD`, map with the segment's
+own flags, zero-fill to `p_memsz`, take the entry from the ELF header — is
+unchanged. See [reference/elf-loading.md](../reference/elf-loading.md) for the
+current state.
 
 ## Context
 

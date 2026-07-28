@@ -2,7 +2,26 @@
 
 ## Status
 
-Accepted.
+Accepted. Partly superseded — the scheduling policy stands, four things around it
+have moved on.
+
+- **`task_create(entry, stack_top)`** no longer exists. The fixed task table and
+  the hard-coded stack tops went to [0011](0011-dynamic-tasks-and-stacks.md)
+  (heap-allocated structs) and [0012](0012-per-process-paging.md) (one stack VA
+  per private tree); the function itself was replaced by `task_create_from_file`
+  and `task_register` in [0015](0015-elf-program-loading.md).
+- **Tasks compiled into the kernel** were superseded by
+  [0015](0015-elf-program-loading.md): programs are ELF files on the disk now.
+- **A task always runnable** was superseded by
+  [0017](0017-blocking-and-sleep.md), which added `TASK_BLOCKED`, the wait
+  reasons, and the idle loop for when nothing is ready.
+- **Tasks that never end** were superseded by
+  [0018](0018-process-lifecycle-exit-and-wait.md), which added `TASK_ZOMBIE`,
+  `SYS_WAIT`, and the two-phase teardown.
+
+Round-robin over a rotating index, preemption on the timer tick, and the
+save-and-overwrite of the interrupt frame are all unchanged. See
+[reference/scheduling.md](../reference/scheduling.md) for the current state.
 
 ## Context
 
