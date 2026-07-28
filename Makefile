@@ -19,6 +19,13 @@
 #               Multiboot -kernel loader accepts (see the minios.bin rule below)
 # ============================================================================
 
+# The target `make` with no arguments builds. GNU make otherwise picks the FIRST
+# explicit target in the file, which for a long time was `user/SHELL.ELF` — a bare
+# `make` reported "user/SHELL.ELF is up to date" and built no kernel at all. Naming
+# the goal here fixes that in a way that reordering the rules would not: a rule added
+# above `all:` later cannot silently take the default back.
+.DEFAULT_GOAL := all
+
 # Compilers and tools
 CC = x86_64-elf-gcc
 LD = x86_64-elf-ld
