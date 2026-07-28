@@ -106,9 +106,19 @@ address_space_t *paging_create_address_space(void) {
     uint64_t *pdpt = alloc_table();
     uint64_t *pd   = alloc_table();
     if (pml4 == NULL || pdpt == NULL || pd == NULL) {
-        // Best-effort cleanup: hand any frames we did get back to the pool. Tasks
-        // are never destroyed once built, so this only runs on a create that fails
-        // partway (out of memory), and keeping it simple is fine.
+        // Hand any frames we did get back to the pool, BY HAND, one at a time.
+        //
+        // This is the one teardown in the kernel that cannot be delegated to
+        // paging_destroy_address_space, and the reason is the contract this
+        // function is about to fulfil: on failure it returns NULL, so the caller
+        // never receives a handle and has nothing to pass to the teardown. The
+        // three frames below are known to this function and to nothing else, and if
+        // they are not returned here they are stranded for the life of the machine.
+        //
+        // The tree is also not walkable yet: pml4[0] and pdpt[0] are wired up after
+        // this block, so at this moment the three frames are unlinked siblings, not
+        // a tree. Handing them to a walker that follows entries would free whichever
+        // of them it could reach through links that do not exist, which is none.
         if (pml4 != NULL) { free_frame((uint64_t)pml4); }
         if (pdpt != NULL) { free_frame((uint64_t)pdpt); }
         if (pd   != NULL) { free_frame((uint64_t)pd);   }

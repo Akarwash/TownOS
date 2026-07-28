@@ -160,8 +160,22 @@ static uint64_t sys_run(uint64_t user_name) {
     // because `current` is only the requesting task while its own syscall is being
     // served; by the next timer tick it means somebody else.
     if (task_create_from_file(name, scheduler_current_id()) < 0) {
-        print_string("syscall: SYS_RUN could not start ");
+        // REPORT THE FREE FRAME COUNT, not just the failure. A create can fail after
+        // it has already built a page-table tree and mapped part of a program into
+        // it, so "it did not start" and "it did not cost anything" are different
+        // claims and only the first one is obvious from the screen. This number is
+        // what makes the second one checkable: run a name that does not exist ten
+        // times over and every count must be the same. A count that steps down each
+        // time means a failure path is stranding an address space, which is what
+        // this kernel did until docs/decisions/0018's teardown was wired into
+        // task_create_from_file. Guarded by LIFECYCLE_DEBUG (kernel/scheduler.h)
+        // alongside the reap reports, since it is the same measurement.
+        print_string("run failed: ");
         print_string(name);
+#if LIFECYCLE_DEBUG
+        print_string(", free frames: ");
+        print_int((uint32_t)frame_free_count());
+#endif
         print_string("\n");
         return SYSCALL_ERROR;
     }

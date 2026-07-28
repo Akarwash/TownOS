@@ -41,8 +41,13 @@ static task_t *tasks[MAX_TASKS_LIMIT];
 // replaced the old bump allocator that split PD[3] by hand.
 //
 // Returns 0 on success, -1 if a frame or page-table allocation fails. On failure
-// the frames already mapped into `as` leak, which is acceptable here: it only
-// happens on out-of-memory, and tasks are never destroyed.
+// it LEAVES THE PARTIAL MAPPING IN PLACE and does not unwind it, which is not a
+// leak because the caller destroys the whole tree on any failure (see
+// task_create_from_file below). That division is deliberate: unwinding here would
+// mean a second, near-duplicate teardown walk that only ever sees stacks, and two
+// teardown walks that must agree about what a task owns is exactly how one of them
+// drifts and starts freeing memory the task does not own. There is one teardown in
+// this kernel, paging_destroy_address_space, and it takes whole trees.
 static int map_user_stack(address_space_t *as) {
     for (uint64_t va = USER_STACK_BASE; va < USER_STACK_TOP; va += FRAME_SIZE) {
         uint64_t frame = alloc_frame();
@@ -151,19 +156,48 @@ int task_create_from_file(const char *name, uint32_t parent_id) {
     // stack, the forge, the scheduler or the CR3 switch changes.
     address_space_t *as = paging_create_address_space();
     if (as == NULL) {
+        // NOTHING TO DESTROY HERE, and calling the teardown would be a mistake. A
+        // failed create cleans up after itself internally (kernel/paging.c) and
+        // hands back NULL rather than a half-built handle, so there is no tree and
+        // no handle to pass on. This early return is the one failure path in this
+        // function that must NOT be given a paging_destroy_address_space call.
         return -1;
     }
 
+    // EVERY FAILURE FROM HERE ON MUST DESTROY `as`. By this point the tree exists
+    // and owns real memory: three page-table frames from the create, plus whatever
+    // the loader and the stack mapper managed to map before they gave up. Returning
+    // without tearing it down strands all of it for the lifetime of the machine,
+    // and it is invisible: a failed `run` prints an error and the town carries on
+    // looking healthy while the free-frame count quietly steps down each time.
+    //
+    // This used to be excused with "tasks are never destroyed once built", which was
+    // true before there was a teardown at all. There is one now
+    // (docs/decisions/0018), it is PG_PRESENT-checked at every level, and it is
+    // therefore safe on a tree that is only partly built: a create that failed
+    // before the loader mapped anything leaves both user PD slots absent, and a
+    // stack mapping that failed halfway leaves a page table with only some leaves
+    // present. Both come apart correctly.
     uint64_t entry = 0;
     if (elf_load_file(name, as, &entry) != 0) {
+        paging_destroy_address_space(as);
         return -1;      // elf_load_file has already said what was wrong with it
     }
 
     if (map_user_stack(as) != 0) {
+        paging_destroy_address_space(as);
         return -1;
     }
 
-    return task_register(as, entry, parent_id);
+    int id = task_register(as, entry, parent_id);
+    if (id < 0) {
+        // Out of kernel heap, or the bookkeeping array is full. The tree was built
+        // perfectly; there is simply nowhere to record the task that would own it,
+        // so nobody will ever free it later and it has to go back now.
+        paging_destroy_address_space(as);
+        return -1;
+    }
+    return id;
 }
 
 uint32_t scheduler_current_id(void) {
@@ -360,17 +394,6 @@ void scheduler_wake(wait_reason_t reason) {
     // woke, so switching would be both wrong and unnecessary: the woken task is
     // back in the rotation and the next tick's schedule() will reach it.
 }
-
-// Report every teardown on the console, with the number of free frames after it.
-//
-// ON BY DEFAULT, AND DELIBERATELY SO. This one line is the leak test for the whole
-// lifecycle: run the same program ten times and the count printed after each must
-// be identical from the second onwards. A slow monotonic decrease means something a
-// dead task held is not coming back (most likely a page table under one of the two
-// user PD slots, or the address_space_t handle), and without this the only symptom
-// would be a machine that runs out of memory after a long session, with nothing to
-// point at the cause. Set to 0 to silence it.
-#define LIFECYCLE_DEBUG 1
 
 // Called at the moment a dead task's address space has just gone back to the pools,
 // from whichever of the two teardown paths got there first (see task_wait for why

@@ -23,6 +23,23 @@
 // tasks live. 64 is arbitrary; raise it freely.
 #define MAX_TASKS_LIMIT 64
 
+// Report every lifecycle event that returns memory to the pools, with the free
+// frame count after it. Set to 0 to silence the lot.
+//
+// ON BY DEFAULT, AND DELIBERATELY SO. These lines are the only leak test this
+// kernel has: run the same thing ten times and the count printed after each must be
+// identical from the second onwards. A slow monotonic decrease means something a
+// dead or never-born task held is not coming back, and without the lines the only
+// symptom is a machine that runs out of memory after a long session, with nothing
+// to point at the cause.
+//
+// It lives in the header rather than in scheduler.c because two files print under
+// it now: scheduler.c reports a task being reaped, and syscall.c reports a `run`
+// that failed to create one. The second is not a lifecycle event in the usual sense
+// but is measured the same way and for the same reason, since a failed create had
+// been quietly stranding a whole address space every time.
+#define LIFECYCLE_DEBUG 1
+
 typedef enum {
     TASK_UNUSED = 0,   // slot never filled (.bss zero-init lands here)
     TASK_READY,        // runnable, waiting for its slice
