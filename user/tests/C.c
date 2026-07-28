@@ -8,7 +8,7 @@
 // task_wait's RAX, and back into a ring-3 program that prints it. See user/A.c
 // for the rest of the shape.
 
-#include "userlib.h"
+#include "../userlib.h"
 
 static volatile unsigned long iterations;
 

@@ -4,7 +4,7 @@
 // the two are visibly different lengths of work. See user/A.c for the details,
 // including why the loop must be bounded.
 
-#include "userlib.h"
+#include "../userlib.h"
 
 static volatile unsigned long iterations;
 

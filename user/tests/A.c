@@ -6,7 +6,7 @@
 // this file and rebuilding A.ELF changes what the machine runs, with no kernel
 // rebuild.
 
-#include "userlib.h"
+#include "../userlib.h"
 
 // A zero-initialised global, so this program actually has a .bss segment: memory
 // the ELF file describes but does not store. It exists to keep the loader's

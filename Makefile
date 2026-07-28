@@ -79,9 +79,25 @@ USER_LDFLAGS = -T $(USER_LD_SCRIPT) -Wl,-z,max-page-size=4096 -Wl,--build-id=non
 # is the exception: its source is user/shell.c (lowercase), so it needs the explicit
 # rule below rather than the pattern rule, which would look for user/SHELL.c and
 # only resolve to shell.c on a case-insensitive filesystem.
-USER_PROGRAMS = user/A.ELF user/B.ELF user/C.ELF user/SHELL.ELF
+#
+# TWO KINDS OF PROGRAM, IN TWO DIRECTORIES. user/ holds programs the machine is for
+# (today just the shell); user/tests/ holds fixtures that exist to prove a piece of
+# the kernel works and would be pointless on a machine anybody used. They build
+# identically and land on the same disk; the split is about what a reader should
+# conclude when one of them looks strange. See user/tests/README.md.
+USER_PROGRAMS = user/tests/A.ELF user/tests/B.ELF user/tests/C.ELF user/SHELL.ELF
 
 user/%.ELF: user/%.c user/userlib.h $(USER_LD_SCRIPT) include/syscalls.h include/vectors.h
+	$(CC) $(USER_CFLAGS) $(USER_LDFLAGS) -o $@ $<
+
+# The kernel test fixtures. Same recipe; a separate rule because the source lives a
+# directory down and the prerequisite path has to say so.
+#
+# This rule and the one above BOTH match user/tests/X.ELF (the one above with the
+# stem "tests/X"). Make resolves that by preferring the shorter stem, so this rule
+# wins, which is what we want: it is the one whose prerequisites name the right
+# source file.
+user/tests/%.ELF: user/tests/%.c user/userlib.h $(USER_LD_SCRIPT) include/syscalls.h include/vectors.h
 	$(CC) $(USER_CFLAGS) $(USER_LDFLAGS) -o $@ $<
 
 # The interactive shell. Same recipe as the pattern rule, but the target and source
@@ -139,6 +155,15 @@ $(DISK_IMG):
 # destroy its contents), but the program binaries are build output and must never
 # be stale: running an old A.ELF because the image was not refreshed looks exactly
 # like a loader bug and costs an afternoon. mcopy -o overwrites without asking.
+#
+# EVERYTHING GOES IN THE ROOT DIRECTORY, `::/`, AND MUST KEEP DOING SO, even though
+# the sources now sit in two directories. fs/fat32.c looks a name up in the ROOT
+# DIRECTORY ONLY: it takes a bare 8.3 name, does no path parsing, and has no
+# directory traversal, so the root is the only directory the kernel can see. Copying
+# the fixtures into a `TEST/` directory on the image would make them unreachable,
+# not tidy: `run a.elf` would report the file as missing. A source-tree folder is the
+# only kind of folder this project has today, and giving the disk one needs
+# subdirectory support in the filesystem, which is a rung of its own.
 .PHONY: disk-programs
 disk-programs: $(DISK_IMG) $(USER_PROGRAMS)
 	mcopy -o -i $(DISK_IMG) $(USER_PROGRAMS) ::/
@@ -153,5 +178,12 @@ run: minios.bin disk-programs
 
 # Clean build files. The disk image is NOT removed: it is not build output, it is
 # the machine's disk, and the test files on it were put there by hand.
+#
+# The user binaries are removed through $(USER_PROGRAMS) rather than by a wildcard,
+# so this list can never fall behind the list that is built: adding a program in one
+# place adds it in both. The stale user/*.ELF line covers binaries left behind by a
+# build from before the fixtures moved into user/tests/, which `make clean` would
+# otherwise never touch again and which would sit on the disk image looking current.
 clean:
 	rm -f $(ALL_OBJECTS) minios.bin minios.elf $(USER_PROGRAMS)
+	rm -f user/A.ELF user/B.ELF user/C.ELF user/user_program.o
