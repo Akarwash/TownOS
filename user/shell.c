@@ -54,12 +54,36 @@ static int str_eq(const char *a, const char *b) {
     return *a == *b;   // equal only if both reached '\0' at the same spot
 }
 
+// Print a small non-negative number in decimal. There is no printf and no libc
+// here, and the only way out is sys_write, which takes a string: so the digits
+// have to be built by hand. Only exit statuses (0..255) go through this, but the
+// buffer is sized for the full range of an unsigned long anyway, because a buffer
+// sized for exactly the values you expect today is how this kind of helper gets
+// overflowed tomorrow.
+//
+// The digits come out least-significant first, so they are written backwards from
+// the end of the buffer and the pointer to the first one is returned. Note the
+// do/while: a plain `while (value)` would print nothing at all for zero, which is
+// the single most common status there is.
+static void print_uint(unsigned long value) {
+    char buf[21];              // 20 digits is the most an unsigned 64-bit value needs, plus '\0'
+    char *p = &buf[20];
+    *p = '\0';
+
+    do {
+        *--p = (char)('0' + (value % 10));
+        value /= 10;
+    } while (value != 0);
+
+    sys_write(p);
+}
+
 static void print_help(void) {
     // The command names are MiniOS's own and deliberately not the Unix ones.
     sys_write("commands:\n");
     sys_write("  list           list files in the root directory\n");
     sys_write("  read <file>    print a file's contents\n");
-    sys_write("  run <file>     load and start a program\n");
+    sys_write("  run <file>     run a program and wait for it to finish\n");
     sys_write("  help           show this list\n");
     sys_write("  clear          clear the screen\n");
     sys_write("  return <text>  print the text back\n");
@@ -104,10 +128,38 @@ static void cmd_run(char *name) {
         sys_write("\n");
         return;
     }
-    // On success the launched program joins the scheduler and its output will
-    // interleave with this shell from the next timer tick on.
+    // The program is now a task of its own and its output interleaves with this
+    // shell from the next timer tick on. Announce it before waiting, so the letters
+    // that follow are visibly attributed to something that was started.
     sys_write("run: started ");
     sys_write(name);
+    sys_write("\n");
+
+    // WAIT FOR IT. This is what makes `run` feel like a command rather than a
+    // detach: the prompt does not come back until the program is finished, because
+    // this call blocks until it is. Costs no CPU while it waits (see sys_wait).
+    //
+    // THE CHILD MUST EXIT. There is no way to kill a task and there are no signals,
+    // so if the program never calls sys_exit, this shell blocks here forever and the
+    // only way back is a reboot. That is why every program in user/ has a bounded
+    // loop.
+    long status = sys_wait();
+
+    // Any real status is 0..255 (the kernel masks it), so a negative return is the
+    // error case and cannot be confused with a program that exited 255. It means the
+    // kernel says this shell has no children: the program we just started must have
+    // finished AND been reaped before we got here, which today cannot happen because
+    // only this task reaps its own children. Report it rather than printing a status
+    // that was never returned.
+    if (status < 0) {
+        sys_write("run: no child to wait for\n");
+        return;
+    }
+
+    sys_write("run: ");
+    sys_write(name);
+    sys_write(" exited with status ");
+    print_uint((unsigned long)status);
     sys_write("\n");
 }
 

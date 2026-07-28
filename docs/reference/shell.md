@@ -17,7 +17,7 @@ The names are MiniOS's own and deliberately not the Unix ones.
 |---------|----------|--------|
 | `list` | none | List the files in the root directory. |
 | `read` | a filename | Print that file's contents. |
-| `run` | a filename | Load and start that program. |
+| `run` | a filename | Run that program and wait for it to finish, then report its exit status. |
 | `help` | none | Print the command list. |
 | `clear` | none | Clear the screen (scroll it away with newlines). |
 | `return` | text | Print the text back. |
@@ -101,9 +101,9 @@ guard.
 table maps every unmapped key to 0 and the producer only pushes non-zero
 characters, so a real 0 never enters the ring.
 
-## The four syscalls
+## The five syscalls
 
-All four follow the calling convention in [syscalls.md](syscalls.md): RAX carries
+All five follow the calling convention in [syscalls.md](syscalls.md): RAX carries
 the number in and the result out, arguments in RDI/RSI/RDX. The ring-3 wrappers are
 in `user/userlib.h`.
 
@@ -113,6 +113,7 @@ in `user/userlib.h`.
 | 3 | `SYS_LIST` | RDI = buffer, RSI = size | number of names, or -1 |
 | 4 | `SYS_RUN` | RDI = filename pointer | 0 on success, -1 on failure |
 | 5 | `SYS_READFILE` | RDI = filename, RSI = buffer, RDX = size | bytes read, or -1 |
+| 6 | `SYS_WAIT` | none | a child's exit status (0..255), or -1 |
 
 - **`SYS_READKEY`** pops one buffered key (above). Blocking: on an empty buffer the
   kernel parks the calling task, and the keyboard IRQ wakes it when it pushes a
@@ -124,15 +125,31 @@ in `user/userlib.h`.
   dropped from the end. Returns the count.
 - **`SYS_RUN`** copies the filename into the kernel and calls
   `task_create_from_file`, which loads the program into a fresh address space and
-  registers it with the scheduler. The launched program joins the round-robin and
-  interleaves with the shell; the shell keeps running. A missing or malformed
-  program is reported and skipped, so a failed run returns -1 and never faults the
-  kernel.
+  registers it with the scheduler, recording the shell as its parent. The launched
+  program joins the round-robin. A missing or malformed program is reported and
+  skipped, so a failed run returns -1 and never faults the kernel.
+- **`SYS_WAIT`** blocks until any child of the shell exits and returns that child's
+  exit status. This is what makes `run` a command rather than a detach: `cmd_run`
+  calls it straight after a successful `SYS_RUN`, so the prompt does not reappear
+  until the program is finished. The shell costs no CPU while it waits, and the
+  program's output appears during the wait. See
+  [decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md).
 - **`SYS_READFILE`** reads a whole file (through `fat32_read_file`) into the
   caller's buffer and returns the byte count. The bytes are raw and not
   NUL-terminated; the shell terminates them before printing the buffer as a
   string. `read` needs this because the shell is ring 3 and cannot call
   `fat32_read_file` itself.
+
+**The child must exit.** There is no way to kill a task and there are no signals,
+so a program with an unbounded loop leaves the shell blocked in `SYS_WAIT` forever
+and the only way back is a reboot. That is why every program in `user/` now runs a
+fixed number of rounds and calls `sys_exit` at the bottom.
+
+**Printing the status needs a number printer.** There is no libc and the only way
+out is `SYS_WRITE`, which takes a string, so `user/shell.c` has a small
+`print_uint` that builds the digits backwards into a stack buffer. Its `do`/`while`
+is deliberate: a plain `while (value)` prints nothing for zero, which is the most
+common status there is.
 
 **The untrusted pointers.** Every pointer these take comes from ring 3 and is
 checked before the kernel touches it. Buffers go through `user_range_ok`, which
@@ -190,7 +207,9 @@ launches it. See [../building.md](../building.md).
   [decision 0015](../decisions/0015-elf-program-loading.md).
 - The filesystem `SYS_LIST` and `SYS_READFILE` read through:
   [fat32.md](fat32.md), [decision 0014](../decisions/0014-read-only-fat32.md).
-- The scheduler a launched program joins: [scheduling.md](scheduling.md).
+- The scheduler a launched program joins, and how it leaves again:
+  [scheduling.md](scheduling.md),
+  [decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md).
 - The sleep behind a blocking `SYS_READKEY`: [blocking.md](blocking.md),
   [decision 0017](../decisions/0017-blocking-and-sleep.md).
 - The decision behind all of this: [decision 0016](../decisions/0016-interactive-shell.md).

@@ -237,3 +237,17 @@ uint32_t frames_used(void) {
     }
     return count;
 }
+
+// DIAGNOSTIC ONLY. How many frames are currently free, the complement of
+// frames_used. Nothing in the kernel makes a decision on this number: it exists so
+// that a leak can be OBSERVED rather than argued about, by printing it at a point
+// where memory has just been returned (kernel/scheduler.c reports it every time a
+// dead task's address space is torn down) and checking it comes back to the same
+// value after the same work. A slow monotonic decrease across repeated runs is a
+// leak, and without this it would be invisible until the machine ran out.
+//
+// It walks the whole bitmap on every call, which is fine because only debug code
+// calls it. Do not put it on a hot path.
+uint64_t frame_free_count(void) {
+    return (uint64_t)num_frames - (uint64_t)frames_used();
+}

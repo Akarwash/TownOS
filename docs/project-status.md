@@ -75,11 +75,13 @@ the known limitations. It is a factual snapshot, not a roadmap.
   and [decisions/0006-user-mode-with-separate-pages.md](decisions/0006-user-mode-with-separate-pages.md).
 - System calls (`kernel/syscall.c`, `include/syscalls.h`): the ring-3 programs
   call back into the kernel through one `int 0x50` gate, the only DPL 3 gate in
-  the IDT. Six calls: `SYS_WRITE` prints a string; `SYS_EXIT` halts; `SYS_READKEY`
+  the IDT. Seven calls: `SYS_WRITE` prints a string; `SYS_EXIT` ends the calling
+  task with a status; `SYS_READKEY`
   pops one key from the keyboard ring buffer, sleeping the caller until one
   arrives; `SYS_LIST` writes the
   root directory's names into a caller buffer; `SYS_RUN` loads and starts a named
-  program; `SYS_READFILE` reads a whole file into a caller buffer. The dispatcher
+  program; `SYS_READFILE` reads a whole file into a caller buffer; `SYS_WAIT`
+  blocks until any child exits and returns its status. The dispatcher
   switches on RAX and returns its result in RAX; an unknown number is rejected, not
   fatal. The `SYS_WRITE` pointer check is a stopgap (see limitations below), but the
   four shell calls bound the whole `[ptr, ptr+len)` range with `user_range_ok` and
@@ -106,8 +108,8 @@ the known limitations. It is a factual snapshot, not a roadmap.
   space, loads a program file into it, and forges it as a never-run task (the
   ring-3 drop generalised); a pointer array tracks the heap-allocated tasks. The
   three programs loaded from `A.ELF`, `B.ELF` and `C.ELF` interleave "A", "B",
-  and "C" on screen forever. The old fixed four-task ceiling and the
-  shared user-stack region are both gone. See
+  and "C" on screen until each finishes its rounds. The old fixed four-task
+  ceiling and the shared user-stack region are both gone. See
   [reference/scheduling.md](reference/scheduling.md),
   [decisions/0008-round-robin-preemptive-scheduler.md](decisions/0008-round-robin-preemptive-scheduler.md),
   and [decisions/0011-dynamic-tasks-and-stacks.md](decisions/0011-dynamic-tasks-and-stacks.md).
@@ -121,6 +123,18 @@ the known limitations. It is a factual snapshot, not a roadmap.
   spinning. An idle shell went from 362,648 syscalls per six seconds to three. See
   [reference/blocking.md](reference/blocking.md) and
   [decisions/0017-blocking-and-sleep.md](decisions/0017-blocking-and-sleep.md).
+- Process lifecycle (`kernel/scheduler.c`, `kernel/paging.c`): a task can end.
+  `SYS_EXIT` takes a status (masked to 0..255) and does paperwork only, marking the
+  task `TASK_ZOMBIE` and waking its parent, because the task calling it is the one
+  whose stack and CR3 the machine is standing on. Cleanup is split: a sweeper at the
+  top of `schedule()` tears down the address space of any zombie that is not the
+  running task (`paging_destroy_address_space`, which frees the user half only), and
+  the parent frees the tombstone when it collects the status through the new
+  `SYS_WAIT`. Freed slots become NULL holes, `num_tasks` is a high water mark, and
+  ids are never reused. The shell's `run` now waits and reports
+  `run: A.ELF exited with status 0`. See
+  [reference/scheduling.md](reference/scheduling.md) and
+  [decisions/0018-process-lifecycle-exit-and-wait.md](decisions/0018-process-lifecycle-exit-and-wait.md).
 - Per-process paging (`kernel/paging.c`): each task has its own page-table tree,
   loaded into CR3 on every context switch, so two tasks use the same virtual
   addresses (code `0x400000`, stack top `0x800000`) backed by different physical
@@ -157,15 +171,18 @@ idle seconds. See [building.md](building.md).
 
 ## What was never built
 
-These are absent by design. MiniOS now loads programs from files, but it does not
-manage them as processes: there is no way for a program to start another, to end
-and return anywhere, or to be given anything on the way in.
+These are absent by design. MiniOS now loads programs from files and gives them a
+parent, an exit status, and a cleanup path, but they are still not processes in the
+Unix sense: nothing can be passed in on the way in, and nothing can be stopped once
+it is running.
 
-- **Processes.** Programs are loaded from disk now, but they are not processes.
-  There is no `fork` or `exec`, so nothing can start anything else; `SYS_EXIT`
-  has no parent to return to and can only halt the machine; a task is never
-  destroyed and its frames are never reclaimed; and which programs run is still
-  decided by a list in `kernel_main` rather than by anything at runtime.
+- **Processes.** A program can now be started by another (`SYS_RUN`), can end with
+  a status (`SYS_EXIT`), and is waited on and cleaned up (`SYS_WAIT` and the
+  scheduler's sweeper). What is still missing is the rest of the model: there is no
+  `fork` or `exec`, so a program cannot replace its own image or duplicate itself;
+  there is no way to kill a task and there are no signals, so a program that will
+  not finish cannot be stopped; `SYS_WAIT` is any-child rather than `waitpid`; and
+  orphans are discarded rather than reparented, because there is no `init`.
 - **Arguments, dynamic linking, relocation, and demand paging.** A program is
   entered with an empty stack and no argv. It must be `ET_EXEC` linked at the
   fixed 0x400000, since the loader resolves and relocates nothing, so two
@@ -194,8 +211,9 @@ and return anywhere, or to be given anything on the way in.
   `SYS_RUN` forges the same empty, argv-less frame the loader always does. And the
   shell is one line at a time: no pipes or redirection to connect programs, no job
   control to background one, and no history or line recall (backspace editing of the
-  current line is all there is). A launched program also never ends anywhere:
-  `SYS_EXIT` halts the machine rather than returning to the shell.
+  current line is all there is). `run` now waits for its program and reports an exit
+  status, but it can only wait: there is no way to background a program, and no way
+  to interrupt one that will not finish.
 
 ## Natural next steps
 
@@ -208,8 +226,8 @@ The remaining steps build on it.
 
 **System calls.** Done. Ring-3 code re-enters the kernel through one DPL 3 IDT
 gate at `int 0x50` (`kernel/syscall.c`), the first and only deliberate exception
-to the DPL-0-everywhere IDT policy. A call number in RAX selects a handler
-(`SYS_WRITE`, `SYS_EXIT`). See
+to the DPL-0-everywhere IDT policy. A call number in RAX selects a handler; there
+are seven. See
 [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
 What remains for a real syscall layer is safe argument validation (see the
 untrusted-pointer limitation below) and more calls, both of which wait on
@@ -269,15 +287,23 @@ at a syscall boundary that rewinds the saved `rip` onto the `int 0x50`, so wakin
 re-issues the call. See
 [decisions/0017-blocking-and-sleep.md](decisions/0017-blocking-and-sleep.md).
 
-**Filesystem writing, then real processes.** Next. Writing is the other direction
-across the same filesystem and is independent of the loader: free-cluster search,
-chain and directory updates, mirroring every FAT copy, and crash ordering
-(`TODO(fat32-write)`). Real processes are the other axis, and the shell now makes
-the gaps concrete: argv on the new stack so `run` can pass arguments, a `SYS_EXIT`
-that returns to the shell instead of halting, and reclaiming a dead task's frames.
-Blocking is the rung those stand on: a parent waiting for a child is the same
-shape as the keyboard wait, a new `wait_reason_t` and a waker in the right place
-rather than a new mechanism. The same is true of pipes and of waiting on the disk.
+**Process lifecycle.** Done. A task can end and be cleaned up: `SYS_EXIT` carries a
+status and marks the task a zombie, a sweeper in `schedule()` frees its address
+space once it is no longer the running task, and `SYS_WAIT` blocks a parent until a
+child finishes and hands back the status. `run A.ELF` now prints the program's
+output and then `run: A.ELF exited with status 0`, and repeated runs return the
+free-frame count to the same value. See
+[decisions/0018-process-lifecycle-exit-and-wait.md](decisions/0018-process-lifecycle-exit-and-wait.md).
+
+**Filesystem writing.** Next. Writing is the other direction across the same
+filesystem and is independent of the loader: free-cluster search, chain and
+directory updates, mirroring every FAT copy, and crash ordering
+(`TODO(fat32-write)`). After that, the remaining process work the shell makes
+concrete: argv on the new stack so `run` can pass arguments, a way to kill a task
+so a runaway program does not require a reboot (`TODO(kill-and-signals)`), and
+`waitpid` so a parent with several children can name one. Pipes and waiting on the
+disk are the same block/wake shape as `WAIT_KEY` and `WAIT_CHILD`, a new
+`wait_reason_t` and a waker in the right place rather than a new mechanism.
 
 ## Known limitations
 
@@ -293,7 +319,7 @@ rather than a new mechanism. The same is true of pipes and of waiting on the dis
   check still only tests the start pointer against the fixed region constants.
   Recorded as a TODO in `kernel/syscall.c`. Do not read the region check as real
   pointer safety. See [reference/syscalls.md](reference/syscalls.md).
-- **The scheduler still has no task exit, and blocking is narrow.** Task structs
+- **Blocking is narrow, and a runaway task cannot be stopped.** Task structs
   are heap-allocated and each task now has its own address space with a private
   stack (per-process paging), so the old fixed four-task ceiling and the shared
   user-stack region are both gone: a stack overflow faults in the offending task
@@ -304,16 +330,21 @@ rather than a new mechanism. The same is true of pipes and of waiting on the dis
   `TODO(per-task-kernel-stack)`. There is also no timed sleep, so nothing can ask
   to be woken after a duration and a blocking call has no timeout
   (`TODO(timed-sleep)`), and wakeup is a linear scan rather than a per-reason wait
-  queue. What remains beyond that: no task exit that returns anywhere (`SYS_EXIT`
-  halts the machine); and no reclamation (a task's frames and tree are never freed,
-  since tasks are never destroyed). Memory is also used
-  wastefully: the read-only user text is copied in full per task rather than
-  shared (`TODO(shared-text)`). See
+  queue. Task exit and reclamation now exist, but with sharp edges of their own:
+  **there is no way to kill a task and there are no signals**, so a program with an
+  unbounded loop leaves its parent blocked in `SYS_WAIT` with no way back short of a
+  reboot (`TODO(kill-and-signals)`); `SYS_WAIT` is any-child, so a parent cannot
+  name a particular one; orphaned zombies are discarded rather than reparented, as
+  there is no `init`; and with no crt0, a program that falls off the end of `_start`
+  runs into whatever bytes follow it. Memory is also still used wastefully: the
+  read-only user text is copied in full per task rather than shared
+  (`TODO(shared-text)`). See
   [reference/scheduling.md](reference/scheduling.md),
   [reference/blocking.md](reference/blocking.md),
   [reference/paging.md](reference/paging.md),
-  [decisions/0012-per-process-paging.md](decisions/0012-per-process-paging.md), and
-  [decisions/0017-blocking-and-sleep.md](decisions/0017-blocking-and-sleep.md).
+  [decisions/0012-per-process-paging.md](decisions/0012-per-process-paging.md),
+  [decisions/0017-blocking-and-sleep.md](decisions/0017-blocking-and-sleep.md), and
+  [decisions/0018-process-lifecycle-exit-and-wait.md](decisions/0018-process-lifecycle-exit-and-wait.md).
 - **Disk transfers freeze the machine.** The disk driver polls, so the CPU spins
   in the wait loops for the whole transfer and nothing else runs, including the
   scheduler: the timer tick cannot preempt a task while a block is moving. This is

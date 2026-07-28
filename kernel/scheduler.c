@@ -7,6 +7,7 @@
 #include "memory.h"
 #include "elf.h"
 #include "../libc/mem.h"
+#include "../drivers/screen.h"   // the LIFECYCLE_DEBUG reap report below
 
 // Pointers to the heap-allocated tasks, in creation order (ids 0, 1, ...). Each
 // task_t is kmalloc'd in task_register. A flat pointer array (rather than a linked
@@ -360,6 +361,36 @@ void scheduler_wake(wait_reason_t reason) {
     // back in the rotation and the next tick's schedule() will reach it.
 }
 
+// Report every teardown on the console, with the number of free frames after it.
+//
+// ON BY DEFAULT, AND DELIBERATELY SO. This one line is the leak test for the whole
+// lifecycle: run the same program ten times and the count printed after each must
+// be identical from the second onwards. A slow monotonic decrease means something a
+// dead task held is not coming back (most likely a page table under one of the two
+// user PD slots, or the address_space_t handle), and without this the only symptom
+// would be a machine that runs out of memory after a long session, with nothing to
+// point at the cause. Set to 0 to silence it.
+#define LIFECYCLE_DEBUG 1
+
+// Called at the moment a dead task's address space has just gone back to the pools,
+// from whichever of the two teardown paths got there first (see task_wait for why
+// there are two). It is a function rather than a line in each path so the two
+// cannot drift into reporting different things.
+static void lifecycle_report_reap(uint32_t id, int32_t status) {
+#if LIFECYCLE_DEBUG
+    print_string("reap: task ");
+    print_int(id);
+    print_string(" exited (status ");
+    print_int((uint32_t)status);
+    print_string("), free frames: ");
+    print_int((uint32_t)frame_free_count());
+    print_string("\n");
+#else
+    (void)id;
+    (void)status;
+#endif
+}
+
 // Is there still somebody who could read a zombie's exit status?
 //
 // This is not simply "does the slot exist". A ZOMBIE PARENT DOES NOT COUNT. It has
@@ -411,6 +442,7 @@ static void reap_sweep(void) {
             paging_destroy_address_space(t->aspace);
             t->aspace = NULL;   // the tree is gone: never load or free it twice
             t->cr3 = 0;         // and never let this stale value reach CR3
+            lifecycle_report_reap(t->id, t->exit_status);
         }
 
         // An orphan loses its tombstone. With nobody left to call SYS_WAIT, the
@@ -508,6 +540,13 @@ void task_wait(registers_t *r) {
         // whole address space would leak. Both paths guard on aspace != NULL, so
         // whichever arrives first does the work and the other does nothing.
         //
+        // In practice THIS path usually wins, which is worth knowing before reading
+        // the sweeper as the normal case. task_exit wakes the parent and switches
+        // straight to it, the parent's iretq lands on its rewound `int 0x50`, and it
+        // re-enters this function without a timer tick in between, so the sweeper
+        // has had no opportunity to run. The sweeper's copy is what collects a child
+        // whose parent is slow to wait, or never waits at all.
+        //
         // It is safe here for the same reason the sweeper's skip of `current` makes
         // it safe there: this is a CHILD of the caller, and a child is by definition
         // not the task running right now, so this tree is not the one in CR3.
@@ -515,6 +554,7 @@ void task_wait(registers_t *r) {
             paging_destroy_address_space(t->aspace);
             t->aspace = NULL;
             t->cr3 = 0;
+            lifecycle_report_reap(t->id, status);
         }
 
         kfree(t);

@@ -7,6 +7,73 @@ All notable changes to MiniOS are recorded here. The format is based on
 
 ### Added
 
+- A process lifecycle: a task can now end, and its memory comes back. `SYS_EXIT`
+  (0) takes an exit status in RDI and ends the calling task instead of halting the
+  machine; `SYS_WAIT` (6) blocks a task until any child of it exits and returns
+  that child's status. `task_state_t` gained `TASK_ZOMBIE` (a tombstone, not a
+  process: no code, no stack, and after the sweep no address space, just an
+  `exit_status` and an id for whoever is waiting), `wait_reason_t` gained
+  `WAIT_CHILD`, and `task_t` gained `parent_id` and `exit_status`. `SYS_RUN`
+  records `scheduler_current_id()` as the new task's parent, which is what a later
+  `SYS_WAIT` matches on; the boot task's parent is `TASK_NO_PARENT`, since nothing
+  can ever wait on it. **Death is two-phase.** `task_exit` does paperwork only: it
+  masks the status to 0..255, stores it, marks the task `TASK_ZOMBIE`, wakes the
+  parent, and switches away, freeing nothing at all. It cannot free anything: the
+  task calling `SYS_EXIT` is the task on the CPU, its stack is the stack, and its
+  address space is the tree CR3 points at, so freeing any of it would hand the
+  running machine's own memory back to the allocator, and nothing would fault at
+  that moment. **Cleanup is split by weight.** `reap_sweep()`, called at the top of
+  `schedule()`, tears down the address space of any zombie **except `current`**,
+  and that one exception is the entire safety argument; by the time `schedule()`
+  runs again somebody else is on the CPU with their own CR3. If the zombie's parent
+  is already gone, the tombstone is pointless, so the `task_t` is `kfree`d and the
+  slot NULLed on the spot (orphans lose their tombstone; there is no reparenting
+  because there is no `init`). If the parent is alive, the struct survives holding
+  the status until `task_wait` collects it and frees it, because that struct *is*
+  the answer the parent came for. `paging_destroy_address_space` (`kernel/paging.c`)
+  is the teardown: it walks `pml4[0] → pdpt[0] → pd` and descends into exactly two
+  PD entries by index (`USER_PD_INDEX_CODE`, `USER_PD_INDEX_STACK`), freeing leaf
+  pages before their page table, then the PD, PDPT, PML4, and the handle. The
+  explicit two-entry list is the whole safety of the function: the kernel half is
+  cloned by value into every tree, so a generic "free everything present" loop would
+  return the live kernel's mappings to the frame allocator and kill the machine
+  minutes later somewhere unrelated, with no message pointing anywhere near here.
+  Its precondition, that `as` must not be the tree in CR3, has no check behind it
+  and the same delayed, misattributed death when violated. Because tasks are now
+  freed, `tasks[]` has **NULL holes**: `any_task_ready`, `find_next_ready`, and
+  `scheduler_wake` each gained a NULL check, `schedule()` carries a defensive early
+  return for a NULL `current` that should be unreachable, `num_tasks` became a high
+  water mark rather than a live count, and **ids are never reused**, so a stale id
+  can only ever name nothing rather than a different task that inherited the number.
+  The `WAIT_CHILD` wake is by id rather than a `scheduler_wake` broadcast, because
+  every parent waits on the same reason and a broadcast would ready all of them to
+  re-issue `SYS_WAIT`, find none of their own children finished, and block again;
+  and like the keyboard's, it publishes first (status and `TASK_ZOMBIE` set before
+  the wake). The RAX rule from blocking now covers two syscalls: `task_wait` writes
+  `regs->rax` itself on the two paths that have an answer (a status, or
+  `SYSCALL_ERROR` for "no children", which is why the status is masked, so the two
+  ranges cannot collide) and writes nothing on the path that blocks, and `SYS_EXIT`
+  writes it never. `SYSCALL_ERROR` moved from `kernel/syscall.c` to
+  `kernel/syscall.h` so the scheduler and the dispatcher share one spelling. On the
+  ring-3 side, `sys_exit(int)` and `sys_wait(void)` joined `user/userlib.h`;
+  `user/A.c`, `B.c`, and `C.c` gained bounded loops (20, 60, and 40 rounds) and call
+  `sys_exit` at the bottom (C exits 3, so the status is visibly not a default), and
+  the shell's `run` now calls `SYS_WAIT` after a successful `SYS_RUN` and prints
+  `run: A.ELF exited with status 0`, so the prompt returns only when the program is
+  finished. The bound is load-bearing rather than cosmetic: there is no way to kill
+  a task and there are no signals, so a program that never exits leaves the shell
+  blocked with no way back short of a reboot (`TODO(kill-and-signals)`). There is no
+  crt0, so a program that falls off the end of `_start` runs into whatever bytes
+  follow it. Ten consecutive `run A.ELF` return the free-frame count to the same
+  value every time, which is the only thing that distinguishes freeing most of it
+  from freeing all of it. See `docs/decisions/0018-process-lifecycle-exit-and-wait.md`,
+  `docs/reference/scheduling.md`, and `docs/reference/paging.md`.
+- `frame_free_count()` (`kernel/memory.c`), a diagnostic that reports how many
+  frames are currently free, and a `LIFECYCLE_DEBUG`-gated `reap:` line that prints
+  it at the moment a dead task's address space is destroyed. Nothing in the kernel
+  makes a decision on this number; it exists so a leak can be *observed* rather than
+  argued about, by checking the count comes back to the same value after the same
+  work. It walks the whole bitmap on every call and must stay off any hot path.
 - Blocking and sleep in the scheduler, so a task with nothing to do gives up the
   CPU entirely instead of spinning, and is woken by whatever causes the event it
   waited for. `task_state_t` gained `TASK_BLOCKED` and `task_t` gained a

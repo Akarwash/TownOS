@@ -89,6 +89,7 @@ chapter states are:
 | 17 | Loading a program (the ELF loader) | [17-loading-a-program.md](17-loading-a-program.md) | written | [../docs/reference/elf-loading.md](../docs/reference/elf-loading.md) |
 | 18 | The shell (interactive, ring 3) | [18-the-shell.md](18-the-shell.md) | written | [../docs/reference/shell.md](../docs/reference/shell.md) |
 | 19 | Blocking and sleep | [19-blocking-and-sleep.md](19-blocking-and-sleep.md) | stubbed | [../docs/reference/blocking.md](../docs/reference/blocking.md) |
+| 20 | Process lifecycle (exit and wait) | [20-process-lifecycle.md](20-process-lifecycle.md) | written | [scheduling.md](../docs/reference/scheduling.md), [syscalls.md](../docs/reference/syscalls.md) |
 
 Chapters 1, 2, 3, and 5 (frozen-32bit) and chapters 8, 9, and 14 (stubbed)
 overlap on purpose: the frozen chapter teaches the original 32-bit take on boot,

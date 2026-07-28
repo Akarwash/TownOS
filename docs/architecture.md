@@ -10,7 +10,8 @@ that reads typed commands and runs them using nothing but syscalls, which is wha
 proves the syscall boundary is complete. MiniOS drops to ring 3 (CPL 3) to run
 those programs in their own user-accessible pages, and those programs call back
 into the kernel through a single `int 0x50` syscall gate (`SYS_WRITE`, `SYS_EXIT`,
-`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`) rather than faulting. A
+`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`, `SYS_WAIT`) rather than
+faulting. A
 round-robin preemptive scheduler switches between the ring-3 tasks on every timer
 tick by overwriting the interrupt frame in place, so they run concurrently: the
 shell boots alone, and `run A.ELF` starts another task that interleaves with it.
@@ -50,9 +51,9 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `kernel/kernel.c` | `kernel_main`: the init sequence, then loads `SHELL.ELF` from disk as a task and starts the scheduler. | Implemented |
 | `kernel/gdt.c`, `kernel/gdt.h` | Kernel GDT (null, kernel code/data, user code/data) and 64-bit TSS; selector constants. | Implemented |
 | `kernel/usermode.c`, `kernel/usermode.h` | `enter_user_mode`: forge the `iretq` frame and drop to ring 3. | Implemented |
-| `kernel/syscall.c`, `kernel/syscall.h` | Syscall dispatcher: `syscall_handler` switches on RAX (`SYS_WRITE`, `SYS_EXIT`, `SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`), with `user_range_ok`/`copy_user_string` bounding the untrusted pointers. | Implemented |
-| `kernel/scheduler.c`, `kernel/scheduler.h` | Round-robin scheduler: `task_create_from_file` heap-allocates and forges a task, builds its private address space and loads a program file into it, `schedule` swaps the interrupt frame and loads the next task's CR3, `scheduler_start` enters task 0. `task_block` puts a task to sleep at a syscall boundary and `scheduler_wake` readies the sleepers on a reason; with nothing runnable, `schedule` parks the CPU in `hlt`. | Implemented |
-| `kernel/paging.c`, `kernel/paging.h` | Per-process paging: `paging_create_address_space` (private tree, kernel half cloned by value), `paging_map_page` (4KB user mappings), `paging_switch` (load CR3). | Implemented |
+| `kernel/syscall.c`, `kernel/syscall.h` | Syscall dispatcher: `syscall_handler` switches on RAX (`SYS_WRITE`, `SYS_EXIT`, `SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`, `SYS_WAIT`), with `user_range_ok`/`copy_user_string` bounding the untrusted pointers. | Implemented |
+| `kernel/scheduler.c`, `kernel/scheduler.h` | Round-robin scheduler: `task_create_from_file` heap-allocates and forges a task, builds its private address space and loads a program file into it, `schedule` swaps the interrupt frame and loads the next task's CR3, `scheduler_start` enters task 0. `task_block` puts a task to sleep at a syscall boundary and `scheduler_wake` readies the sleepers on a reason; with nothing runnable, `schedule` parks the CPU in `hlt`. `task_exit` marks a task `TASK_ZOMBIE` and wakes its parent, `reap_sweep` frees a zombie's address space (never the running task's), and `task_wait` blocks a parent until a child exits and then frees the tombstone. | Implemented |
+| `kernel/paging.c`, `kernel/paging.h` | Per-process paging: `paging_create_address_space` (private tree, kernel half cloned by value), `paging_map_page` (4KB user mappings), `paging_switch` (load CR3), `paging_destroy_address_space` (free the user half only, never the tree in CR3). | Implemented |
 | `kernel/elf.c`, `kernel/elf.h` | ELF64 program loader: validate a file, bounds-check and map each `PT_LOAD` segment, copy and zero-fill it, report the entry point. | Implemented |
 | `user/shell.c` | The interactive shell: a ring-3 program (`SHELL.ELF`) that reads a line via `SYS_READKEY`, tokenizes it, and dispatches `list`/`read`/`run`/`help`/`clear`/`return` through syscalls. | Implemented |
 | `user/A.c`, `user/B.c`, `user/C.c` | The three ring-3 demo programs, each a separate static ELF64 binary on the disk image; each loops calling the kernel via `int 0x50`. Launched on demand with the shell's `run`. | Implemented |
@@ -74,7 +75,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `libc/mem.c`, `libc/mem.h` | `memcpy`, `memset`. | Implemented |
 | `include/types.h` | Fixed-width integer types and `NULL`. | Implemented |
 | `include/vectors.h` | Single source of truth for every interrupt vector, including `SYSCALL_VECTOR`. | Implemented |
-| `include/syscalls.h` | Standalone syscall ABI numbers (`SYS_EXIT`, `SYS_WRITE`), no kernel code. | Implemented |
+| `include/syscalls.h` | Standalone syscall ABI numbers (`SYS_EXIT`, `SYS_WRITE`, `SYS_WAIT`, ...), no kernel code. | Implemented |
 | `linker.ld` | Section layout: the kernel at 1M in a single `PT_LOAD` segment (nothing ring-3 is in the image any more). | Implemented |
 | `Makefile` | Build rules, toolchain, flags. | Implemented |
 
@@ -139,8 +140,10 @@ From power-on to the idle loop:
    next task's frame over it in place, and loads the next task's CR3, so `iretq`
    resumes a different task in its own address space. The shell loops, reading keys
    through `SYS_READKEY` and running commands through the `int 0x50` gate; a `run
-   A.ELF` command calls `SYS_RUN`, which loads a second task that then interleaves
-   with the shell on the timer tick (neither calls `SYS_EXIT`). With nobody typing,
+   A.ELF` command calls `SYS_RUN`, which loads a second task, and then `SYS_WAIT`,
+   which blocks the shell until that task calls `SYS_EXIT`. The exiting task is
+   marked a zombie; the scheduler's sweeper frees its address space on a later tick
+   and the shell frees the tombstone when it collects the status. With nobody typing,
    the shell is blocked inside `SYS_READKEY` and, if it is the only task, nothing is
    runnable, so `schedule()` halts the CPU until the keyboard IRQ wakes it.
    `scheduler_start` does not return, so the `hlt` idle loop below it is unreachable

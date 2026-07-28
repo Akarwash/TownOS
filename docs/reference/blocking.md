@@ -17,20 +17,27 @@ typedef enum {
     TASK_UNUSED = 0,
     TASK_READY,        // runnable, waiting for its slice
     TASK_RUNNING,      // currently on the CPU
-    TASK_BLOCKED       // waiting for an event, skipped by the rotation entirely
+    TASK_BLOCKED,      // waiting for an event, skipped by the rotation entirely
+    TASK_ZOMBIE        // finished, kept only until someone collects its status
 } task_state_t;
 
 typedef enum {
     WAIT_NONE = 0,     // not waiting for anything
-    WAIT_KEY           // waiting for a keypress, woken by the keyboard IRQ
+    WAIT_KEY,          // waiting for a keypress, woken by the keyboard IRQ
+    WAIT_CHILD         // waiting for a child to exit, woken by that child's task_exit
 } wait_reason_t;
 ```
 
 The two carry different information and both are needed. The **state** takes the
 task out of the rotation. The **reason** is what lets the right waker find it
 again: a keypress should ready the tasks waiting for a key and leave a task
-waiting for something else asleep. One reason exists today; the enum is the seam
-where `WAIT_CHILD` and `WAIT_DISK` slot in.
+waiting for a child asleep.
+
+`WAIT_CHILD` is the second reason, and it is the one that shows the mechanism is
+general. Its waker is not a driver and not an interrupt: it is **another task**,
+inside `task_exit`, on its way out. The pairing rule below does not care which —
+"whoever causes the event" is the exiting child, so that is where the wake goes.
+`WAIT_DISK` is the next obvious one and still a seam.
 
 `wait_reason` is only meaningful while the task is `TASK_BLOCKED`. It is set to
 `WAIT_NONE` when the task is created and cleared back to `WAIT_NONE` on wake.
@@ -212,6 +219,28 @@ scheduler_wake(WAIT_KEY);
 could be scheduled, re-issue its read, find nothing, and block again, turning one
 keypress into a wasted round trip. Publish the data, then announce it.
 
+For `WAIT_CHILD` the same rule holds in `task_exit` (`kernel/scheduler.c`): the
+status is written and the state is set to `TASK_ZOMBIE` *before* the parent is
+woken. A parent woken first would re-issue `SYS_WAIT`, find a child that is not
+yet marked finished, and block again.
+
+`WAIT_CHILD` wakes **one specific task by id**, not everything blocked on the
+reason:
+
+```c
+if (parent_alive(t->parent_id) && tasks[t->parent_id]->wait_reason == WAIT_CHILD) {
+    tasks[t->parent_id]->state = TASK_READY;
+    tasks[t->parent_id]->wait_reason = WAIT_NONE;
+}
+```
+
+The broadcast `scheduler_wake(WAIT_CHILD)` would be wrong here in a way the
+keyboard's broadcast is not. Every parent in the system waits on the same reason,
+so one child exiting would ready all of them; each would re-issue `SYS_WAIT`, find
+none of *its own* children finished, and block again. Harmless but pointless for
+most, and it makes the wake say something untrue. A key belongs to whoever asked
+for one; a dead child belongs to exactly one parent.
+
 `scheduler_wake` only changes state; it does not switch tasks. That keeps it
 short and safe to call from interrupt context, where the live pile belongs to
 whatever was interrupted rather than to the task being woken, and leaves the
@@ -245,8 +274,10 @@ static void sys_readkey(registers_t *regs) {
 ```
 
 The dispatcher calls it as `sys_readkey(regs); break;` rather than
-`regs->rax = sys_readkey();`. Any future blocking syscall must follow the same
-shape.
+`regs->rax = sys_readkey();`. `SYS_WAIT` follows the same shape: `task_wait`
+writes `regs->rax` on the two paths that have an answer (a finished child's status,
+or `SYSCALL_ERROR` for "you have no children") and writes nothing at all on the
+path that calls `task_block`. Any future blocking syscall must do the same.
 
 ## Invariants
 
@@ -299,10 +330,10 @@ there is a re-check loop somewhere.
 - **Wakeup is a linear scan** over every task. Fine at this scale; a kernel with
   many sleepers would keep a per-reason wait queue and wake off the head in
   constant time.
-- **Only one wait reason.** Process exit and wait, pipes, and waiting on the disk
-  are all the same shape (a block paired with a wake from whatever causes the
-  event) and each needs a new `wait_reason_t` and a waker in the right place, not
-  a new mechanism.
+- **Only two wait reasons.** Pipes and waiting on the disk are the same shape (a
+  block paired with a wake from whatever causes the event) and each needs a new
+  `wait_reason_t` and a waker in the right place, not a new mechanism. `WAIT_CHILD`
+  was added exactly that way and needed no change to `task_block` at all.
 
 ## Related
 
@@ -315,3 +346,5 @@ there is a re-check loop somewhere.
 - The shell that used to busy-wait, and the keyboard ring buffer the wake feeds:
   [shell.md](shell.md) and
   [decision 0016](../decisions/0016-interactive-shell.md).
+- The second wait reason, and the zombie state it collects from:
+  [decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md).

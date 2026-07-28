@@ -1,15 +1,18 @@
 # Scheduling reference
 
-MiniOS runs several ring-3 programs (three today) by switching between them on
-every timer tick. This page documents how that switch works, why it is safe, and
-the two things that are easy to get wrong. Read from `kernel/scheduler.c`,
-`kernel/scheduler.h`, `kernel/timer.c`, `kernel/isr.c`, and `kernel/usermode.c`.
-For the rationale and the trade-offs, see
+MiniOS runs ring-3 programs by switching between them on every timer tick. It
+boots one task (the shell) and gains more whenever the shell runs a program; they
+now also go away again when those programs finish. This page documents how the
+switch works, why it is safe, and the things that are easy to get wrong. Read from
+`kernel/scheduler.c`, `kernel/scheduler.h`, `kernel/timer.c`, `kernel/isr.c`, and
+`kernel/usermode.c`. For the rationale and the trade-offs, see
 [decision 0008](../decisions/0008-round-robin-preemptive-scheduler.md) (the
 switch), [decision 0011](../decisions/0011-dynamic-tasks-and-stacks.md)
-(dynamic tasks and stacks), and
+(dynamic tasks and stacks),
 [decision 0012](../decisions/0012-per-process-paging.md) (the per-task address
-space the switch now also loads).
+space the switch now also loads), and
+[decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md) (how a task
+ends and who cleans up after it).
 
 ## The pile is the program
 
@@ -48,13 +51,22 @@ it runs in, a state, and an id:
 ```c
 typedef struct {
     registers_t regs;          // the saved/forged interrupt frame: IS the task
-    address_space_t *aspace;   // this task's private page-table tree
-    uint64_t cr3;              // physical PML4 base to load on switch
-    task_state_t state;        // TASK_UNUSED / READY / RUNNING / BLOCKED
+    address_space_t *aspace;   // this task's private page-table tree (NULL once freed)
+    uint64_t cr3;              // physical PML4 base to load on switch (0 once freed)
+    task_state_t state;        // TASK_UNUSED / READY / RUNNING / BLOCKED / ZOMBIE
     wait_reason_t wait_reason; // what it is blocked on, only while BLOCKED
     uint32_t id;
+    uint32_t parent_id;        // who may wait on this task, or TASK_NO_PARENT
+    int32_t exit_status;       // 0..255, meaningful only while ZOMBIE
 } task_t;
 ```
+
+`parent_id` and `exit_status` are the lifecycle fields. `parent_id` is recorded at
+creation (the shell's own id when it runs a program, `TASK_NO_PARENT` for the boot
+task, which nothing can ever wait on), and `exit_status` holds the number the task
+passed to `SYS_EXIT` until whoever is waiting collects it. `aspace`/`cr3` are set
+to NULL/0 once the address space has been torn down, and that NULL is the flag both
+freeing paths test to avoid destroying the same tree twice.
 
 The `aspace` handle and its cached `cr3` are new: each task now owns a private
 page-table tree, so two tasks can use the same virtual address for different
@@ -76,6 +88,22 @@ that has now been removed. See
 A `task_t` is kernel-only bookkeeping (only the scheduler reads it), never
 touched by ring-3 code, so it is safe on kernel heap pages. That is what lets the
 struct go on the heap while the stack (below) cannot.
+
+## The table has holes, and ids are never reused
+
+Now that tasks are freed, `tasks[]` is no longer dense. A freed slot is set to
+NULL and left there, so **every walk of `tasks[]` must skip NULL entries**;
+`any_task_ready`, `find_next_ready`, and `scheduler_wake` each begin with a NULL
+check. A walk that does not have one dereferences a freed slot and faults in the
+scheduler, which is about the worst place to fault.
+
+`num_tasks` is now a **high water mark**, not a live count: it only ever goes up,
+and it is how far the walks scan, not how many tasks exist. Slots below it may be
+NULL. Ids are likewise **never reused** — id N means slot N forever, and once slot
+N is freed it stays empty. That is deliberate: a stale id (a `parent_id` recorded
+by a child whose parent has since exited, say) can only ever name *nothing*, never
+a different task that happened to inherit the number. Reusing ids would make
+`parent_id` a way to wake a stranger.
 
 ## Forging a never-run task
 
@@ -115,6 +143,7 @@ is never preempted: it would own the machine forever and no other task would run
 `schedule(registers_t *r)` (`kernel/scheduler.c`) is the whole scheduler:
 
 ```c
+reap_sweep();                                    // 0. free any zombie that is not us
 tasks[current]->regs = *r;                       // 1. save interrupted frame
 if (tasks[current]->state == TASK_RUNNING) {     //    ...but do not undo a block
     tasks[current]->state = TASK_READY;
@@ -139,6 +168,22 @@ walk in `find_next_ready` is bounded by `num_tasks` (the count actually created)
 rather than the old fixed `MAX_TASKS`. The save, pick, and overwrite are
 otherwise identical to the pre-heap version; the additions are step 4, the CR3
 load, and the two blocking-related changes marked above.
+
+**Step 0: the sweeper.** `reap_sweep()` walks the table and tears down the address
+space of any `TASK_ZOMBIE` — except `current`. That one exception is the entire
+safety argument: `current`'s CR3 is the register the CPU is using right now, and
+freeing the tree it points at hands the running machine's page tables back to the
+frame allocator. A task that calls `SYS_EXIT` is `current` at that moment, so it is
+always the *next* entry into `schedule()`, on some later tick with somebody else
+running, that actually frees it. The sweep sits after the `scheduler_running` /
+`scheduler_idling` guards (it must not run before there are tasks, or re-entrantly
+from the idle path) and before the save.
+
+The sweeper frees the heavy resource, the address space. Whether it also frees the
+`task_t` itself depends on whether anyone can still ask about it: if the parent is
+gone, the tombstone is pointless and the slot is `kfree`d and NULLed on the spot.
+If the parent is alive, the struct is left behind holding `exit_status` until the
+parent collects it in `SYS_WAIT`. See [syscalls.md](syscalls.md).
 
 **The save is conditional now.** It used to set `TASK_READY` unconditionally,
 which became wrong once a task could block: `task_block` marks the current task
@@ -196,10 +241,17 @@ touching the frame, so a lone task simply resumes.
 | `TASK_READY` | Runnable, waiting for a slice. Set by `task_create` and by `schedule` when a task is preempted. |
 | `TASK_RUNNING` | Currently on the CPU. Exactly one task at a time. |
 | `TASK_BLOCKED` | Waiting for an event, skipped by the rotation entirely. Set by `task_block`, cleared back to `TASK_READY` by `scheduler_wake`. |
+| `TASK_ZOMBIE` | Finished, but not yet cleaned up. Set by `task_exit`. Never runs again: the pick tests for `TASK_READY`, and the conditional save only touches `TASK_RUNNING`, so nothing can put a zombie back in the rotation. |
 
-A task therefore yields the CPU two ways: involuntarily, by being preempted on a
-timer tick, or voluntarily, by calling `task_block` at a syscall boundary. Both
-go through this same `schedule()`; only the thing that prompted the call differs.
+`TASK_ZOMBIE` is a **tombstone, not a process**. It has no code, no stack, and once
+the sweeper has run, no address space either: all that is left is `exit_status` and
+the id, kept only so a parent blocked in `SYS_WAIT` has somewhere to read the number
+from. A zombie whose parent is already gone is not kept at all.
+
+A task therefore yields the CPU three ways: involuntarily, by being preempted on a
+timer tick; voluntarily, by calling `task_block` at a syscall boundary; or finally,
+by calling `SYS_EXIT`, which becomes a block it never wakes from. All three go
+through this same `schedule()`; only the thing that prompted the call differs.
 A blocked task also carries a `wait_reason_t` saying what it waits for, so the
 right waker can find it. The mechanism, including why a block rewinds the saved
 `rip` onto the `int 0x50` rather than resuming mid-syscall, is in
@@ -252,12 +304,18 @@ and are mapped user-accessible by `paging_map_page`. See
 
 ## What a run looks like
 
-All three programs loop forever calling `SYS_WRITE` with a single-letter string
-and a crude busy-wait delay between writes (none calls `SYS_EXIT`). Booted under
-QEMU, the screen fills with interleaved letters (order varies with slice timing):
+The three demo programs each call `SYS_WRITE` with a single-letter string a fixed
+number of times (A 20, B 60, C 40), with a crude busy-wait delay between writes,
+and then call `SYS_EXIT`. The bound is not cosmetic: the shell now blocks in
+`SYS_WAIT` until its child is done, and there is no way to kill a task and no
+signals, so a program that looped forever would leave the shell unusable until a
+reboot.
+
+Started together from the shell, the screen fills with interleaved letters (order
+varies with slice timing), and the shorter programs drop out first:
 
 ```
-ABCBCACBACBABCABCABCABC...
+ABCBCACBACBABCABCABCABC... then BCBCBC... then BBBB...
 ```
 
 Under `-d int`, timer vector `0x40` fires continuously and syscall vector `0x50`
@@ -290,6 +348,11 @@ half (see [paging.md](paging.md)).
 - The blocked state, the re-arm, and the wakers:
   [blocking.md](blocking.md) and
   [decision 0017](../decisions/0017-blocking-and-sleep.md).
+- Exit, wait, the zombie state, and split cleanup:
+  [syscalls.md](syscalls.md) and
+  [decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md).
+- The teardown the sweeper calls:
+  [paging.md](paging.md).
 - The per-task address space the switch loads:
   [paging.md](paging.md).
 - The fixed user virtual layout each task's stack sits in:

@@ -156,6 +156,39 @@ triple-fault on the next instruction. The ordering trap: the CR3 write MUST come
 after the scheduler is done reading its own state and before `iretq` returns to
 ring 3.
 
+## Tearing a tree down
+
+`paging_destroy_address_space(address_space_t *as)` (`kernel/paging.c`) is the
+inverse of `paging_create_address_space` + `build_user_space`. The scheduler calls
+it when a finished task is cleaned up (see [scheduling.md](scheduling.md)).
+
+**It frees the USER half only.** It walks `pml4[0] → pdpt[0] → pd` and then
+descends into exactly two PD entries — `USER_PD_INDEX_CODE` (2) and
+`USER_PD_INDEX_STACK` (3) — freeing the present leaf pages of each page table, then
+the page table itself, then the PD, the PDPT, and the PML4, and finally `kfree`s
+the handle.
+
+The list of two indices is the whole safety of the function, and it is why it is
+written as an explicit list rather than a loop over present entries. **A generic
+"free everything present in this tree" walk would be catastrophic**: the kernel
+half is cloned *by value* into every tree, so those entries point at the shared
+kernel mappings, and freeing them returns the live kernel's memory to the frame
+allocator. Nothing faults at that moment. The frames are simply marked free, handed
+out later to somebody else, and written over, and the machine dies somewhere
+unrelated, long afterwards, with no message that points anywhere near here. The
+`PG_HUGE` skip inside the descent is a *second* lock (kernel-half entries are 2MB
+pages and have no page table to walk), not the primary guard.
+
+**Precondition: `as` MUST NOT be the address space currently loaded in CR3.** The
+CPU is walking that tree to fetch the instructions doing the freeing. There is no
+check for it and no fault when it is violated; the same delayed, misattributed
+death applies. The scheduler upholds this by never sweeping the *current* task.
+
+What it deliberately does **not** free: the kernel half (shared, not owned by this
+task), the physical frames of the original ring-3 image at `0x400000` (the task's
+copies are freed, the source image is not), and the `task_t` itself (that belongs
+to the scheduler, which may need to keep it as a tombstone).
+
 ## CR3 holds a physical address, and the write flushes the TLB
 
 CR3 takes a PHYSICAL address. Everything below 1GB is identity mapped, so
@@ -167,8 +200,8 @@ outgoing task's stale user translations on a switch, for free, with no explicit
 
 ## What a run looks like
 
-Booted under QEMU with `-d int`, the three programs interleave "A", "B", "C"
-forever, and the log shows:
+Booted under QEMU with `-d int` and all three programs started, they interleave
+"A", "B", "C" until each reaches its round count and exits, and the log shows:
 
 - three distinct task CR3 values (one tree per task), after a single tick on the
   boot CR3 before the first switch,
@@ -190,8 +223,9 @@ at a user RIP means the private user mapping for that task is missing or wrong.
 
 - The decision and its trade-offs:
   [decision 0012](../decisions/0012-per-process-paging.md).
-- The scheduler that loads CR3 on switch:
-  [scheduling.md](scheduling.md).
+- The scheduler that loads CR3 on switch, and calls the teardown:
+  [scheduling.md](scheduling.md) and
+  [decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md).
 - The physical layout and the fixed user virtual addresses:
   [memory-map.md](memory-map.md).
 - The shared-region layout this replaces:
