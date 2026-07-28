@@ -127,7 +127,7 @@ drivers/keyboard.c ......... PS/2 keyboard input (IRQ1)                → ch.4
 drivers/disk.c ............. polled ATA PIO disk driver                 → ch.15
 fs/fat32.c ................. read-only FAT32 filesystem                 → ch.16
 kernel/elf.c ............... ELF64 program loader                        → ch.17
-user/A.c, B.c, C.c ......... the ring-3 demo programs, loaded from disk    → ch.17, ch.10
+user/tests/A.c, B.c, C.c ... the ring-3 demo programs, loaded from disk    → ch.17, ch.10
 user/shell.c ............... the interactive shell (ring 3), loaded from disk → ch.18
 drivers/ports.c ............ in/out instruction wrappers               → ch.4
 libc/string.c, mem.c ....... hand-rolled standard library              → ch.7
