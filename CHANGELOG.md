@@ -3,6 +3,31 @@
 All notable changes to MiniOS are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## How to read this file
+
+**Entries are append-only. Each one describes the code at the release it sits
+under, and is not edited afterwards — not even once it has gone stale.**
+
+A name appearing below is therefore evidence that it existed *then*, and no
+evidence at all that it exists now. Several entries talk about `task_create`,
+`build_user_space`, `.user_text` and `user/A.c`. All of those were real; none of
+them still are. Programs are loaded from disk by `elf_load_file`
+([elf-loading.md](docs/reference/elf-loading.md)) and the fixtures live in
+[`user/tests/`](user/tests/README.md). The entries are nonetheless correct, because
+what an entry claims is that this is what shipped in that release, and it is.
+
+The reason for the rule is the one that also freezes the bodies of
+[architecture decision records](docs/decisions/README.md). A changelog's whole job
+is to say what changed and when. Rewriting an old entry into today's vocabulary
+produces a file in which nothing ever changed name: it goes on listing the change
+while destroying the evidence of it, and a reader tracing how a subsystem got its
+present shape finds every step described in words that did not exist at that step.
+A stale entry under a dated heading is honest, and its heading is how a reader
+knows to discount it. A retrofitted one is a claim nobody can check.
+
+For what is true **now**, read [`docs/reference/`](docs/reference/), which is
+corrected on sight, or the source.
+
 ## [Unreleased]
 
 ### Added

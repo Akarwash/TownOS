@@ -102,7 +102,7 @@ the known limitations. It is a factual snapshot, not a roadmap.
   [reference/shell.md](reference/shell.md) and
   [decisions/0016-interactive-shell.md](decisions/0016-interactive-shell.md).
 - A round-robin preemptive scheduler (`kernel/scheduler.c`): the timer tick
-  switches between several ring-3 tasks (three today) by overwriting the interrupt
+  switches between ring-3 tasks by overwriting the interrupt
   frame on the kernel stack in place and loading the next task's CR3, so the
   stub's `iretq` resumes a different task in its own address space.
   `task_create_from_file` `kmalloc`s a `task_t`, builds its private address
@@ -189,8 +189,10 @@ it is running.
   fixed 0x400000, since the loader resolves and relocates nothing, so two
   programs cannot be placed at different addresses and nothing can be shared as
   a library. The whole file is read and every segment fully populated before the
-  first instruction runs. Each task also gets its own physical copy of the
-  program text (`TODO(shared-text)`). See
+  first instruction runs. The loader also allocates fresh frames per task, so N
+  tasks running the same program hold N physical copies of its read-only text; the
+  cost scales with how many are running, and nothing today caps that number
+  (`TODO(shared-text)`). See
   [decisions/0015-elf-program-loading.md](decisions/0015-elf-program-loading.md).
 - **Demand paging, copy-on-write, and swap.** Per-process paging exists, but every
   page is mapped eagerly at `task_create_from_file` and backed by real frames. There is no
@@ -237,8 +239,10 @@ processes and address spaces.
 **A scheduler.** Done. The timer interrupt is now a preemption point: the tick
 saves the interrupted `registers_t` into the current task's slot, picks the next
 runnable task round-robin, and copies its saved frame back over the on-stack frame
-in place, so the ISR stub's `iretq` resumes a different task. Three ring-3 tasks
-run this way. The task structs are now heap-allocated and their stacks
+in place, so the ISR stub's `iretq` resumes a different task. How many tasks are in
+the rotation depends entirely on what has been started: the machine boots with one
+(the shell), and `run` adds another for as long as it takes to finish. The task
+structs are now heap-allocated and their stacks
 bump-allocated from the user region, so the fixed four-task ceiling is gone (see
 [decisions/0011-dynamic-tasks-and-stacks.md](decisions/0011-dynamic-tasks-and-stacks.md)).
 See also
@@ -271,8 +275,8 @@ file by 8.3 name out of the root directory. See
 **Program loading.** Done. `kernel/elf.c` validates an ELF64 file, bounds-checks
 and maps each `PT_LOAD` segment into a fresh address space, zero-fills the gap
 between file size and memory size, and hands the entry point to the task forge.
-The three ring-3 programs are now files on the disk, and changing one needs no
-kernel rebuild. See
+Every ring-3 program is now a file on the disk, and changing one needs no kernel
+rebuild. See
 [decisions/0015-elf-program-loading.md](decisions/0015-elf-program-loading.md).
 
 **The interactive shell.** Done. `user/shell.c` is a ring-3 program that reads
