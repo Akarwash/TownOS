@@ -40,7 +40,8 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `drivers/` | Hardware drivers: VGA text screen, PS/2 keyboard, the polled ATA PIO disk driver, port I/O helpers. |
 | `fs/` | The filesystem layer, above the disk driver: read-only FAT32 (list the root directory, read a file by name). |
 | `libc/` | Minimal freestanding C library: `string` and `mem` routines. |
-| `user/` | The ring-3 programs, built as standalone static ELF64 binaries (linked with `user/user.ld`) that live on the disk image and are loaded at runtime, not part of `minios.bin`. Includes the interactive shell (`user/shell.c`, booted as `SHELL.ELF`) and the three demonstration letter-printers (`user/A.c`, `B.c`, `C.c`). |
+| `user/` | The ring-3 programs, built as standalone static ELF64 binaries (linked with `user/user.ld`) that live on the disk image and are loaded at runtime, not part of `minios.bin`. Holds the interactive shell (`user/shell.c`, booted as `SHELL.ELF`), which is the program the machine is for, and the runtime everything compiles against (`user/userlib.h`, `user/user.ld`). |
+| `user/tests/` | Kernel test fixtures: ring-3 programs that exist to prove a piece of the kernel works and would be pointless on a machine anybody used (`A.c`, `B.c`, `C.c`, `D.c`, `E.c`). They build identically to the shell and land on the same disk; the split is about what a reader should conclude when one of them looks strange. See `user/tests/README.md`. |
 | `include/` | Shared definitions (`types.h`, the vector map, the syscall ABI numbers). |
 
 ## Source files
@@ -56,7 +57,8 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `kernel/paging.c`, `kernel/paging.h` | Per-process paging: `paging_create_address_space` (private tree, kernel half cloned by value), `paging_map_page` (4KB user mappings), `paging_switch` (load CR3), `paging_destroy_address_space` (free the user half only, never the tree in CR3). | Implemented |
 | `kernel/elf.c`, `kernel/elf.h` | ELF64 program loader: validate a file, bounds-check and map each `PT_LOAD` segment, copy and zero-fill it, report the entry point. | Implemented |
 | `user/shell.c` | The interactive shell: a ring-3 program (`SHELL.ELF`) that reads a line via `SYS_READKEY`, tokenizes it, and dispatches `list`/`read`/`run`/`help`/`clear`/`return` through syscalls. | Implemented |
-| `user/A.c`, `user/B.c`, `user/C.c` | The three ring-3 demo programs, each a separate static ELF64 binary on the disk image; each loops calling the kernel via `int 0x50`. Launched on demand with the shell's `run`. | Implemented |
+| `user/tests/A.c`, `B.c`, `C.c` | Kernel test fixtures, each a separate static ELF64 binary on the disk image, launched on demand with the shell's `run`. A prints 20 letters and exits 0 (the ordinary case, with a real `.bss`), B prints 60 (a second binary of a visibly different length), C prints 40 and exits **3** (proving a non-zero status survives the trip back to the prompt). | Implemented |
+| `user/tests/D.c`, `E.c` | The sweeper fixtures. D starts E and exits **without** waiting, which orphans E; E is then the only kind of zombie `reap_sweep`'s free path and `parent_alive`'s "no" branch can ever see. `run d.elf` is the only test that reaches them. | Implemented |
 | `user/userlib.h` | The whole runtime a user program gets: `always_inline` inline-asm syscall wrappers and the delay loop. | Implemented |
 | `user/user.ld` | User program linker script: entry `_start`, load address 0x400000, every loadable segment page-aligned (a contract with the loader). | Implemented |
 | `kernel/gdt_flush.asm` | `lgdt`, reload data segments, reload CS via far return, `ltr`. | Implemented |

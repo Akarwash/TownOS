@@ -148,12 +148,12 @@ static int task_register(address_space_t *as, uint64_t entry, uint32_t parent_id
 }
 
 int task_create_from_file(const char *name, uint32_t parent_id) {
-    // Same shape as task_create, and deliberately so: private address space,
-    // user half filled, stack mapped, frame forged. The ONLY differences are
-    // where the program's bytes come from (a file on the disk rather than a
-    // range of the kernel image) and where the entry address comes from (the
-    // ELF header rather than a linker symbol). Nothing about the page tree, the
-    // stack, the forge, the scheduler or the CR3 switch changes.
+    // Four steps, in this order: private address space, program loaded into it,
+    // stack mapped, task registered and its frame forged. This is the only
+    // creation path there is. It replaced one that copied a ring-3 image linked
+    // into the kernel and took its entry from a linker symbol; the page tree,
+    // the stack, the forge, the scheduler and the CR3 switch are all unchanged
+    // from that, and only the source of the bytes and of `entry` differ.
     address_space_t *as = paging_create_address_space();
     if (as == NULL) {
         // NOTHING TO DESTROY HERE, and calling the teardown would be a mistake. A

@@ -120,8 +120,16 @@ allocator and the eight-stack ceiling from
 
 Note the physical frames backing these private mappings come from the frame pool
 ABOVE 8M (the 4-8M region is reserved at init), even though the VIRTUAL addresses
-are in the 4-8M user range. The 4-8M identity mapping still exists in the boot
-tree and is what `task_create` reads the source image through while copying.
+are in the 4-8M user range.
+
+**Where the bytes are copied from has changed.** The 4-8M identity mapping in the
+boot tree used to be how the old `build_user_space` read the ring-3 image linked
+into the kernel. There is no such image now: `task_create_from_file` loads a
+program from a file, so `elf_load_file` copies out of a `kmalloc`'d buffer holding
+the file's bytes into the freshly allocated frames, both reached through the
+identity map of the regions they actually live in. The 4-8M mapping still exists
+and still reserves those physical frames from the pool, but nothing reads a program
+image through it any more.
 
 ## Related
 

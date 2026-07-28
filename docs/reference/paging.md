@@ -18,9 +18,9 @@ their stacks had to sit at different addresses (a bump allocator split one share
 region, see [decision 0011](../decisions/0011-dynamic-tasks-and-stacks.md)), and
 any task could read any other's memory with nothing to fault on.
 
-Per-process paging gives each task its OWN tree. Both of the three programs run
-their code at `0x400000` and put their stack top at `0x800000`, but land on
-DIFFERENT physical frames. That difference is the isolation.
+Per-process paging gives each task its OWN tree. Every program runs its code at
+`0x400000` and puts its stack top at `0x800000`, but lands on DIFFERENT physical
+frames. That difference is the isolation.
 
 ## Two halves: private user, shared kernel
 
@@ -84,8 +84,8 @@ entry, skipping the two user slots.
 By-value cloning is correct ONLY because the kernel's mappings never change after
 boot. `memory_detect_and_map` (`kernel/memory.c`) fills the identity map once at
 startup, BEFORE any task tree exists, and nothing ever mutates a kernel PD entry
-afterward. So a by-value copy taken at `task_create` time can never drift out of
-sync with the boot tables.
+afterward. So a by-value copy, taken by `paging_create_address_space` on the way
+through `task_create_from_file`, can never drift out of sync with the boot tables.
 
 This is a tripwire, not a footnote:
 
@@ -112,24 +112,40 @@ kernel memory: the AND of the levels is kernel-only at the leaf.
 
 ## What a task's user half holds
 
-`task_create` (`kernel/scheduler.c`) fills the private user half via
-`build_user_space`:
+`task_create_from_file` (`kernel/scheduler.c`) fills the private user half in two
+steps, from two different places:
 
-- **Code.** The whole linked ring-3 image (`_user_text_start` to
-  `_user_rodata_end`, all three programs) is COPIED into fresh frames mapped at
-  its link address `0x400000`. The source is readable because the boot tables
-  (still active at `task_create` time) identity-map `0x400000` to the image the
-  bootloader loaded there. Copying the full image per task is the strongest
-  isolation but duplicates the read-only text three times; `TODO(shared-text)`
-  marks the by-reference-text refinement.
-- **Stack.** Fresh frames mapped at a FIXED virtual address, top `0x800000`
-  (`USER_STACK_TOP`) growing down `USER_STACK_SIZE` bytes. Every task reuses the
-  same VA on its own frames, which is exactly what per-process paging makes
-  possible and what retires the old shared-stack-region ceiling.
+- **Program image, by the ELF loader.** `elf_load_file` (`kernel/elf.c`) reads
+  ONE program's file off the disk and walks its `PT_LOAD` segments. For each
+  segment it allocates fresh frames, zeroes them, copies the segment's `p_filesz`
+  bytes of file content in, and maps them at the segment's own `p_vaddr` with
+  flags derived from the segment's own permissions — so a read-only text segment
+  is mapped without `PG_WRITABLE`. The tail from `p_filesz` to `p_memsz` is left
+  as the zeroes it was allocated with; that is the `.bss`. Only that one
+  program's bytes are mapped, and only the pages it declares.
+- **Stack, by the scheduler.** `map_user_stack` maps fresh frames at a FIXED
+  virtual address, top `0x800000` (`USER_STACK_TOP`) growing down
+  `USER_STACK_SIZE` bytes, `PG_PRESENT | PG_WRITABLE | PG_USER`. No copy: the
+  program writes its own stack as it runs. Every task reuses the same VA on its
+  own frames, which is exactly what per-process paging makes possible and what
+  retires the old shared-stack-region ceiling.
 
-Because the user code stays at `0x400000`, nothing is relinked: each task's
-forged `rip` is its own function's linked address, still valid in its private
-copy.
+**This used to be one step from one source, and the difference matters.** Before
+per-file loading ([decision 0015](../decisions/0015-elf-program-loading.md)) a function
+called `build_user_space` copied the whole linked ring-3 image — `_user_text_start`
+to `_user_rodata_end`, every program at once — into every task's tree, reading it
+through the boot identity map. Neither that function nor those linker symbols
+exist any more. A task's user half now holds the one program it is running rather
+than all of them, its size follows that program's segments rather than being the
+same for every task, and text can be mapped read-only because the loader knows
+which segment is text. The old note about duplicating the read-only text per task
+is obsolete in its particulars: what is duplicated now is one program's text, not
+the whole image, though sharing it by reference between two tasks running the same
+file is still not done.
+
+Because programs are linked at `0x400000` and loaded there, nothing is relocated:
+the entry address in the ELF header is the address the code was linked for, and
+the forged `rip` is that value unchanged.
 
 ## Switching CR3: where, and why it is safe
 
@@ -159,8 +175,11 @@ ring 3.
 ## Tearing a tree down
 
 `paging_destroy_address_space(address_space_t *as)` (`kernel/paging.c`) is the
-inverse of `paging_create_address_space` + `build_user_space`. The scheduler calls
-it when a finished task is cleaned up (see [scheduling.md](scheduling.md)).
+inverse of everything the section above builds: `paging_create_address_space`, the
+loader's segment mappings, and the stack. The scheduler calls it when a finished
+task is cleaned up (see [scheduling.md](scheduling.md)), and `task_create_from_file`
+calls it on every failure path after the create succeeded, so a program that fails
+to load costs nothing.
 
 **It frees the USER half only.** It walks `pml4[0] → pdpt[0] → pd` and then
 descends into exactly two PD entries — `USER_PD_INDEX_CODE` (2) and
@@ -200,20 +219,43 @@ outgoing task's stale user translations on a switch, for free, with no explicit
 
 ## What a run looks like
 
-Booted under QEMU with `-d int` and all three programs started, they interleave
-"A", "B", "C" until each reaches its round count and exits, and the log shows:
+**One task exists at boot now.** `kernel/kernel.c` starts `SHELL.ELF` and nothing
+else ([decision 0016](../decisions/0016-interactive-shell.md)); the second and third trees
+only come into being when somebody types `run`. So the thing to watch is a tree
+appearing and disappearing, not three of them starting together.
 
-- three distinct task CR3 values (one tree per task), after a single tick on the
-  boot CR3 before the first switch,
-- the same three user RIPs as before (`0x40002b`, `0x400083`, `0x4000db`), all at
-  `cpl=3`, now each in its own tree,
-- an even round-robin interleave,
-- zero page faults (`0x0E`), GP faults (`0x0D`), or double faults (`0x08`).
+Booted under QEMU with `-d int`, sitting at the prompt, then `run a.elf`, the CR3
+column reads (counts are consecutive runs of interrupts at that CR3):
+
+```
+    1 CR3=000000000010d000     one tick on the boot tree, before scheduler_start
+  403 CR3=0000000000810000     the shell alone, blocked in readkey
+    3 CR3=0000000000860000     A's tree exists; the two interleave
+    4 CR3=0000000000810000
+  136 CR3=0000000000860000
+  555 CR3=0000000000810000     A has exited and been reaped; the shell alone again
+```
+
+and the vectors over the same run:
+
+```
+ 1016 v=40      timer, IRQ 0
+   66 v=50      syscalls
+   20 v=41      keyboard, IRQ 1 — one per key of "run a.elf" plus the newline
+```
+
+Read four things out of that. There are exactly two task CR3 values because there
+were exactly two tasks, and the boot CR3 appears once, before the first switch.
+The middle stretch alternates between the two trees, which is the round-robin.
+The long runs at `0x810000` at each end are the shell alone with nothing to switch
+to. And there is **no `v=0e`, `v=0d` or `v=08`** anywhere: no page fault, no
+general protection fault, no double fault. The `cpl=3` RIPs are all inside
+`0x400000`–`0x400b27`, the loaded image's own range, in both trees.
 
 A temporary isolation proof (added, verified, then removed) walked each task's
 tree and confirmed the shared VAs `0x400000` and the stack top page resolve to
-DIFFERENT physical frames in all three trees. Same virtual address, different
-physical memory: the isolation, demonstrated.
+DIFFERENT physical frames in every tree. Same virtual address, different physical
+memory: the isolation, demonstrated.
 
 Failure modes to recognise: a triple fault (`0x08`) right after the first switch
 means something the kernel needs is not in the cloned kernel half. A page fault

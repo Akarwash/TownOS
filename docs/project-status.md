@@ -57,8 +57,9 @@ the known limitations. It is a factual snapshot, not a roadmap.
   [reference/fat32.md](reference/fat32.md) and
   [decisions/0014-read-only-fat32.md](decisions/0014-read-only-fat32.md).
 - An ELF64 program loader (`kernel/elf.c`): user programs are separately
-  compiled, statically linked ELF64 binaries (`user/A.c`, `B.c`, `C.c`, linked
-  with `user/user.ld` at 0x400000) that live on the FAT32 image and are read,
+  compiled, statically linked ELF64 binaries (`user/shell.c` and the test
+  fixtures in `user/tests/`, all linked with `user/user.ld` at 0x400000) that
+  live on the FAT32 image and are read,
   validated, and loaded at runtime. `task_create_from_file` builds a private
   address space, maps each `PT_LOAD` segment into it (bounds-checked, with flags
   from the segment so text is mapped read-only), copies the file bytes, zeroes
@@ -107,9 +108,9 @@ the known limitations. It is a factual snapshot, not a roadmap.
   `task_create_from_file` `kmalloc`s a `task_t`, builds its private address
   space, loads a program file into it, and forges it as a never-run task (the
   ring-3 drop generalised); a pointer array tracks the heap-allocated tasks. The
-  three programs loaded from `A.ELF`, `B.ELF` and `C.ELF` interleave "A", "B",
-  and "C" on screen until each finishes its rounds. The old fixed four-task
-  ceiling and the shared user-stack region are both gone. See
+  shell and whatever it has launched interleave on screen, and `run d.elf` puts
+  three ring-3 tasks in the rotation at once. The old fixed four-task ceiling and
+  the shared user-stack region are both gone. See
   [reference/scheduling.md](reference/scheduling.md),
   [decisions/0008-round-robin-preemptive-scheduler.md](decisions/0008-round-robin-preemptive-scheduler.md),
   and [decisions/0011-dynamic-tasks-and-stacks.md](decisions/0011-dynamic-tasks-and-stacks.md).
@@ -192,7 +193,7 @@ it is running.
   program text (`TODO(shared-text)`). See
   [decisions/0015-elf-program-loading.md](decisions/0015-elf-program-loading.md).
 - **Demand paging, copy-on-write, and swap.** Per-process paging exists, but every
-  page is mapped eagerly at `task_create` and backed by real frames. There is no
+  page is mapped eagerly at `task_create_from_file` and backed by real frames. There is no
   lazy allocation on fault, no copy-on-write sharing (the read-only user text is
   copied in full per task rather than shared, `TODO(shared-text)`), and no paging
   to disk.

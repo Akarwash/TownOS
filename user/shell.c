@@ -8,7 +8,8 @@
 // with nothing but the syscalls in userlib.h. That it works at all is the proof
 // that the boundary is complete.
 //
-// Built and linked exactly like user/A.c (see the SHELL.ELF rule in the Makefile
+// Built and linked exactly like the test fixtures in user/tests/ (see the
+// SHELL.ELF rule in the Makefile
 // and user/user.ld), copied onto the FAT32 image as SHELL.ELF, and launched by
 // kernel_main. See docs/reference/shell.md.
 
@@ -115,6 +116,29 @@ static void cmd_read(char *name) {
     file_buf[n] = '\0';
     sys_write(file_buf);
     sys_write("\n");   // the file may not end in a newline; keep the prompt tidy
+
+    // SAY SO WHEN THE BUFFER FILLED UP. Without this, `read` on a file bigger than
+    // the buffer prints a bufferful and stops at whatever byte it reached, and the
+    // output is indistinguishable from a complete file that happens to end there:
+    // no error, no marker, just a truncated file quietly presented as the whole
+    // thing. That is the worst kind of wrong answer, because nothing about it looks
+    // wrong.
+    //
+    // "may be longer", not "is longer", because the shell genuinely cannot tell. A
+    // full buffer is what a too-large file looks like AND what a file of exactly
+    // this size looks like. SYS_READFILE returns bytes copied, not bytes available,
+    // so there is no number here to compare against. Reporting the true size is the
+    // real fix and it belongs in the syscall, not in this test: it would change
+    // SYS_READFILE's contract and every caller of it, which is a rung of its own.
+    //
+    // The count is printed rather than spelled into the string so it cannot drift
+    // away from SHELL_FILE_MAX, and it is one less than the buffer because a byte is
+    // held back above for the terminator.
+    if (n == sizeof(file_buf) - 1) {
+        sys_write("read: showing the first ");
+        print_uint(sizeof(file_buf) - 1);
+        sys_write(" bytes, the file may be longer\n");
+    }
 }
 
 static void cmd_run(char *name) {

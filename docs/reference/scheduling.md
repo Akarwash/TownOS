@@ -75,7 +75,7 @@ path in `schedule()` need not chase the pointer. See
 [paging.md](paging.md) and
 [decision 0012](../decisions/0012-per-process-paging.md).
 
-Each `task_t` is heap-allocated. `task_create` calls `kmalloc(sizeof(task_t))`
+Each `task_t` is heap-allocated. `task_register` calls `kmalloc(sizeof(task_t))`
 and stores the pointer in `task_t *tasks[MAX_TASKS_LIMIT]`, a flat pointer array
 in creation order (`MAX_TASKS_LIMIT` = 64, an arbitrary and generous cap on the
 bookkeeping array, not a storage ceiling: the structs live on the heap). A
@@ -107,7 +107,7 @@ a different task that happened to inherit the number. Reusing ids would make
 
 ## Forging a never-run task
 
-A task that has never run has no saved frame to restore, so `task_create` forges
+A task that has never run has no saved frame to restore, so `task_register` forges
 one that looks as if the task were interrupted at its first instruction:
 
 ```c
@@ -128,10 +128,12 @@ that never actually ran.
 `user_rsp` is now the SAME fixed address (`USER_STACK_TOP`, `0x800000`) for every
 task, not a per-task stack top handed out by an allocator. That works because
 each task has a private address space in which that one virtual address maps to
-its own physical frames. Before `task_create` forges the frame it builds that
-address space (a private tree with the ring-3 image copied to fresh frames at
-`0x400000` and a fresh stack at `USER_STACK_TOP`), and records its CR3. See
-[paging.md](paging.md).
+its own physical frames. That address space is built before the forge, by
+`task_create_from_file`: a private tree, the program's own ELF segments loaded
+into fresh frames at `0x400000`, and a fresh stack at `USER_STACK_TOP`. It is then
+handed to `task_register`, which forges the frame and records the tree's CR3. The
+split is why the forge exists in exactly one place: the only thing that varies
+between creation paths is where `entry` came from. See [paging.md](paging.md).
 
 `rflags` bit 9 (the interrupt flag, IF) **must** be set. A task entered with IF
 clear runs with interrupts masked, so the timer never fires while it runs, so it
@@ -237,8 +239,8 @@ touching the frame, so a lone task simply resumes.
 
 | State | Meaning |
 |-------|---------|
-| `TASK_UNUSED` | Value 0. A freshly `kmalloc`'d `task_t` is set straight to `TASK_READY` by `task_create`, so a live task is never seen in this state; it exists as the zero value. |
-| `TASK_READY` | Runnable, waiting for a slice. Set by `task_create` and by `schedule` when a task is preempted. |
+| `TASK_UNUSED` | Value 0. A freshly `kmalloc`'d `task_t` is set straight to `TASK_READY` by `task_register`, so a live task is never seen in this state; it exists as the zero value. |
+| `TASK_READY` | Runnable, waiting for a slice. Set by `task_register` and by `schedule` when a task is preempted. |
 | `TASK_RUNNING` | Currently on the CPU. Exactly one task at a time. |
 | `TASK_BLOCKED` | Waiting for an event, skipped by the rotation entirely. Set by `task_block`, cleared back to `TASK_READY` by `scheduler_wake`. |
 | `TASK_ZOMBIE` | Finished, but not yet cleaned up. Set by `task_exit`. Never runs again: the pick tests for `TASK_READY`, and the conditional save only touches `TASK_RUNNING`, so nothing can put a zombie back in the rotation. |
@@ -291,7 +293,7 @@ task's stack lives at ONE fixed virtual address, the top of PD[3]:
 #define USER_STACK_BASE  (USER_STACK_TOP - USER_STACK_SIZE)   // top 0x800000
 ```
 
-`build_user_space` (`kernel/scheduler.c`) maps that VA range to FRESH frames in
+`map_user_stack` (`kernel/scheduler.c`) maps that VA range to FRESH frames in
 the task's private tree, so every task uses the same address but its own physical
 memory. This is the change that retires the old bump allocator and the shared
 2MB stack region: stacks no longer compete for one region, so the eight-stack
@@ -304,30 +306,45 @@ and are mapped user-accessible by `paging_map_page`. See
 
 ## What a run looks like
 
-The three demo programs each call `SYS_WRITE` with a single-letter string a fixed
-number of times (A 20, B 60, C 40), with a crude busy-wait delay between writes,
-and then call `SYS_EXIT`. The bound is not cosmetic: the shell now blocks in
-`SYS_WAIT` until its child is done, and there is no way to kill a task and no
-signals, so a program that looped forever would leave the shell unusable until a
-reboot.
+The kernel test fixtures (`user/tests/`) each call `SYS_WRITE` with a
+single-letter string a fixed number of times, with a crude busy-wait delay
+between writes, and then call `SYS_EXIT`. The bound is not cosmetic: the shell
+blocks in `SYS_WAIT` until its child is done, and there is no way to kill a task
+and no signals, so a program that looped forever would leave the shell unusable
+until a reboot. See [user/tests/README.md](../../user/tests/README.md).
 
-Started together from the shell, the screen fills with interleaved letters (order
-varies with slice timing), and the shorter programs drop out first:
+**They can no longer be started together.** The old demo — three programs
+launched at boot, `ABCBCACBACBAB...` filling the screen — went away when the
+shell became the only boot task ([decision 0016](../decisions/0016-interactive-shell.md))
+and `run` became a blocking wait. `run a.elf` returns to the prompt only after A
+has exited, so the shell and one program are the normal case, and the round-robin
+runs between exactly those two.
+
+The one thing that still puts three ring-3 tasks in the rotation at once is
+`run d.elf`, which is what D exists for: D starts E and exits without waiting, so
+for a few slices the shell, D and E are all live. Under `-d int` the CR3 column
+for that run reads (counts are consecutive runs of interrupts at that CR3):
 
 ```
-ABCBCACBACBABCABCABCABC... then BCBCBC... then BBBB...
+    1 CR3=000000000010d000     the boot tree, one tick before scheduler_start
+  405 CR3=0000000000810000     the shell alone at the prompt, blocked in readkey
+    4 CR3=0000000000860000     D
+    2 CR3=00000000008a7000     E — three trees now alive, rotating
+    4 CR3=0000000000810000
+    2 CR3=0000000000860000
+    1 CR3=00000000008a7000
+    8 CR3=0000000000810000
+  724 CR3=00000000008a7000     D reaped, shell blocked again: E runs alone
+  325 CR3=0000000000810000     E gone too; the shell has the machine back
 ```
 
-Under `-d int`, timer vector `0x40` fires continuously and syscall vector `0x50`
-fires from all three tasks: entries cycle between `IP=001b:0040002b` (A),
-`IP=001b:00400083` (B), and `IP=001b:004000db` (C), each at `cpl=3`, but now each
-under a DIFFERENT `CR3` (one page-table tree per task), with no `#GP` (0x0D) and
-no `#PF` (0x0E). Three distinct RIPs all at the same virtual addresses, under
-three distinct CR3 values, are the proof that the tasks share virtual addresses
-but not physical memory: the isolation. All three now run their stack at the same
-VA (`0x800000` top), so the stack no longer distinguishes them in the log; the
-CR3 does. A `#PF` at a user RIP would mean that task's private user mapping is
-missing.
+with `1358 v=40` (timer), `88 v=50` (syscalls), `30 v=41` (keyboard), and **no
+`v=0e`, `v=0d` or `v=08`** — no page fault, no general protection fault, no double
+fault. Three distinct CR3 values for three tasks whose `cpl=3` RIPs and stacks are
+all at the same virtual addresses is the isolation, demonstrated: same addresses,
+different physical memory. The stack no longer distinguishes tasks in the log
+(every task's stack top is `0x800000`); the CR3 does. A `#PF` at a user RIP would
+mean that task's private user mapping is missing.
 
 Failure modes to recognise: if one letter repeats forever, the frame is not being
 written over `*r` (trap 1). If output stops after a single switch, the EOI is
@@ -341,7 +358,7 @@ half (see [paging.md](paging.md)).
   [decision 0008](../decisions/0008-round-robin-preemptive-scheduler.md).
 - The interrupt frame the scheduler swaps and the EOI path it relies on:
   [idt.md](idt.md).
-- The ring-3 drop `task_create` generalises:
+- The ring-3 drop `task_register`'s forge generalises:
   [user-mode.md](user-mode.md).
 - The syscall gate the tasks print through:
   [syscalls.md](syscalls.md).

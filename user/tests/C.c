@@ -5,7 +5,7 @@
 // is a number nothing else in the system produces, so seeing `exited with status
 // 3` at the prompt proves the value made the whole trip: from sys_exit's RDI,
 // through the mask in task_exit, into the zombie's exit_status, out through
-// task_wait's RAX, and back into a ring-3 program that prints it. See user/A.c
+// task_wait's RAX, and back into a ring-3 program that prints it. See user/tests/A.c
 // for the rest of the shape.
 
 #include "../userlib.h"

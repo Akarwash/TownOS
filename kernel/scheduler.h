@@ -18,7 +18,8 @@
 
 // A generous, arbitrary cap on how many tasks we TRACK. This is NOT the old
 // storage ceiling: the task_t structs are now heap-allocated (kmalloc, see
-// task_create), so the kernel heap that used to be missing exists. This only
+// task_register in scheduler.c), so the kernel heap that used to be missing
+// exists. This only
 // bounds the size of the pointer-bookkeeping array in scheduler.c, not where the
 // tasks live. 64 is arbitrary; raise it freely.
 #define MAX_TASKS_LIMIT 64

@@ -67,9 +67,12 @@ lives in low memory, so relabelling the ELF container as `elf32-i386` is accepte
 by the loader and boots correctly. The code is unchanged; only the ELF header
 class differs.
 
-It also builds the user programs (`user/SHELL.ELF`, the interactive shell, plus
-`user/A.ELF`, `B.ELF`, `C.ELF`, the letter-printers), which are separate binaries
-and not part of `minios.bin`. See
+It also builds the user programs, which are separate binaries and not part of
+`minios.bin`: `user/SHELL.ELF`, the interactive shell, plus the kernel test
+fixtures `user/tests/A.ELF` through `E.ELF`. The two directories build with the
+same recipe and land on the same disk; `user/` holds the program the machine is
+*for* and `user/tests/` holds programs that exist only to prove a piece of the
+kernel works (see `user/tests/README.md`). See
 [Building a user program](#building-a-user-program) below.
 
 To rebuild from scratch:
@@ -184,8 +187,8 @@ The build flags are deliberate and documented in the `Makefile`. Two matter most
 To change an existing program without touching the kernel:
 
 ```bash
-make user/A.ELF
-mcopy -o -i disk.img user/A.ELF ::/
+make user/tests/A.ELF
+mcopy -o -i disk.img user/tests/A.ELF ::/
 qemu-system-x86_64 -kernel minios.bin -drive file=disk.img,format=raw,if=ide,index=0,media=disk
 ```
 

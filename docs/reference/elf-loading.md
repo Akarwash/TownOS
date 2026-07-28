@@ -214,7 +214,7 @@ part of `minios.bin`.
 CC -ffreestanding -m64 -mno-red-zone -mcmodel=small -fno-pie -no-pie \
    -nostdlib -nodefaultlibs -static -Wall -Wextra \
    -T user/user.ld -Wl,-z,max-page-size=4096 -Wl,--build-id=none \
-   -o user/A.ELF user/A.c
+   -o user/tests/A.ELF user/tests/A.c
 ```
 
 - **`-mcmodel=small`, not `-mcmodel=kernel`.** The kernel model assumes every
@@ -250,16 +250,26 @@ The binaries are copied onto the FAT32 image with `mcopy`, as a PHONY make targe
 that `make run` depends on:
 
 ```bash
-mcopy -o -i disk.img user/A.ELF user/B.ELF user/C.ELF ::/
+mcopy -o -i disk.img user/tests/A.ELF user/tests/B.ELF user/tests/C.ELF \
+                     user/tests/D.ELF user/tests/E.ELF user/SHELL.ELF ::/
 ```
 
 PHONY on purpose. The image is created once and then left alone (reformatting
 would destroy its contents), but the program binaries on it are build output and
 must never be stale. Running yesterday's `A.ELF` looks exactly like a loader bug.
 
+**Everything goes in the root directory, `::/`, even though the sources sit in two
+directories.** `fs/fat32.c` looks a name up in the root directory only: it takes a
+bare 8.3 name, does no path parsing, and has no directory traversal. Copying the
+test fixtures into a `TEST/` directory on the image would not be tidier, it would
+make them unreachable — `run a.elf` would report the file as missing. A source-tree
+folder is the only kind of folder this project has; giving the disk one needs
+subdirectory support in the filesystem.
+
 Names are 8.3 and uppercase because the filesystem reads 8.3 names only, and the
-source files are named to match (`user/A.c` builds `A.ELF`) so the mapping needs
-no explaining.
+source files are named to match (`user/tests/A.c` builds `A.ELF`) so the mapping
+needs no explaining. `SHELL.ELF` is the one exception, built from lowercase
+`user/shell.c` by an explicit Makefile rule.
 
 ## What the loader does not do
 

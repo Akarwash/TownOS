@@ -140,9 +140,35 @@ in `user/userlib.h`.
   string. `read` needs this because the shell is ring 3 and cannot call
   `fat32_read_file` itself.
 
+### `read` and files that do not fit
+
+The shell's file buffer is `SHELL_FILE_MAX` (32768) bytes and it asks
+`SYS_READFILE` for at most 32767 of them, holding one back for the NUL it appends
+before printing. A file larger than that is read up to the cap and the rest is not
+read at all.
+
+When the returned count fills the buffer exactly, `read` prints a notice after the
+contents:
+
+```
+read: showing the first 32767 bytes, the file may be longer
+```
+
+**"May be", not "is", and the hedge is the honest answer.** `SYS_READFILE` returns
+*bytes copied*, not *bytes available*, so a full buffer is what a too-large file
+looks like and also what a file of exactly 32767 bytes looks like. The shell has no
+number to compare against and cannot tell the two apart. Without the notice a
+truncated file would print with no error and no marker, indistinguishable from a
+complete one — a wrong answer with nothing about it that looks wrong, which is why
+the hedged notice beats silence.
+
+The real fix is for `SYS_READFILE` to report the file's true size so a caller can
+tell truncation from coincidence. That changes the syscall's contract and every
+caller of it, so it is a rung of its own and not part of this.
+
 **The child must exit.** There is no way to kill a task and there are no signals,
 so a program with an unbounded loop leaves the shell blocked in `SYS_WAIT` forever
-and the only way back is a reboot. That is why every program in `user/` now runs a
+and the only way back is a reboot. That is why every program under `user/` runs a
 fixed number of rounds and calls `sys_exit` at the bottom.
 
 **Printing the status needs a number printer.** There is no libc and the only way
@@ -190,6 +216,68 @@ compiles a single freestanding translation unit and links no kernel objects, so
 `libc/string.c` is unreachable from ring 3, and the kernel never tokenizes, so it
 would be dead code there. See
 [decision 0016](../decisions/0016-interactive-shell.md).
+
+## What there is to run
+
+The shell is the only program the machine is *for*. Everything else on the disk is
+a kernel test fixture: a ring-3 program that exists to prove a piece of the kernel
+works, kept in `user/tests/` and documented one paragraph each in
+[user/tests/README.md](../../user/tests/README.md). They land in the disk's root
+directory alongside `SHELL.ELF`, because `fs/fat32.c` can only look up a bare 8.3
+name in the root, so `run a.elf` finds them (the lookup is case-insensitive).
+
+| Program | What it does | Exit status | What it proves |
+|---------|--------------|-------------|----------------|
+| `A.ELF` | prints `A` 20 times | 0 | the ordinary case, and a real `.bss` for the loader's zero-fill |
+| `B.ELF` | prints `B` 60 times | 0 | a second, longer binary for the loader and the interleave |
+| `C.ELF` | prints `C` 40 times | 3 | a non-zero status survives the trip back to the prompt |
+| `D.ELF` | starts `E.ELF`, exits without waiting | 0 | orphans E; see below |
+| `E.ELF` | prints `E` 15 times | 7 | the orphan nobody reaps |
+
+### What `run d.elf` demonstrates
+
+D and E exist together to reach code that no other test can. In every ordinary
+case a child is reaped by its parent's `SYS_WAIT` before the scheduler's sweeper
+ever sees it: the exiting child wakes its parent and switches straight to it, so
+the parent re-enters `SYS_WAIT` before a timer tick has gone by. That leaves the
+free path inside `reap_sweep`, and the branch of `parent_alive` that answers "no",
+unreachable. A zombie whose parent is already dead is the only way in — hence D,
+whose entire program is that it does *not* call `sys_wait`.
+
+```
+> run d.elf
+D: starting E
+run: started d.elf
+D: not waiting, exiting
+reap (sweeper): task 1 exited (status 0), free frames: 30520
+run: d.elf exited with status 0
+> EEEEEEEEEEEEEEE
+reap (sweeper): task 2 exited (status 7), free frames: 30592
+```
+
+Four things to read out of that:
+
+- **The prompt comes back while E is still printing.** The shell waited for D, not
+  for E, and stays usable throughout — typing while the E's arrive buffers the keys
+  normally.
+- **E's line says `reap (sweeper):`, not `reap (wait):`.** The label names the path
+  that freed the address space, and the two are otherwise indistinguishable on
+  screen. If E's line ever says `reap (wait):`, something collected a zombie that
+  should have had no reader.
+- **Nobody reads E's status 7.** By the time E exits its parent's slot is NULL, so
+  the sweeper drops the tombstone rather than keeping a fact nobody can ask for.
+  Seven is distinctive purely so it would be obvious, not plausible, if it ever
+  turned up at the prompt.
+- **The free frame count comes back to the baseline** — 30592 here — from a path
+  that had never executed before.
+
+One timing quirk worth knowing: if the machine is completely idle when the orphan
+exits (nothing runnable, the shell blocked in `SYS_READKEY`), the sweeper's line
+does not appear until the next wake event, such as a keypress. `schedule()` returns
+at its idling guard before `reap_sweep` runs, and during the idle loop the zombie is
+still `current`, which the sweeper skips by design. The memory comes back on the
+next scheduling event, so this is deferred, not leaked. See
+[scheduling.md](scheduling.md).
 
 ## Building and running the shell
 
