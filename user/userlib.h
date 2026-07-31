@@ -157,6 +157,30 @@ unsigned long sys_readfile(const char *name, char *buf, unsigned long size) {
     return syscall3(SYS_READFILE, (unsigned long)name, (unsigned long)buf, size);
 }
 
+// SYS_WRITEFILE: write `len` bytes from buf to the named file, creating it or
+// wholly replacing it. The bytes are raw: no terminator is written and none is
+// expected in buf. Returns 0 on success, (unsigned long)-1 on error (a bad
+// pointer, a name that is not 8.3, no free space, or a disk error).
+static inline __attribute__((always_inline))
+unsigned long sys_writefile(const char *name, const char *buf, unsigned long len) {
+    return syscall3(SYS_WRITEFILE, (unsigned long)name, (unsigned long)buf, len);
+}
+
+// SYS_DELETE: delete the named file from the disk. Returns 0 on success,
+// (unsigned long)-1 on error (a bad pointer, a name that is not 8.3, a missing
+// file, or a disk error).
+static inline __attribute__((always_inline))
+unsigned long sys_delete(const char *name) {
+    return syscall1(SYS_DELETE, (unsigned long)name);
+}
+
+// SYS_FREECOUNT: how many clusters on the volume are free. Returns the count
+// (never an error: a number crosses the boundary by value).
+static inline __attribute__((always_inline))
+unsigned long sys_freecount(void) {
+    return syscall0(SYS_FREECOUNT);
+}
+
 // A crude busy-wait so the letters do not scroll past faster than the eye can
 // follow. This is NOT a timed delay, just a spin; the count was tuned by eye
 // under QEMU for a readable interleave. A real system would sleep, not spin.

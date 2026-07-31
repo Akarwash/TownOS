@@ -20,5 +20,8 @@
 #define SYS_RUN      4   // RDI = filename ptr; load and start it, return 0 or -1
 #define SYS_READFILE 5   // RDI = filename ptr, RSI = buffer, RDX = size; return bytes read
 #define SYS_WAIT     6   // no args; block until any child exits; RAX = that child's exit status, or SYSCALL_ERROR if the caller has no children
+#define SYS_WRITEFILE 7  // RDI = filename ptr, RSI = buffer, RDX = length; 0 on success, SYSCALL_ERROR on failure
+#define SYS_DELETE    8  // RDI = filename ptr; 0 on success, SYSCALL_ERROR on failure
+#define SYS_FREECOUNT 9  // no args; return the count of free clusters on the volume. Exposes fat32_free_count so the shell's `free` command (and the leak test) can watch it.
 
 #endif

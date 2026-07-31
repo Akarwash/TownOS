@@ -55,6 +55,47 @@ static int str_eq(const char *a, const char *b) {
     return *a == *b;   // equal only if both reached '\0' at the same spot
 }
 
+// Length of a NUL-terminated string. `write` needs it to tell the kernel how many
+// bytes of the line to store, and there is no libc strlen to reach for.
+static unsigned long str_len(const char *s) {
+    unsigned long n = 0;
+    while (s[n] != '\0') {
+        n++;
+    }
+    return n;
+}
+
+// Is `name` expressible as an 8.3 name: a base of 1..8 characters, optionally a
+// dot and an extension of 0..3? This mirrors the kernel's name_to_83 acceptance
+// rule (lengths only; it does not judge individual characters), and it lives here
+// so the shell can tell the user their name is the problem BEFORE the syscall,
+// distinguishing the one failure that is their fault and fixable by retyping from
+// every other reason a write or delete can fail. Never mangle silently.
+static int name_is_83(const char *name) {
+    int base = 0;
+    int i = 0;
+    while (name[i] != '\0' && name[i] != '.') {
+        if (++base > 8) {
+            return 0;   // base too long
+        }
+        i++;
+    }
+    if (base == 0) {
+        return 0;       // no base name at all
+    }
+    if (name[i] == '.') {
+        i++;
+        int ext = 0;
+        while (name[i] != '\0') {
+            if (++ext > 3) {
+                return 0;   // extension too long
+            }
+            i++;
+        }
+    }
+    return 1;
+}
+
 // Print a small non-negative number in decimal. There is no printf and no libc
 // here, and the only way out is sys_write, which takes a string: so the digits
 // have to be built by hand. Only exit statuses (0..255) go through this, but the
@@ -82,12 +123,15 @@ static void print_uint(unsigned long value) {
 static void print_help(void) {
     // The command names are MiniOS's own and deliberately not the Unix ones.
     sys_write("commands:\n");
-    sys_write("  list           list files in the root directory\n");
-    sys_write("  read <file>    print a file's contents\n");
-    sys_write("  run <file>     run a program and wait for it to finish\n");
-    sys_write("  help           show this list\n");
-    sys_write("  clear          clear the screen\n");
-    sys_write("  return <text>  print the text back\n");
+    sys_write("  list                 list files in the root directory\n");
+    sys_write("  read <file>          print a file's contents\n");
+    sys_write("  write <file> <text>  write the rest of the line to a file (creates or replaces)\n");
+    sys_write("  delete <file>        delete a file\n");
+    sys_write("  free                 how many clusters on the volume are free\n");
+    sys_write("  run <file>           run a program and wait for it to finish\n");
+    sys_write("  help                 show this list\n");
+    sys_write("  clear                clear the screen\n");
+    sys_write("  return <text>        print the text back\n");
 }
 
 static void cmd_list(void) {
@@ -138,6 +182,64 @@ static void cmd_read(char *name) {
         sys_write("read: showing the first ");
         print_uint(sizeof(file_buf) - 1);
         sys_write(" bytes, the file may be longer\n");
+    }
+}
+
+// `write <file> <text>`: store the rest of the line, verbatim, as the file's
+// contents. `content` is what next_token left pointing at after the filename: the
+// untouched remainder of the line, so every space inside it is preserved and NO
+// trailing newline is added — exactly what was typed becomes the file. An empty
+// remainder writes a zero-length file. Single-cluster files only, in practice,
+// since the line buffer caps a typed line well under one cluster; multi-cluster
+// writing is exercised by user/tests/F.c, not by typing.
+static void cmd_write(char *name, char *content) {
+    if (name == (char *)0) {
+        sys_write("write: missing filename\n");
+        return;
+    }
+    if (!name_is_83(name)) {
+        // The user's fault and fixable by retyping, so it is called out on its own
+        // rather than lumped in with disk failures.
+        sys_write("write: ");
+        sys_write(name);
+        sys_write(" is not an 8.3 name (max 8 chars, dot, 3 chars)\n");
+        return;
+    }
+    if (sys_writefile(name, content, str_len(content)) != 0) {
+        sys_write("write: could not write ");
+        sys_write(name);
+        sys_write("\n");
+        return;
+    }
+}
+
+// `free`: print how many clusters on the volume are free. The leak test leans on
+// this: create and delete a file repeatedly and this number must return to exactly
+// where it started, because a cluster stranded on any cycle would show up as the
+// count drifting down. fat32_free_count recounts the whole FAT, so it is honest
+// rather than a cached total that a leak could hide behind.
+static void cmd_free(void) {
+    print_uint(sys_freecount());
+    sys_write(" clusters free\n");
+}
+
+// `delete <file>`: remove a file from the disk.
+static void cmd_delete(char *name) {
+    if (name == (char *)0) {
+        sys_write("delete: missing filename\n");
+        return;
+    }
+    if (!name_is_83(name)) {
+        sys_write("delete: ");
+        sys_write(name);
+        sys_write(" is not an 8.3 name (max 8 chars, dot, 3 chars)\n");
+        return;
+    }
+    if (sys_delete(name) != 0) {
+        sys_write("delete: could not delete ");
+        sys_write(name);
+        sys_write("\n");
+        return;
     }
 }
 
@@ -269,6 +371,17 @@ void _start(void) {
             cmd_list();
         } else if (str_eq(cmd, "read")) {
             cmd_read(next_token(&pos, ' '));
+        } else if (str_eq(cmd, "write")) {
+            // Extract the filename FIRST, then hand cmd_write the raw remainder as
+            // the contents. Two statements, not one call: C leaves argument
+            // evaluation order unspecified, and `pos` must be read only after
+            // next_token has advanced it past the filename.
+            char *wname = next_token(&pos, ' ');
+            cmd_write(wname, pos);
+        } else if (str_eq(cmd, "delete")) {
+            cmd_delete(next_token(&pos, ' '));
+        } else if (str_eq(cmd, "free")) {
+            cmd_free();
         } else if (str_eq(cmd, "run")) {
             cmd_run(next_token(&pos, ' '));
         } else if (str_eq(cmd, "help")) {
