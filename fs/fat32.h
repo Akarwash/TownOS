@@ -69,4 +69,12 @@ int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
 // Returns the free-cluster count, or 0 if the filesystem is not ready.
 uint32_t fat32_free_count(void);
 
+// Delete the file called `name` from the root directory: free its cluster chain,
+// then mark its directory entry deleted. Freeing the data before unpublishing the
+// name is deliberate — a crash in between wastes space (a lost chain) rather than
+// leaving a live entry pointing at freed clusters (corruption). Returns 0 on
+// success, -1 if the filesystem is not ready, the name is not 8.3, is not in the
+// root directory, names a directory, or a disk operation fails.
+int fat32_delete(const char *name);
+
 #endif

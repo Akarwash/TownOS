@@ -611,7 +611,7 @@ static int free_chain(uint32_t first_cluster) {
 // returned. A half-linked orphan chain left behind would be leaked space that no
 // file owns, the same teardown discipline as task_create_from_file unwinding a
 // partial address space.
-static int __attribute__((unused)) alloc_chain(uint32_t bytes, uint32_t *out_first) {
+static int alloc_chain(uint32_t bytes, uint32_t *out_first) {
     if (bytes == 0) {
         return -1;   // caller's contract: zero-length files allocate nothing
     }
@@ -1058,4 +1058,239 @@ int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
 
     kfree(cluster_buf);
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Writing: directory entries.
+// ---------------------------------------------------------------------------
+// Everything below is the write side. It sits after the read code because it
+// leans on the same primitives (read_cluster, cluster_to_block, the dirent
+// helpers) and adds the ability to change what they read.
+
+// Find `wanted` (an 11-byte 8.3 name) in the root directory and report not just
+// the entry but where on disk it lives, so a caller can rewrite it in place. This
+// is the lookup twin of walk_directory's search mode; it is kept separate rather
+// than folded in because only the write path needs a slot's disk location, and
+// threading that through the shared read walk would complicate the paths that do
+// not. Returns 0 with *out/*out_block/*out_offset set on a match,
+// FAT32_DIR_NOT_FOUND if the name is absent, -1 on a read error or corrupt chain.
+static int locate_root_entry(const char wanted[FAT32_NAME_LENGTH],
+                             struct fat32_dirent *out,
+                             uint32_t *out_block, uint32_t *out_offset) {
+    uint8_t *cluster_buf = (uint8_t *)kmalloc(fs_bytes_per_cluster);
+    if (cluster_buf == NULL) {
+        return -1;
+    }
+
+    uint32_t entries = fs_bytes_per_cluster / FAT32_DIRENT_BYTES;
+    uint32_t cluster = fs_root_cluster;
+    int result = FAT32_DIR_NOT_FOUND;
+
+    uint32_t steps;
+    for (steps = 0; steps <= fs_total_clusters; steps++) {
+        if (read_cluster(cluster, cluster_buf) != 0) {
+            result = -1;
+            break;
+        }
+
+        int done = 0;
+        for (uint32_t i = 0; i < entries; i++) {
+            struct fat32_dirent *entry =
+                (struct fat32_dirent *)(cluster_buf + i * FAT32_DIRENT_BYTES);
+
+            if (entry->name[0] == FAT32_DIRENT_FREE) {
+                done = 1;   // end of directory: nothing usable follows
+                break;
+            }
+            if (entry->name[0] == FAT32_DIRENT_DELETED || !dirent_is_usable(entry)) {
+                continue;
+            }
+            if (name_equals_83(entry->name, wanted)) {
+                *out = *entry;
+                uint32_t byte = i * FAT32_DIRENT_BYTES;
+                *out_block  = cluster_to_block(cluster) + byte / fs_bytes_per_sector;
+                *out_offset = byte % fs_bytes_per_sector;
+                result = 0;
+                done = 1;
+                break;
+            }
+        }
+        if (done) {
+            break;
+        }
+
+        uint32_t next;
+        int step = fat32_next_cluster(cluster, &next);
+        if (step == FAT32_CHAIN_END) {
+            break;
+        }
+        if (step == FAT32_CHAIN_ERROR) {
+            result = -1;
+            break;
+        }
+        cluster = next;
+    }
+
+    if (steps > fs_total_clusters) {
+        print_string("FAT32: directory chain exceeds volume size\n");
+        result = -1;
+    }
+
+    kfree(cluster_buf);
+    return result;
+}
+
+// Find a directory slot that can hold a new entry, and report its disk location
+// as a (block, offset-within-block) pair, the form write_dirent_at wants. A slot
+// is available when its first name byte is 0x00 (never used) or 0xE5 (deleted).
+//
+// If the whole root directory is full, grow it: a directory is a file, so this is
+// alloc_chain for one cluster plus one link onto the end of the chain, not new
+// machinery. The new cluster MUST be zero-filled first: an un-zeroed cluster
+// holds whatever used to be there, and every 32-byte window in it would be read
+// as a bogus directory entry. The free slot is then the first entry of it.
+//
+// Returns 0 with *out_block/*out_offset set, -1 on any read/write/alloc failure
+// or a corrupt directory chain.
+static int __attribute__((unused))
+find_free_dirent(uint32_t *out_block, uint32_t *out_offset) {
+    uint8_t *cluster_buf = (uint8_t *)kmalloc(fs_bytes_per_cluster);
+    if (cluster_buf == NULL) {
+        return -1;
+    }
+
+    uint32_t entries = fs_bytes_per_cluster / FAT32_DIRENT_BYTES;
+    uint32_t cluster = fs_root_cluster;
+    uint32_t last_cluster = cluster;
+    int grow = 0;
+
+    uint32_t steps;
+    for (steps = 0; steps <= fs_total_clusters; steps++) {
+        last_cluster = cluster;
+        if (read_cluster(cluster, cluster_buf) != 0) {
+            kfree(cluster_buf);
+            return -1;
+        }
+
+        for (uint32_t i = 0; i < entries; i++) {
+            uint8_t first = cluster_buf[i * FAT32_DIRENT_BYTES];
+            if (first == FAT32_DIRENT_FREE || first == FAT32_DIRENT_DELETED) {
+                uint32_t byte = i * FAT32_DIRENT_BYTES;
+                *out_block  = cluster_to_block(cluster) + byte / fs_bytes_per_sector;
+                *out_offset = byte % fs_bytes_per_sector;
+                kfree(cluster_buf);
+                return 0;
+            }
+        }
+
+        uint32_t next;
+        int step = fat32_next_cluster(cluster, &next);
+        if (step == FAT32_CHAIN_END) {
+            grow = 1;   // every existing slot is taken; extend the directory
+            break;
+        }
+        if (step == FAT32_CHAIN_ERROR) {
+            kfree(cluster_buf);
+            return -1;
+        }
+        cluster = next;
+    }
+    kfree(cluster_buf);
+
+    if (!grow) {
+        // Fell out of the loop by the cluster bound, not by reaching the end.
+        print_string("FAT32: directory chain exceeds volume size\n");
+        return -1;
+    }
+
+    // Grow: one new cluster, zero-filled, linked onto the end of the chain.
+    uint32_t new_cluster;
+    if (alloc_chain(fs_bytes_per_cluster, &new_cluster) != 0) {
+        return -1;
+    }
+
+    uint8_t *zero = (uint8_t *)kmalloc(fs_bytes_per_cluster);
+    if (zero == NULL) {
+        free_chain(new_cluster);
+        return -1;
+    }
+    memset(zero, 0, fs_bytes_per_cluster);
+    // One cluster is one disk_write by construction (see read_cluster).
+    if (disk_write(cluster_to_block(new_cluster),
+                   (uint8_t)fs_sectors_per_cluster, zero) != 0) {
+        kfree(zero);
+        free_chain(new_cluster);
+        return -1;
+    }
+    kfree(zero);
+
+    // Link the old tail to the new cluster only after it is safely zeroed, so a
+    // failure above never publishes a garbage-filled cluster into the directory.
+    if (fat32_set_entry(last_cluster, new_cluster) != 0) {
+        free_chain(new_cluster);
+        return -1;
+    }
+
+    *out_block  = cluster_to_block(new_cluster);
+    *out_offset = 0;
+    return 0;
+}
+
+// Write a 32-byte directory entry into an existing slot. Read-modify-write,
+// because the disk's unit is a 512-byte block and an entry is smaller than one:
+// read the block, splice the entry in at its offset, write the block back.
+// Returns 0 on success, -1 on a read or write failure.
+static int write_dirent_at(uint32_t block, uint32_t offset,
+                           const struct fat32_dirent *entry) {
+    uint8_t block_buf[DISK_SECTOR_SIZE];
+    if (disk_read(block, 1, block_buf) != 0) {
+        return -1;
+    }
+    memcpy(block_buf + offset, entry, FAT32_DIRENT_BYTES);
+    if (disk_write(block, 1, block_buf) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Deleting a file.
+// ---------------------------------------------------------------------------
+
+int fat32_delete(const char *name) {
+    if (!fs_ready) {
+        return -1;
+    }
+
+    char wanted[FAT32_NAME_LENGTH];
+    if (name_to_83(name, wanted) != 0) {
+        return -1;   // not expressible in 8.3, so nothing on disk can match it
+    }
+
+    struct fat32_dirent entry;
+    uint32_t block, offset;
+    if (locate_root_entry(wanted, &entry, &block, &offset) != 0) {
+        return -1;   // not found, or the directory could not be read
+    }
+    if (entry.attr & FAT32_ATTR_DIRECTORY) {
+        return -1;   // deleting a subdirectory (and its contents) is out of scope
+    }
+
+    // Order is the exact opposite of creation, and deliberately so. Free the data
+    // first, then unpublish the name. A crash in between leaves a lost chain,
+    // which is only wasted space. The other order would leave a live directory
+    // entry pointing at freed clusters, which is corruption: a later file could be
+    // handed those same clusters while this entry still claims them.
+    uint32_t start = dirent_first_cluster(&entry);
+    if (start != 0) {   // a zero-length file owns no clusters, so skip the free
+        if (free_chain(start) != 0) {
+            return -1;
+        }
+    }
+
+    entry.name[0] = FAT32_DIRENT_DELETED;
+    if (write_dirent_at(block, offset, &entry) != 0) {
+        return -1;
+    }
+    return 0;
 }
