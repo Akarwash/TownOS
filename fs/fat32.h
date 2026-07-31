@@ -4,25 +4,32 @@
 #include "../include/types.h"
 
 // ============================================================================
-// A read-only FAT32 filesystem.
+// A read/write FAT32 filesystem.
 // ============================================================================
 // The disk driver (drivers/disk.c) hands out numbered 512-byte blocks and knows
 // nothing else: no names, no files, no notion of which blocks are in use. This
 // layer is what gives those blocks meaning. It reads the bookkeeping the format
 // leaves on the disk itself (a boot sector describing the layout, a table of
 // cluster chains, directories full of name-to-cluster entries) and turns it into
-// "read the file called HELLO.TXT".
+// "read the file called HELLO.TXT" — and now "write it" and "delete it" too.
 //
-// Read-only on purpose. Reading needs three things: parse the boot sector,
-// follow cluster chains, parse directory entries. Writing needs all of that plus
-// free-cluster search, chain updates, updating every FAT copy, directory entry
-// updates, growing a directory, and ordering the writes so a crash midway cannot
-// leave the FAT and the directory disagreeing. That is where filesystems get
-// hard and where bugs corrupt data instead of merely failing. Reading is also
-// the complete prerequisite for the next rung (loading a program off the disk),
-// because a program image is read, never written. TODO(fat32-write).
+// Writing is where a filesystem gets genuinely hard, because a bug corrupts data
+// instead of merely failing, and the damage outlives the fix: a FAT scrambled by
+// a bad write stays scrambled after the code is corrected. Two things keep it
+// safe here. The FAT writer updates every copy of the table, not just the first
+// (fat32_set_entry), so the redundant copies never disagree. And every mutation
+// follows a strict write-before-publish order: new clusters and their data are
+// laid down first, and a single directory-entry write is what makes them the
+// file's contents, so a crash at any earlier point loses only unreferenced
+// clusters and never damages the file already on disk.
 //
-// See docs/reference/fat32.md and docs/decisions/0014-read-only-fat32.md.
+// The scope is deliberately small: whole-file writes with no handles, no seek and
+// no append; 8.3 names; the root directory only; the first FAT copy consulted for
+// reads but every copy written; no timestamps. The reasoning is in
+// docs/decisions/0020-writable-fat32.md; the original read-only scope, now
+// superseded, is docs/decisions/0014-read-only-fat32.md.
+//
+// See docs/reference/fat32.md for the on-disk layout and the write path.
 
 // Parse the boot sector and cache the volume geometry. Call once, after
 // disk_init. Returns 0 on success, -1 if the disk is unreadable or does not hold
@@ -61,5 +68,31 @@ int fat32_stat(const char *name, uint32_t *out_size);
 // is corrupt.
 int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
                     uint32_t *out_size);
+
+// Write `buf` (len bytes) to the file called `name` (an 8.3 name) in the root
+// directory, creating it or replacing it whole. There are no handles, no seek and
+// no append: the file's contents become exactly these len bytes. A replacement is
+// crash-safe — the new clusters and data are written first and a single directory
+// entry write commits them, so a failure midway loses only the new clusters and
+// never damages the file already on disk. len == 0 creates an empty file that
+// owns no clusters. Returns 0 on success, -1 if the filesystem is not ready, the
+// name is not 8.3, `name` is an existing directory, the volume is out of space,
+// or a disk operation fails.
+int fat32_write_file(const char *name, const void *buf, uint32_t len);
+
+// Count every free cluster on the volume by walking the whole FAT. This is a full
+// recount that trusts no cached total, so it is the independent yardstick a leak
+// test measures against: allocate and free the same file repeatedly and this must
+// return to its starting value. Slow by design and off the allocation path.
+// Returns the free-cluster count, or 0 if the filesystem is not ready.
+uint32_t fat32_free_count(void);
+
+// Delete the file called `name` from the root directory: free its cluster chain,
+// then mark its directory entry deleted. Freeing the data before unpublishing the
+// name is deliberate — a crash in between wastes space (a lost chain) rather than
+// leaving a live entry pointing at freed clusters (corruption). Returns 0 on
+// success, -1 if the filesystem is not ready, the name is not 8.3, is not in the
+// root directory, names a directory, or a disk operation fails.
+int fat32_delete(const char *name);
 
 #endif

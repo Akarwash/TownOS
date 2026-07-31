@@ -2,9 +2,9 @@
 
 MiniOS is a learning kernel: it boots x86-64 long mode, drops to ring 3, and
 preempts between ring-3 tasks on the timer tick, each in its own address space
-(per-process paging). It reads files off a FAT32 disk by name, and its ring-3
-programs are ELF64 binaries loaded from that disk rather than code compiled into
-the kernel. It boots into an interactive shell that is itself one of those ring-3
+(per-process paging). It reads and writes files on a FAT32 disk by name, and its
+ring-3 programs are ELF64 binaries loaded from that disk rather than code compiled
+into the kernel. It boots into an interactive shell that is itself one of those ring-3
 programs (`SHELL.ELF`): it reads typed commands and runs them using nothing but
 syscalls, which is what proves the syscall boundary is complete. This page records
 what works today, what was deliberately never built, the natural next steps, and
@@ -41,21 +41,27 @@ the known limitations. It is a factual snapshot, not a roadmap.
   scheduler cannot preempt mid-transfer), an accepted limitation of polled PIO. See
   [reference/disk.md](reference/disk.md) and
   [decisions/0013-ata-pio-disk-driver.md](decisions/0013-ata-pio-disk-driver.md).
-- A read-only FAT32 filesystem (`fs/fat32.c`): `fat32_init` parses the boot
+- A read/write FAT32 filesystem (`fs/fat32.c`): `fat32_init` parses the boot
   sector and caches the volume geometry, `fat32_list_root` lists the root
   directory, and `fat32_read_file` reads a file by 8.3 name into a caller's
   buffer, following its cluster chain and trimming the last cluster to the size
-  in the directory entry. Files on the disk can now be named and read, which is
-  what program loading needs. It is read-only by design, so nothing can be saved
-  (`TODO(fat32-write)`); it handles 8.3 names only and skips long-filename
-  entries; it reads the first FAT copy only; and lookups are root-directory only.
-  The image is formatted by the host build system (`tools/mkdisk.sh`, mtools), not
-  by the kernel. `fat32_stat` reports a file's size without reading it, which is
-  what lets a caller allocate the right buffer before a read. The ELF loader
-  reads every program file through this layer, so the filesystem is now on the
-  boot path. See
-  [reference/fat32.md](reference/fat32.md) and
-  [decisions/0014-read-only-fat32.md](decisions/0014-read-only-fat32.md).
+  in the directory entry. `fat32_write_file` creates or wholly replaces a file
+  (whole-file writes, no handles), `fat32_delete` removes one, and
+  `fat32_free_count` reports free clusters. Writing is crash-safe by ordering:
+  a new chain and its data are laid down first, a single directory-entry write is
+  the commit point, and the old chain is freed only after — so a crash midway
+  loses only unreferenced clusters and never damages the file on disk. Every FAT
+  copy is written (only the first is read), the root directory grows when it fills,
+  and FSInfo is invalidated rather than maintained. Still 8.3 names only (long
+  names rejected, not mangled), the first FAT copy for reads, the root directory
+  only, and no timestamps or subdirectory creation. The image is first formatted by
+  the host build system (`tools/mkdisk.sh`, mtools), then read and written by the
+  kernel. `fat32_stat` reports a file's size without reading it. The ELF loader
+  reads every program file through this layer, so the filesystem is on the boot
+  path. See [reference/fat32.md](reference/fat32.md),
+  [decisions/0014-read-only-fat32.md](decisions/0014-read-only-fat32.md) (the
+  original read-only scope) and
+  [decisions/0020-writable-fat32.md](decisions/0020-writable-fat32.md) (writing).
 - An ELF64 program loader (`kernel/elf.c`): user programs are separately
   compiled, statically linked ELF64 binaries (`user/shell.c` and the test
   fixtures in `user/tests/`, all linked with `user/user.ld` at 0x400000) that
@@ -76,26 +82,29 @@ the known limitations. It is a factual snapshot, not a roadmap.
   and [decisions/0006-user-mode-with-separate-pages.md](decisions/0006-user-mode-with-separate-pages.md).
 - System calls (`kernel/syscall.c`, `include/syscalls.h`): the ring-3 programs
   call back into the kernel through one `int 0x50` gate, the only DPL 3 gate in
-  the IDT. Seven calls: `SYS_WRITE` prints a string; `SYS_EXIT` ends the calling
+  the IDT. Ten calls: `SYS_WRITE` prints a string; `SYS_EXIT` ends the calling
   task with a status; `SYS_READKEY`
   pops one key from the keyboard ring buffer, sleeping the caller until one
   arrives; `SYS_LIST` writes the
   root directory's names into a caller buffer; `SYS_RUN` loads and starts a named
   program; `SYS_READFILE` reads a whole file into a caller buffer; `SYS_WAIT`
-  blocks until any child exits and returns its status. The dispatcher
-  switches on RAX and returns its result in RAX; an unknown number is rejected, not
-  fatal. The `SYS_WRITE` pointer check is a stopgap (see limitations below), but the
-  four shell calls bound the whole `[ptr, ptr+len)` range with `user_range_ok` and
-  cap copied filenames with `copy_user_string`. See
-  [reference/syscalls.md](reference/syscalls.md) and
-  [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
+  blocks until any child exits and returns its status; `SYS_WRITEFILE` writes a
+  whole file; `SYS_DELETE` removes one; and `SYS_FREECOUNT` reports the free-cluster
+  count (so the shell's `free` command and the leak test can watch it). The
+  dispatcher switches on RAX and returns its result in RAX; an unknown number is
+  rejected, not fatal. The `SYS_WRITE` pointer check is a stopgap (see limitations
+  below), but the data calls bound the whole `[ptr, ptr+len)` range with
+  `user_range_ok` and cap copied filenames with `copy_user_string`. See
+  [reference/syscalls.md](reference/syscalls.md),
+  [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md),
+  and [decisions/0020-writable-fat32.md](decisions/0020-writable-fat32.md).
 - An interactive shell (`user/shell.c`, booted as `SHELL.ELF`): a ring-3 program,
   loaded off the disk like any other, that reads typed commands and runs them using
   only syscalls. It reads a line a key at a time through `SYS_READKEY` (blocking, so
   it costs nothing while the user is thinking, echoing, with backspace), tokenizes
   it in place with a reentrant `next_token`, and
-  dispatches the custom commands `list`, `read`, `run`, `help`, `clear`, and
-  `return` (deliberately not the Unix names). The keyboard IRQ was reduced to a
+  dispatches the custom commands `list`, `read`, `write`, `delete`, `free`, `run`,
+  `help`, `clear`, and `return` (deliberately not the Unix names). The keyboard IRQ was reduced to a
   producer that only pushes a decoded character into a 128-slot ring buffer; the old
   in-kernel shell (`shell/shell.c`) is deleted. That a fully fenced-in program runs
   an interactive shell is the proof the syscall boundary is complete. See
@@ -199,16 +208,20 @@ it is running.
   lazy allocation on fault, no copy-on-write sharing (the read-only user text is
   copied in full per task rather than shared, `TODO(shared-text)`), and no paging
   to disk.
-- **Writing to the filesystem.** `fs/fat32.c` reads and only reads. There is no
-  free-cluster search, no chain update, no FAT-copy mirroring, no directory entry
-  creation, and no crash ordering, which is where filesystems get hard. Nothing
-  the kernel does can be saved, and the disk's contents are a build input
-  produced on the host. Recorded as `TODO(fat32-write)`. See
-  [decisions/0014-read-only-fat32.md](decisions/0014-read-only-fat32.md).
+- **File handles, seek, append, subdirectories, and timestamps.** `fs/fat32.c` now
+  writes, but a write is the whole file at once: there is no `open`, no `seek`, no
+  descriptor table, and no way to change part of a file without rewriting all of it
+  (`fat32_write_file` mirrors `fat32_read_file`). The root directory can grow, but
+  there is no `mkdir` and no `.`/`..`, so subdirectory creation is still absent; and
+  a written entry's date and time fields are left zero, since MiniOS keeps no clock.
+  File handles want to be designed alongside pipes. See
+  [decisions/0020-writable-fat32.md](decisions/0020-writable-fat32.md).
 - **Long filenames, paths, and permissions.** Long-filename directory entries are
-  skipped, so a file with a long name is invisible to MiniOS; lookups are
-  root-directory only, since the interface takes a bare name with no path to
-  split; and FAT32 carries essentially no permissions and no crash safety.
+  skipped, so a file with a long name is invisible to MiniOS, and a name that will
+  not fit 8.3 is rejected on write rather than mangled into a numbered alias;
+  lookups are root-directory only, since the interface takes a bare name with no
+  path to split; and FAT32 carries essentially no permissions, and no crash safety
+  beyond the write ordering that keeps a crash from corrupting a live file.
 - **Arguments to a launched program, and a shell beyond one line.** The shell's
   `run` command starts a program on demand now, but it cannot pass it anything:
   `SYS_RUN` forges the same empty, argv-less frame the loader always does. And the
@@ -230,7 +243,7 @@ The remaining steps build on it.
 **System calls.** Done. Ring-3 code re-enters the kernel through one DPL 3 IDT
 gate at `int 0x50` (`kernel/syscall.c`), the first and only deliberate exception
 to the DPL-0-everywhere IDT policy. A call number in RAX selects a handler; there
-are seven. See
+are ten. See
 [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
 What remains for a real syscall layer is safe argument validation (see the
 untrusted-pointer limitation below) and more calls, both of which wait on
@@ -280,9 +293,10 @@ rebuild. See
 [decisions/0015-elf-program-loading.md](decisions/0015-elf-program-loading.md).
 
 **The interactive shell.** Done. `user/shell.c` is a ring-3 program that reads
-commands and runs them through four syscalls (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`,
-`SYS_READFILE`) and a keyboard ring buffer. `run` loads a named program on demand,
-so the fixed program list in `kernel_main` is gone. See
+commands and runs them through the syscalls (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`,
+`SYS_READFILE`, and now `SYS_WRITEFILE`/`SYS_DELETE`/`SYS_FREECOUNT` behind
+`write`/`delete`/`free`) and a keyboard ring buffer. `run` loads a named program on
+demand, so the fixed program list in `kernel_main` is gone. See
 [decisions/0016-interactive-shell.md](decisions/0016-interactive-shell.md).
 
 **Blocking and sleep.** Done. A task can leave the rotation and be woken by the
@@ -300,15 +314,21 @@ output and then `run: A.ELF exited with status 0`, and repeated runs return the
 free-frame count to the same value. See
 [decisions/0018-process-lifecycle-exit-and-wait.md](decisions/0018-process-lifecycle-exit-and-wait.md).
 
-**Filesystem writing.** Next. Writing is the other direction across the same
-filesystem and is independent of the loader: free-cluster search, chain and
-directory updates, mirroring every FAT copy, and crash ordering
-(`TODO(fat32-write)`). After that, the remaining process work the shell makes
-concrete: argv on the new stack so `run` can pass arguments, a way to kill a task
-so a runaway program does not require a reboot (`TODO(kill-and-signals)`), and
-`waitpid` so a parent with several children can name one. Pipes and waiting on the
-disk are the same block/wake shape as `WAIT_KEY` and `WAIT_CHILD`, a new
-`wait_reason_t` and a waker in the right place rather than a new mechanism.
+**Filesystem writing.** Done. `fs/fat32.c` now creates, replaces, and deletes files
+by name: free-cluster search (`find_free_cluster` with a persistent hint), chain
+allocation and freeing, every FAT copy written (`fat32_set_entry`), directory-entry
+creation and root-directory growth, and a write-before-publish ordering that makes a
+crash lose only unreferenced clusters, never a live file. FSInfo is invalidated
+rather than maintained. `write`/`delete`/`free` expose it from the shell. See
+[decisions/0020-writable-fat32.md](decisions/0020-writable-fat32.md).
+
+**Next.** The remaining process work the shell makes concrete: argv on the new stack
+so `run` can pass arguments, a way to kill a task so a runaway program does not
+require a reboot (`TODO(kill-and-signals)`), and `waitpid` so a parent with several
+children can name one. Subdirectories and paths are the filesystem's own next rung.
+Pipes and waiting on the disk are the same block/wake shape as `WAIT_KEY` and
+`WAIT_CHILD`, a new `wait_reason_t` and a waker in the right place rather than a new
+mechanism.
 
 ## Known limitations
 

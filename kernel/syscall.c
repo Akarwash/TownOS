@@ -209,6 +209,68 @@ static uint64_t sys_readfile(uint64_t user_name, uint64_t user_buf, uint64_t buf
     return read_size;
 }
 
+// SYS_WRITEFILE: write a whole file to the disk from a ring-3 buffer, creating it
+// or wholly replacing it.
+//   RDI = user pointer to a NUL-terminated 8.3 filename,
+//   RSI = user buffer pointer, RDX = length in bytes.
+// The mirror image of SYS_READFILE and validated identically: the filename is
+// copied in (bounds-checked and length-capped) and the source range [buf, buf+len)
+// is confirmed to lie inside the ring-3 region before the kernel reads a byte
+// through it. fat32_write_file does the crash-safe write. Returns 0 on success, -1
+// on a bad pointer, a name that is not 8.3, no free space, or a disk error.
+//
+// DOES NOT BLOCK, so unlike SYS_READKEY and SYS_WAIT it has no RAX-discipline
+// problem: it computes an answer and returns it through the dispatcher normally,
+// and rax is never left holding the call number across a reschedule.
+static uint64_t sys_writefile(uint64_t user_name, uint64_t user_buf, uint64_t len) {
+    char name[SYSCALL_NAME_MAX];
+    if (copy_user_string(user_name, name, sizeof(name)) != 0) {
+        print_string("syscall: SYS_WRITEFILE rejected a bad filename pointer\n");
+        return SYSCALL_ERROR;
+    }
+    if (!user_range_ok(user_buf, len)) {
+        print_string("syscall: SYS_WRITEFILE rejected an out-of-bounds buffer\n");
+        return SYSCALL_ERROR;
+    }
+    if (fat32_write_file(name, (const void *)user_buf, (uint32_t)len) != 0) {
+        return SYSCALL_ERROR;
+    }
+    return 0;
+}
+
+// SYS_DELETE: delete a file from the disk by name.
+//   RDI = user pointer to a NUL-terminated 8.3 filename.
+// The name is copied in and length-capped exactly like SYS_RUN's. fat32_delete
+// frees the file's chain and then unpublishes its directory entry. Returns 0 on
+// success, -1 on a bad pointer, a name that is not 8.3, a missing file, or a disk
+// error.
+//
+// DOES NOT BLOCK: same as SYS_WRITEFILE, it returns through the dispatcher with no
+// RAX-discipline concern.
+static uint64_t sys_delete(uint64_t user_name) {
+    char name[SYSCALL_NAME_MAX];
+    if (copy_user_string(user_name, name, sizeof(name)) != 0) {
+        print_string("syscall: SYS_DELETE rejected a bad filename pointer\n");
+        return SYSCALL_ERROR;
+    }
+    if (fat32_delete(name) != 0) {
+        return SYSCALL_ERROR;
+    }
+    return 0;
+}
+
+// SYS_FREECOUNT: report how many clusters on the volume are free.
+//   no args; the count is returned by value in RAX.
+// Nothing crosses the boundary but a number, so there is nothing to bounds-check.
+// This exists so the free-cluster count is observable from ring 3: the shell's
+// `free` command prints it, and the leak test built on that command watches it
+// hold steady across write/delete cycles. It is the same idea as SYS_RUN reporting
+// the free frame count, one layer up. Does not block. fat32_free_count walks the
+// whole FAT, so this is deliberately slow and off the allocation path.
+static uint64_t sys_freecount(void) {
+    return (uint64_t)fat32_free_count();
+}
+
 // SYS_EXIT: end the calling task with the status in RDI.
 //   RDI = exit status, masked to 0..255 by task_exit.
 // This used to halt the machine, because there was no way for a task to stop
@@ -259,6 +321,15 @@ void syscall_handler(registers_t *regs) {
             break;
         case SYS_READFILE:
             regs->rax = sys_readfile(regs->rdi, regs->rsi, regs->rdx);
+            break;
+        case SYS_WRITEFILE:
+            regs->rax = sys_writefile(regs->rdi, regs->rsi, regs->rdx);
+            break;
+        case SYS_DELETE:
+            regs->rax = sys_delete(regs->rdi);
+            break;
+        case SYS_FREECOUNT:
+            regs->rax = sys_freecount();
             break;
         case SYS_WAIT:
             sys_wait(regs);   // writes rax itself, and must not on the block path

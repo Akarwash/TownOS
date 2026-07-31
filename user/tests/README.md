@@ -87,6 +87,30 @@ purely so that it would be obvious, rather than plausible, if it ever did turn u
 Run on its own (`run e.elf`) it is an ordinary short program reaped by the shell's
 wait, and status 7 is duly printed. It is only interesting as D's child.
 
+## F.ELF — the multi-cluster write
+
+Writes a 16KB file, `FTEST.TXT`, and checks it read back. The shell's own `write`
+can only make a single-cluster file (a typed line is far shorter than a 512-byte
+cluster), so the write path's real work — allocating and linking a 32-cluster chain
+and reading it back in order — is only ever exercised here.
+
+It is self-checking, so nobody eyeballs 16KB. It fills a buffer with numbered,
+fixed-width lines (the HUGE.TXT idea), writes it, reads it back into a second
+buffer, and compares byte for byte and on length. It exits **0** only on an exact
+match, and with a distinct non-zero status otherwise, so `run: f.elf exited with
+status N` names the failure: 1 write failed, 2 read failed, 3 length mismatch, 4
+content mismatch.
+
+    > run f.elf
+    run: started f.elf
+    F: FTEST.TXT 16384 bytes written and verified
+    run: f.elf exited with status 0
+
+16KB is deliberate: big enough to be a real 32-cluster chain, small enough to stay
+under the shell's 32KB read buffer, so afterwards `read FTEST.TXT` still prints the
+whole thing for a human spot check. On the host, `mtype -i disk.img ::/FTEST.TXT |
+wc -c` reports 16384.
+
 ## Why every loop is bounded
 
 There is no way to kill a task and there are no signals. A program that never exits

@@ -4,10 +4,11 @@ MiniOS boots into an interactive shell that is a ring-3 program, `SHELL.ELF`,
 loaded off the disk like any other. It reads typed commands and runs them using
 nothing but syscalls: it holds no privilege and touches the keyboard, screen,
 filesystem, and loader only through the `int 0x50` gate. This page documents the
-read-match-do loop, the keyboard ring buffer behind `SYS_READKEY`, the four
-syscalls the shell needs, the tokenizer, and the command table. Read from
+read-match-do loop, the keyboard ring buffer behind `SYS_READKEY`, the syscalls the
+shell needs, the tokenizer, and the command table. Read from
 `user/shell.c`, `user/userlib.h`, `drivers/keyboard.c`, and `kernel/syscall.c`.
-For the rationale, see [decision 0016](../decisions/0016-interactive-shell.md).
+For the rationale, see [decision 0016](../decisions/0016-interactive-shell.md); for
+the `write`/`delete`/`free` commands, [decision 0020](../decisions/0020-writable-fat32.md).
 
 ## The command table
 
@@ -17,6 +18,9 @@ The names are MiniOS's own and deliberately not the Unix ones.
 |---------|----------|--------|
 | `list` | none | List the files in the root directory. |
 | `read` | a filename | Print that file's contents. |
+| `write` | a filename, then text | Write the rest of the line to the file, creating or replacing it. |
+| `delete` | a filename | Delete the file. |
+| `free` | none | Print how many clusters on the volume are free. |
 | `run` | a filename | Run that program and wait for it to finish, then report its exit status. |
 | `help` | none | Print the command list. |
 | `clear` | none | Clear the screen (scroll it away with newlines). |
@@ -24,6 +28,18 @@ The names are MiniOS's own and deliberately not the Unix ones.
 
 An empty line does nothing. Any other first word prints `unknown command: <word>`.
 Filenames are 8.3 and case-insensitive, so `read hello.txt` finds `HELLO.TXT`.
+
+`write NAME.TXT the rest of this line` stores everything after the filename
+verbatim — internal spaces kept, no trailing newline added — so what was typed
+becomes the file. An empty remainder (`write EMPTY.TXT`) writes a zero-length file.
+A typed line is far shorter than one 512-byte cluster, so `write` only ever makes
+single-cluster files; the multi-cluster path is exercised by `F.ELF`
+([user/tests/README.md](../../user/tests/README.md)), not by typing. `write` and
+`delete` reject a name that will not fit 8.3 (`write my-notes.text hello` →
+`write: my-notes.text is not an 8.3 name (max 8 chars, dot, 3 chars)`), checked in
+the shell before the syscall, because that failure is the user's and fixable by
+retyping — the one case worth telling apart from a disk error. See
+[decision 0020](../decisions/0020-writable-fat32.md).
 
 **Command names are case-SENSITIVE and filenames are not.** `str_eq` compares
 bytes, so `RUN a.elf` prints `unknown command: RUN`, while `run A.ELF` and
@@ -53,8 +69,10 @@ its own vocabulary and matching them loosely buys nothing.
 2. **Tokenize.** `next_token` splits the line on spaces, in place. The first token
    is the command; a second token, where a command takes one, is the argument.
 3. **Match and do.** A chain of string compares dispatches to one of the commands
-   above. `list`, `read`, and `run` call the syscalls below; `help`, `clear`, and
-   `return` are handled with `SYS_WRITE` alone.
+   above. `list`, `read`, `write`, `delete`, `free`, and `run` call the syscalls
+   below; `help`, `clear`, and `return` are handled with `SYS_WRITE` alone. `write`
+   extracts the filename token first and then hands the untouched remainder of the
+   line to the write call as the contents.
 4. Reprint the prompt and loop.
 
 Step 1 costs nothing while the user is thinking. `SYS_READKEY` blocks (see below),
@@ -117,11 +135,11 @@ guard.
 table maps every unmapped key to 0 and the producer only pushes non-zero
 characters, so a real 0 never enters the ring.
 
-## The five syscalls
+## The shell's syscalls
 
-All five follow the calling convention in [syscalls.md](syscalls.md): RAX carries
-the number in and the result out, arguments in RDI/RSI/RDX. The ring-3 wrappers are
-in `user/userlib.h`.
+They follow the calling convention in [syscalls.md](syscalls.md): RAX carries the
+number in and the result out, arguments in RDI/RSI/RDX. The ring-3 wrappers are in
+`user/userlib.h`.
 
 | Number | Name | Arguments | Returns |
 |--------|------|-----------|---------|
@@ -130,6 +148,9 @@ in `user/userlib.h`.
 | 4 | `SYS_RUN` | RDI = filename pointer | 0 on success, -1 on failure |
 | 5 | `SYS_READFILE` | RDI = filename, RSI = buffer, RDX = size | bytes read, or -1 |
 | 6 | `SYS_WAIT` | none | a child's exit status (0..255), or -1 |
+| 7 | `SYS_WRITEFILE` | RDI = filename, RSI = buffer, RDX = length | 0, or -1 |
+| 8 | `SYS_DELETE` | RDI = filename | 0, or -1 |
+| 9 | `SYS_FREECOUNT` | none | free-cluster count |
 
 - **`SYS_READKEY`** pops one buffered key (above). Blocking: on an empty buffer the
   kernel parks the calling task, and the keyboard IRQ wakes it when it pushes a
@@ -155,6 +176,15 @@ in `user/userlib.h`.
   NUL-terminated; the shell terminates them before printing the buffer as a
   string. `read` needs this because the shell is ring 3 and cannot call
   `fat32_read_file` itself.
+- **`SYS_WRITEFILE`** writes the caller's buffer (through `fat32_write_file`) to a
+  named file, creating or wholly replacing it, and returns 0 or -1. It is the
+  mirror of `SYS_READFILE` and validated the same way; `write` passes it the rest
+  of the typed line. It does not block.
+- **`SYS_DELETE`** removes a named file (through `fat32_delete`) and returns 0 or
+  -1. `delete` uses it. It does not block.
+- **`SYS_FREECOUNT`** returns `fat32_free_count`, the number of free clusters on
+  the volume — a full FAT walk, no pointer, no block. `free` prints it, and the
+  leak test watches it hold steady across write/delete cycles.
 
 ### `read` and files that do not fit
 

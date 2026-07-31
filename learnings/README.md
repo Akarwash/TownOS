@@ -90,6 +90,7 @@ chapter states are:
 | 18 | The shell (interactive, ring 3) | [18-the-shell.md](18-the-shell.md) | written | [../docs/reference/shell.md](../docs/reference/shell.md) |
 | 19 | Blocking and sleep | [19-blocking-and-sleep.md](19-blocking-and-sleep.md) | stubbed | [../docs/reference/blocking.md](../docs/reference/blocking.md) |
 | 20 | Process lifecycle (exit and wait) | [20-process-lifecycle.md](20-process-lifecycle.md) | written | [scheduling.md](../docs/reference/scheduling.md), [syscalls.md](../docs/reference/syscalls.md) |
+| 21 | Writing to disk (the writable filesystem) | [21-writing-to-disk.md](21-writing-to-disk.md) | written | [../docs/reference/fat32.md](../docs/reference/fat32.md) |
 
 Chapters 1, 2, 3, and 5 (frozen-32bit) and chapters 8, 9, and 14 (stubbed)
 overlap on purpose: the frozen chapter teaches the original 32-bit take on boot,

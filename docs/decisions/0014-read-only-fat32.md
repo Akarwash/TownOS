@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted.
+Accepted. The read-only scope is superseded by
+[0020](0020-writable-fat32.md): the filesystem is now read/write. What 0020 carries
+forward unchanged still stands — 8.3 names only, the root directory only, and reads
+served from the first FAT copy. What it changes is that the volume can now be
+written, and a write updates *every* FAT copy, not just the first. The read-side
+design described in this ADR is unchanged; for the system as it is now see
+[reference/fat32.md](../reference/fat32.md).
 
 ## Context
 

@@ -1,10 +1,12 @@
 # The FAT32 filesystem
 
 This is the factual description of MiniOS's filesystem layer, read from
-`fs/fat32.c` and `fs/fat32.h`. It is read-only FAT32: it can list the root
-directory and read a file by name. For why read-only, and why 8.3 names and the
-first FAT copy only, see
-[decisions/0014](../decisions/0014-read-only-fat32.md). For the block device
+`fs/fat32.c` and `fs/fat32.h`. It is read/write FAT32: it can list the root
+directory, read a file by name, and create, replace, or delete a file by name. For
+why 8.3 names and the first FAT copy for reads, see
+[decisions/0014](../decisions/0014-read-only-fat32.md); for the write path, the
+crash ordering, and why FSInfo is invalidated rather than maintained, see
+[decisions/0020](../decisions/0020-writable-fat32.md). For the block device
 underneath it, see [disk.md](disk.md).
 
 ## What this layer adds
@@ -162,8 +164,9 @@ following a pointer to a distant cluster is the same operation as following one
 to the neighbouring cluster.
 
 The same table is the free list: a slot holding zero means nothing is using that
-cluster. A writer would search for zeros here, and would have to update every FAT
-copy. A reader needs only the first copy.
+cluster. The allocator (`find_free_cluster`) searches for zeros here, and the FAT
+writer (`fat32_set_entry`) updates every FAT copy on every edit. A reader needs
+only the first copy. See [the write path](#the-write-path) below.
 
 `fat32_next_cluster` reports three outcomes as distinct results (next cluster,
 end of chain, error) because "the chain ended" and "the read failed" are
@@ -266,6 +269,116 @@ layer anyway, since its real name lives in the LFN entries that are skipped.
 Steps 1 through 3 are pure bookkeeping and only step 4 onward touches file data.
 That ratio is normal; filesystems spend most of their effort finding things.
 
+## The write path
+
+Writing reuses the read layer's primitives (cluster-to-block arithmetic, chain
+following, directory scanning) and adds the ability to change what they read. Four
+pieces do the work: the FAT writer, the allocator, chain alloc/free, and the
+directory-entry writers.
+
+### Writing a FAT entry, in every copy
+
+`fat32_set_entry(cluster, value)` is the counterpart of the read side's
+`fat32_get_entry`. It is a read-modify-write — the disk's unit is a 512-byte block
+and one entry is four bytes — and it writes the entry into **every** copy of the
+FAT, not just the first. The format keeps `num_fats` identical copies for
+redundancy; a reader consults one, but a writer that updates only one leaves the
+copies disagreeing. That bug is invisible inside MiniOS (it reads the first copy, so
+it stays self-consistent) and shows up only when the host's tools cross-check the
+copies, which makes it the single most likely and least visible bug in the whole
+rung. The writer also preserves the reserved top four bits of the existing entry
+rather than zeroing them: the read path masks them off because it does not care, but
+they are not the writer's to change.
+
+### Finding and allocating space
+
+`find_free_cluster` scans the FAT for a zero entry a **block at a time** (128
+entries per 512-byte read), not a cluster at a time — a per-cluster scan of this
+volume would issue ~129000 reads where a block-at-a-time scan issues ~1009. It
+starts from a persistent hint (`fs_next_free_hint`, the in-memory twin of FSInfo's
+next-free field) and wraps to the front exactly once, failing only if it returns to
+where it began. It marks nothing; the caller claims the cluster by writing its
+entry.
+
+`alloc_chain(bytes)` rounds up to a cluster count and builds a chain, claiming each
+cluster the instant it is found (writing its FAT entry before the next scan runs) so
+the same cluster can never be handed out twice within one allocation, linking each to
+the next and marking the last end-of-chain. On running out of space partway it frees
+what it took and returns -1 — a half-linked orphan chain would be leaked space no
+file owns.
+
+`free_chain(first)` walks a chain returning every cluster to the free list. It reads
+each slot's next pointer **before** zeroing it (the slot is the only record of the
+tail), bounds the walk at the data-cluster count so a corrupt cycle fails instead of
+hanging the machine, and pulls the allocator hint back to the lowest cluster freed so
+that space is reused promptly.
+
+### Directory entries and growth
+
+`find_free_dirent` scans the root directory for a slot whose first name byte is
+`0x00` (never used) or `0xE5` (deleted). If the directory is full it **grows**: a
+directory is a file, so this is `alloc_chain` for one cluster, zero-filling it, and
+linking it onto the end of the chain. The zero-fill is required, not optional — an
+un-zeroed cluster holds whatever was there before, and every 32-byte window in it
+would be read as a bogus directory entry. At one block per cluster the root holds 16
+entries per cluster, so growth is easy to reach: creating twenty files crosses the
+boundary. `write_dirent_at(block, offset, entry)` is a read-modify-write of the
+32-byte entry into its 512-byte block.
+
+### Creating or replacing a file
+
+`fat32_write_file(name, buf, len)` creates a file or replaces one whole. The order
+of its seven steps is the safety of the rung, not a suggestion:
+
+1. Convert the name to 8.3; reject it here if it will not fit.
+2. Look the name up; remember whether it exists, its old start cluster, and its slot
+   location. Free nothing yet.
+3. Allocate a new chain for the contents (skipped for a zero-length file). Out of
+   space fails here, having changed nothing visible.
+4. Write the data into the new clusters, zero-filling the last cluster past `len` so
+   no previous file's bytes leak into the slack.
+5. Build the new directory entry pointing at the new chain.
+6. Write that entry — reusing the old slot if the file existed, else a free one.
+   **This single write is the commit point.**
+7. Only now, free the old chain if there was one.
+
+Everything before step 6 is invisible: the new clusters hold data no directory
+entry names, and the old file is still whole. The one 32-byte entry write in step 6
+fits in a single block, which `disk_write` moves whole or not at all, so it flips the
+name from the old contents to the new atomically as far as a reader is concerned. A
+crash before it loses only unreferenced clusters; a crash after it has already
+succeeded. Freeing the old chain last is what keeps the old file intact across the
+whole operation. The cost is that a replacement briefly needs room for both chains at
+once. See [decision 0020](../decisions/0020-writable-fat32.md) for the full argument.
+
+### Deleting a file
+
+`fat32_delete(name)` runs the same ordering in reverse: free the chain first, then
+mark the directory entry `0xE5`. A crash in between leaves a lost chain (wasted
+space, recoverable); the opposite order would leave a live entry pointing at freed
+clusters (corruption). A zero-length file owns no clusters, so the free is skipped.
+
+### FSInfo
+
+The FSInfo sector caches a free-cluster count and a next-free hint, both of which a
+write makes stale. MiniOS does not maintain them — that is a caching problem, and a
+subtly wrong cache is worse than none — so after every write and delete it sets both
+to the format's `0xFFFFFFFF` "unknown, recount" value and lets anything that cares
+recompute. It verifies all three FSInfo signatures (`0x41615252` at offset 0,
+`0x61417272` at 484, `0xAA550000` at 508) before writing a byte: the sector number
+comes from the boot sector, which could be corrupt, and writing into the wrong
+sector on that guess is how a volume is destroyed. The invalidation is batched — once
+per `fat32_write_file` or `fat32_delete`, not once per cluster.
+
+### Counting free space
+
+`fat32_free_count` walks the entire FAT counting zero entries. It is a full recount
+that trusts no cached total, which is the point: it is the independent yardstick the
+leak test measures against, and a cached count could hide the very leak the test
+exists to catch. It is off the allocation path (that is `find_free_cluster` with its
+hint) and is exposed to ring 3 through `SYS_FREECOUNT` and the shell's `free`
+command.
+
 ## The interface
 
 ```c
@@ -273,6 +386,9 @@ int fat32_init(void);
 int fat32_list_root(void);
 int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
                     uint32_t *out_size);
+int fat32_write_file(const char *name, const void *buf, uint32_t len);
+int fat32_delete(const char *name);
+uint32_t fat32_free_count(void);
 ```
 
 `fat32_init` must be called once, after `disk_init`, and returns -1 if the disk
@@ -281,15 +397,25 @@ prints each entry's name and either its size in bytes or `<DIR>`.
 `fat32_read_file` takes an 8.3 name (case insensitive) from the root directory,
 fills `buf`, writes the real byte count to `out_size`, and returns -1 if the name
 is not 8.3, is not found, names a directory, does not fit in `bufsize`, or the
-volume is corrupt.
+volume is corrupt. `fat32_write_file` creates or wholly replaces the named file with
+`len` bytes (crash-safe, `len == 0` making a zero-length file); `fat32_delete`
+removes it; both return 0 or -1. `fat32_free_count` returns the number of free
+clusters on the volume.
 
 ## What this layer does not do
 
-- **No writing.** Nothing can be created, modified, or deleted; the disk's
-  contents are a build input, produced by `tools/mkdisk.sh` on the host.
-  `TODO(fat32-write)`.
+- **No file handles, no seek, no append.** A write is the whole file at once
+  (`fat32_write_file`); there is no way to open a file and change part of it, and
+  appending means reading it, growing the buffer, and writing it back. See
+  [decision 0020](../decisions/0020-writable-fat32.md).
+- **No subdirectory creation, no timestamps.** The root directory can grow, but
+  there is no `mkdir` and no `.`/`..`; and a written entry's date and time fields are
+  left zero (MiniOS keeps no clock), so the host's tools show a written file as
+  `1980-00-00`.
 - **No long filenames.** LFN entries are skipped, so a file with a long name is
-  invisible to MiniOS even though the host can see it.
+  invisible to MiniOS even though the host can see it. A name that will not fit 8.3
+  is rejected outright rather than mangled into a numbered alias, since such an alias
+  would be a file this layer could never see again.
 - **No paths.** Lookups are root-directory only. The walk takes any starting
   cluster and would read a subdirectory's entries, but the interface has no path
   to split.
@@ -297,13 +423,18 @@ volume is corrupt.
   spanning N clusters costs about N data reads plus N chain reads. Correct and
   slow, and since every read goes through the polled driver, reading a large file
   freezes the machine for its duration.
-- **No permissions and no crash safety.** FAT32 has essentially neither. See the
-  ADR.
+- **No permissions, and crash safety by ordering only.** FAT32 has no owners and
+  no per-user access. There is no journal either: the write ordering above keeps a
+  crash from corrupting a live file (it loses at most some unreferenced clusters),
+  but it is not `fsync`-correct in the database sense and there is no log to replay.
+  See the ADRs.
 
 ## Where to read more
 
-- The decision and its scope: [decisions/0014](../decisions/0014-read-only-fat32.md)
+- The read-only decision and its scope: [decisions/0014](../decisions/0014-read-only-fat32.md)
+- The writable decision, the ordering, and the consequences:
+  [decisions/0020](../decisions/0020-writable-fat32.md)
 - The block device underneath: [disk.md](disk.md)
 - Building the image, and adding files to it: [../building.md](../building.md)
-- The concepts behind all of this:
-  [`../../learnings/16-the-filesystem.md`](../../learnings/16-the-filesystem.md)
+- The concepts behind reading: [`../../learnings/16-the-filesystem.md`](../../learnings/16-the-filesystem.md);
+  behind writing: [`../../learnings/21-writing-to-disk.md`](../../learnings/21-writing-to-disk.md)
