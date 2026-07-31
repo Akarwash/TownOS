@@ -19,13 +19,13 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 | [reference/gdt.md](reference/gdt.md) | The kernel GDT and TSS: selector table, descriptor layouts, and the bootstrap-vs-kernel GDT split |
 | [reference/idt.md](reference/idt.md) | The IDT and interrupt entry path: gate format, PIC remap, the 48 stubs, dispatch, and EOI |
 | [reference/user-mode.md](reference/user-mode.md) | The drop to ring 3: the forged `iretq` frame, the ring-3 selectors and stack, the user bit ANDed down the page walk, and how the isolation is proven |
-| [reference/syscalls.md](reference/syscalls.md) | The `int 0x50` syscall gate: the single DPL 3 doorway, the register calling convention, the seven calls, and the untrusted-pointer checks |
+| [reference/syscalls.md](reference/syscalls.md) | The `int 0x50` syscall gate: the single DPL 3 doorway, the register calling convention, the ten calls, and the untrusted-pointer checks |
 | [reference/scheduling.md](reference/scheduling.md) | The round-robin preemptive scheduler: the interrupt frame as the task, the forged frame for a never-run task, the in-place frame overwrite and CR3 load, the task states, the zombie sweeper, and the startup race |
 | [reference/heap.md](reference/heap.md) | The kernel heap: header/footer boundary tags, split/coalesce, the frame-allocator seam, and interrupt safety |
 | [reference/disk.md](reference/disk.md) | The polled ATA PIO disk driver: the 512-byte block model, the port layout, the read and write flows, and the driver-vs-filesystem layering |
-| [reference/fat32.md](reference/fat32.md) | The read-only FAT32 filesystem: the on-disk layout, the boot sector fields, cluster-to-block arithmetic, FAT chains and the 28-bit mask, directory entries and 8.3 names, and the read path |
+| [reference/fat32.md](reference/fat32.md) | The read/write FAT32 filesystem: the on-disk layout, the boot sector fields, cluster-to-block arithmetic, FAT chains and the 28-bit mask, directory entries and 8.3 names, the read path, and the write path (chain alloc/free, directory growth, both FAT copies, the commit ordering, FSInfo) |
 | [reference/elf-loading.md](reference/elf-loading.md) | The ELF64 program loader: the manifest, the header and program header fields used, validation and the segment bounds check, the load loop and the zero-fill, and the separate user build |
-| [reference/shell.md](reference/shell.md) | The interactive shell (a ring-3 program): the read-match-do loop, the keyboard ring buffer, the five shell syscalls and their pointer checks, the tokenizer, and the command table |
+| [reference/shell.md](reference/shell.md) | The interactive shell (a ring-3 program): the read-match-do loop, the keyboard ring buffer, the shell syscalls and their pointer checks, the tokenizer, and the command table |
 | [reference/blocking.md](reference/blocking.md) | Blocking and sleep: the blocked state and wait reason, the syscall re-arm that makes a block possible on one shared kernel stack, the `hlt` idle path, and the block/wake pairing rule |
 | [reference/keyboard.md](reference/keyboard.md) | The PS/2 keyboard driver: scancode set 1 and the release bit, the two translation tables, shift and caps-lock state and the XOR that combines them, the ring buffer, the `WAIT_KEY` wake, and the extended-scancode gap |
 | [project-status.md](project-status.md) | What works, what was never built, and the natural next steps |
@@ -52,24 +52,25 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 - [0017 — Blocking and sleep, by re-arming the syscall](decisions/0017-blocking-and-sleep.md) — Give a task a blocked state and a wait reason, skip blocked tasks in the rotation, and let a task sleep at a syscall boundary by rewinding its saved `rip` onto the `int 0x50` so waking re-issues the call; an idle shell drops from 362,648 syscalls per six seconds to three.
 - [0018 — Process lifecycle: exit, wait, and two-phase death](decisions/0018-process-lifecycle-exit-and-wait.md) — Let a task end: `SYS_EXIT` takes a status and does paperwork only (mark `TASK_ZOMBIE`, wake the parent), a sweeper in `schedule()` frees the address space of any zombie that is not the running task, and the parent frees the tombstone at `SYS_WAIT`; `run` now waits and reports an exit status.
 - [0019 — Keyboard modifier state in the driver](decisions/0019-keyboard-modifier-state-in-the-driver.md) — Track shift and caps lock in `drivers/keyboard.c` and keep resolved ASCII in the ring buffer, rather than pushing raw scancodes for ring 3 to decode; uppercase and the shifted symbols become typeable, and a modifier press pushes nothing and wakes nobody.
+- [0020 — A writable FAT32 filesystem](decisions/0020-writable-fat32.md) — Make `fs/fat32.c` writable: whole-file writes with no handles, replace-not-overwrite with a strict write-before-publish ordering (new chain and data first, one directory-entry write as the commit point, old chain freed last), delete in the same rung, every FAT copy written, FSInfo invalidated rather than maintained, and non-8.3 names rejected rather than mangled.
 
 ## Status
 
-MiniOS **builds, links, and boots to an interactive shell** under QEMU, reads
-files by name off a FAT32 disk, and loads and runs its ring-3 programs from that
-disk as ELF64 binaries. The shell itself is one of those ring-3 programs.
+MiniOS **builds, links, and boots to an interactive shell** under QEMU, reads and
+writes files by name on a FAT32 disk, and loads and runs its ring-3 programs from
+that disk as ELF64 binaries. The shell itself is one of those ring-3 programs.
 
 - All C sources compile cleanly under `-Wall -Wextra`.
 - All assembly sources assemble cleanly with `nasm -f elf64`.
 - The kernel links into `minios.elf` and is repackaged as a Multiboot-loadable
   `minios.bin`. `make run` boots it under QEMU: the banner appears, the timer ticks
   on IRQ 0, the keyboard delivers keypresses on IRQ 1, and `SHELL.ELF` runs at
-  ring 3, dispatching `list`, `read`, `run`, `help`, `clear`, and `return` through
-  the syscall gate. With nobody typing, the shell sleeps and the CPU halts between
-  timer ticks rather than spinning.
+  ring 3, dispatching `list`, `read`, `write`, `delete`, `free`, `run`, `help`,
+  `clear`, and `return` through the syscall gate. With nobody typing, the shell
+  sleeps and the CPU halts between timer ticks rather than spinning.
 
-The full feature list, the things that are still deliberately absent (writing to
-the filesystem, argv, dynamic linking, demand paging), and the natural next steps
-are in [project-status.md](project-status.md).
+The full feature list, the things that are still deliberately absent (argv, dynamic
+linking, demand paging, subdirectories), and the natural next steps are in
+[project-status.md](project-status.md).
 
 For the exact build, run, and debug commands, see [building.md](building.md).

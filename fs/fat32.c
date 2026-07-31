@@ -4,8 +4,8 @@
 #include "../kernel/heap.h"
 #include "../libc/mem.h"
 
-// Read-only FAT32. See fat32.h for the scope and docs/reference/fat32.md for the
-// on-disk layout this parses.
+// Read/write FAT32. See fat32.h for the scope and docs/reference/fat32.md for the
+// on-disk layout this parses and the write path it adds.
 
 // The boot sector is block 0 of the volume. The image is formatted as a
 // "superfloppy" (the FAT32 volume starts at block 0, no partition table), so
@@ -964,7 +964,7 @@ int fat32_list_names(char *buf, uint32_t bufsize, uint32_t *out_count) {
 // Root directory only. The walk itself takes any starting cluster and would read
 // a subdirectory's entries just as happily, but this interface takes a bare name
 // with no path to split, so there is no way to say which directory. Path lookup
-// is future work alongside TODO(fat32-write).
+// and subdirectories are future work.
 //
 // Returns 0 on success, -1 if the filesystem is not ready, the name is not
 // expressible in 8.3, the name is not present, or the entry is a directory

@@ -2,14 +2,16 @@
 
 MiniOS lets a ring-3 program request kernel services through a single software
 interrupt, `int 0x50`. This page documents the gate, the calling convention, the
-seven calls that exist, and the pointer checks that guard the untrusted ones. Read
+ten calls that exist, and the pointer checks that guard the untrusted ones. Read
 from `kernel/syscall.c`, `kernel/isr_stubs.asm`, `kernel/isr.c`,
 `include/syscalls.h`, `drivers/keyboard.c`, and `user/userlib.h`. For the
 rationale and the alternatives considered, see
-[decision 0007](../decisions/0007-syscalls-via-int-0x50.md). The four calls the
-interactive shell needs (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`) are
-covered here and in [shell.md](shell.md); see
-[decision 0016](../decisions/0016-interactive-shell.md).
+[decision 0007](../decisions/0007-syscalls-via-int-0x50.md). The calls the
+interactive shell needs (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`, and
+now `SYS_WRITEFILE`, `SYS_DELETE`, `SYS_FREECOUNT`) are covered here and in
+[shell.md](shell.md); see
+[decision 0016](../decisions/0016-interactive-shell.md) and
+[decision 0020](../decisions/0020-writable-fat32.md).
 
 ## The doorway
 
@@ -59,6 +61,9 @@ not do (kernel pages are not user-readable).
 | 4 | `SYS_RUN` | RDI = filename pointer | 0 on success, -1 on failure | Loads and starts the named program as a new task. |
 | 5 | `SYS_READFILE` | RDI = filename, RSI = buffer, RDX = size | bytes read, or -1 | Reads a whole file into the buffer. |
 | 6 | `SYS_WAIT` | none | a child's exit status (0..255), or -1 | Blocks until any child of the caller exits. |
+| 7 | `SYS_WRITEFILE` | RDI = filename, RSI = buffer, RDX = length | 0 on success, -1 on failure | Creates or wholly replaces a file with the buffer's bytes. |
+| 8 | `SYS_DELETE` | RDI = filename | 0 on success, -1 on failure | Deletes a file from the root directory. |
+| 9 | `SYS_FREECOUNT` | none | free-cluster count | Reports how many clusters on the volume are free. |
 
 `SYS_EXIT` **ends the calling task**, and no longer halts the machine. That was
 what it meant when there was no scheduler and no parent to return to; now the task
@@ -123,6 +128,19 @@ untrusted pointer from ring 3, checked as described below.
 syscall, where "the current task" still means the caller; by the time the new task
 runs, `current` is somebody else.
 
+`SYS_WRITEFILE`, `SYS_DELETE`, and `SYS_FREECOUNT` are the write side, added with
+the writable filesystem ([decision 0020](../decisions/0020-writable-fat32.md)).
+`SYS_WRITEFILE` is the mirror of `SYS_READFILE`: it copies the filename in and
+bounds-checks the source `[buf, buf+len)` range before `fat32_write_file` creates or
+wholly replaces the file. `SYS_DELETE` copies a filename in and calls
+`fat32_delete`. `SYS_FREECOUNT` takes no pointer at all — a number crosses the
+boundary by value — and returns `fat32_free_count`, which walks the whole FAT; it
+exists so the shell's `free` command, and the leak test built on it, can watch the
+free-cluster count from ring 3, the same idea as `SYS_RUN` reporting the free-frame
+count one layer up. **None of the three blocks**, so unlike `SYS_READKEY` and
+`SYS_WAIT` none has the RAX-discipline problem below: each computes an answer and
+returns it through the dispatcher normally.
+
 An **unknown syscall number** is not fatal. `syscall_handler` prints the offending
 number and returns `(uint64_t)-1` in RAX; a bad request from ring 3 must never
 fault or halt the kernel.
@@ -180,7 +198,8 @@ length, which the stopgap does not.
 `always_inline` helpers built on inline asm with explicit register constraints
 (`"a"` = RAX, `"D"` = RDI, `"S"` = RSI, `"d"` = RDX), one per arity: `syscall0`
 through `syscall3`, with `sys_write`, `sys_exit`, `sys_wait`, `sys_readkey`,
-`sys_list`, `sys_run`, and `sys_readfile` over them. `SYSCALL_VECTOR` reaches the `int`
+`sys_list`, `sys_run`, `sys_readfile`, `sys_writefile`, `sys_delete`, and
+`sys_freecount` over them. `SYSCALL_VECTOR` reaches the `int`
 instruction as an immediate through an `"i"` constraint so the vector stays a named
 constant. `always_inline` is kept: it folds the trap
 directly into the caller, so every instruction the program runs is inside its own

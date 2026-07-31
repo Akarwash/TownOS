@@ -32,6 +32,71 @@ corrected on sight, or the source.
 
 ### Added
 
+- Writing to the FAT32 filesystem: files can now be created, replaced, and deleted
+  by name, and what the kernel writes survives a reboot. `fs/fat32.c` gains the
+  whole write side. `fat32_set_entry` writes a FAT entry into **every** copy of the
+  table (a read-modify-write per copy, preserving the reserved top four bits),
+  because updating only the first copy is the classic FAT-writer bug whose symptom
+  is entirely off-machine — MiniOS reads the first copy and stays self-consistent
+  while the host's tools see the copies disagree. `find_free_cluster` scans the FAT
+  for a zero entry a **block at a time** (128 entries per read, ~1009 reads for a
+  full scan rather than ~129000), starting from a persistent `fs_next_free_hint`
+  (the in-memory twin of FSInfo's next-free field) and wrapping once. `alloc_chain`
+  builds a chain claiming each cluster the instant it is found so it cannot be
+  handed out twice, and on running out of space partway frees what it took;
+  `free_chain` reads each slot's next pointer before zeroing it, bounds the walk at
+  the data-cluster count so a cycle fails instead of hanging, and pulls the hint
+  back to the lowest cluster freed. `find_free_dirent` finds a `0x00`/`0xE5` slot
+  and, when the root directory is full, **grows** it (allocate a cluster, zero-fill
+  it — an un-zeroed cluster reads back as garbage entries — and link it on);
+  `write_dirent_at` is a read-modify-write of the 32-byte entry into its block.
+  **`fat32_write_file` is the rung, and its seven-step order is the safety of it**:
+  8.3-convert the name; look it up (remember old start cluster and slot, free
+  nothing); `alloc_chain` the new contents; write the data, zero-filling the last
+  cluster past `len` so no previous file's bytes leak; build the directory entry;
+  **write that entry — the single commit point, one 32-byte write inside one block
+  that `disk_write` moves whole or not at all**; and only then `free_chain` the old
+  chain. A crash before the commit loses only unreferenced clusters and never
+  touches the file already on disk; a crash after has already succeeded; there is no
+  instant where the name resolves to a half-written file. `fat32_delete` runs the
+  same argument in reverse — free the data first, then mark the entry `0xE5`, so a
+  crash leaves a recoverable lost chain rather than a live entry pointing at freed
+  clusters. The **FSInfo** sector is invalidated, not maintained: after every write
+  and delete its free count and next-free hint are set to `0xFFFFFFFF` ("unknown,
+  recount"), and its three signatures (`0x41615252`@0, `0x61417272`@484,
+  `0xAA550000`@508) are verified before a byte is written into it, since the sector
+  number comes from a possibly-corrupt boot sector; the `fat32_bpb` struct gained
+  `fs_info` at offset 48 (layout guard bumped 48→50). `fat32_free_count` walks the
+  whole FAT counting free clusters, a full recount that trusts no cached total so it
+  can be the yardstick a leak test measures against. Three syscalls expose the write
+  side (`include/syscalls.h`, `kernel/syscall.c`, `user/userlib.h`): `SYS_WRITEFILE`
+  (7, the mirror of `SYS_READFILE`, filename copied in and the source range
+  bounds-checked the same way), `SYS_DELETE` (8), and `SYS_FREECOUNT` (9, so the
+  free count is readable from ring 3); none blocks, so none has the RAX-discipline
+  problem `SYS_READKEY`/`SYS_WAIT` do. The shell (`user/shell.c`) gains `write NAME
+  the rest of the line` (stored verbatim, no trailing newline; an empty remainder
+  makes a zero-length file), `delete NAME`, and `free`; `write` and `delete` reject
+  a non-8.3 name locally with a message that names the problem, the one failure that
+  is the user's and fixable by retyping. `user/tests/F.c` (`F.ELF`) writes a 16KB
+  file — a real 32-cluster chain, which typing cannot produce — reads it back, and
+  self-checks byte-for-byte and on length, exiting 0 only on an exact match and with
+  a distinct status per failure. Verified under QEMU with the headless driver and
+  cross-checked on the host with mtools: `write NOTES.TXT hello world` then `read`
+  prints exactly `hello world` and survives a full quit-and-restart; `mdir`/`mtype`
+  read every written file back correctly and the two FAT copies are byte-identical
+  (`md5` match) after every write, proving both are updated in lockstep; `run f.elf`
+  exits 0 and `mtype ::/FTEST.TXT | wc -c` reports 16384; ten `write T.TXT hello` /
+  `delete T.TXT` cycles hold `free` at exactly its baseline (128714); replacing
+  `NOTES.TXT aaa` with `NOTES.TXT bbbbbbbb` leaves the free count unchanged and
+  `read` shows only `bbbbbbbb`; twenty files cross the 16-per-cluster directory
+  boundary and all appear with no host-reported damage; `write my-notes.text hello`
+  is rejected naming the 8.3 problem; `write EMPTY.TXT` makes a 0-byte file;
+  `delete NOSUCH.TXT` fails cleanly; the existing `run a.elf`/`c.elf`/`d.elf`,
+  `read BIG.TXT`, and `list` behave as before; and six idle seconds under `-d int`
+  move the `int 0x50` count by zero. See
+  `docs/decisions/0020-writable-fat32.md`, `docs/reference/fat32.md`,
+  `docs/reference/syscalls.md`, and `docs/reference/shell.md`.
+
 - Shift and caps lock (`drivers/keyboard.c`), so uppercase letters and the shifted
   symbols `!@#$%^&*()_+{}|:"<>?~` can be typed for the first time. Scancodes 0x2A
   (left shift) and 0x36 (right shift) previously mapped to 0, the table's
