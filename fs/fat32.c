@@ -1152,8 +1152,7 @@ static int locate_root_entry(const char wanted[FAT32_NAME_LENGTH],
 //
 // Returns 0 with *out_block/*out_offset set, -1 on any read/write/alloc failure
 // or a corrupt directory chain.
-static int __attribute__((unused))
-find_free_dirent(uint32_t *out_block, uint32_t *out_offset) {
+static int find_free_dirent(uint32_t *out_block, uint32_t *out_offset) {
     uint8_t *cluster_buf = (uint8_t *)kmalloc(fs_bytes_per_cluster);
     if (cluster_buf == NULL) {
         return -1;
@@ -1292,5 +1291,167 @@ int fat32_delete(const char *name) {
     if (write_dirent_at(block, offset, &entry) != 0) {
         return -1;
     }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Writing a file.
+// ---------------------------------------------------------------------------
+
+// Create or wholly replace a file. The order of the seven steps below is the most
+// important thing in this function, and it is not arbitrary: it is what makes a
+// replacement crash-safe.
+//
+//   1. Convert the name to 8.3; reject it here if it will not fit.
+//   2. Look the name up. Remember whether it already exists, and if so its old
+//      start cluster and the disk location of its directory slot. Free NOTHING.
+//   3. Allocate a fresh chain for the new contents (skipped for a 0-byte file).
+//      If the volume is full this fails now, having changed nothing visible.
+//   4. Write the data into the new clusters, zero-filling the last cluster past
+//      len so no previous file's bytes leak into the slack.
+//   5. Build the new directory entry pointing at the new chain.
+//   6. Write that entry — reusing the old slot if the file existed, else a free
+//      one. THIS SINGLE WRITE IS THE COMMIT POINT.
+//   7. Only now free the old chain, if there was one.
+//
+// Why this order. Everything before step 6 is invisible: the new clusters are
+// allocated and filled but no directory entry names them, and the old file (if
+// any) is still completely intact. The one directory-entry write in step 6 flips
+// the name from the old contents to the new, atomically as far as a reader is
+// concerned — a directory entry fits in one 512-byte block, so the disk writes it
+// whole or not at all. A crash before step 6 loses only the new, unreferenced
+// clusters (garbage the next format or a scan reclaims); a crash after it has
+// already fully succeeded. There is no instant where the name resolves to a
+// half-written file. Freeing the old chain last (step 7, not step 3) is the other
+// half of the same guarantee: the old data must outlive the commit, because until
+// the commit it is still the file. The cost is that a replacement briefly needs
+// room for both the old and the new chain at once; that is a deliberate trade
+// (see docs/decisions/0020-writable-fat32.md).
+int fat32_write_file(const char *name, const void *buf, uint32_t len) {
+    if (!fs_ready) {
+        return -1;
+    }
+
+    // Step 1: the name must be expressible in 8.3, or nothing on disk could name
+    // this file anyway.
+    char name83[FAT32_NAME_LENGTH];
+    if (name_to_83(name, name83) != 0) {
+        return -1;
+    }
+
+    // Step 2: does it already exist? Keep its slot location and old start cluster,
+    // but free nothing yet — the old file has to stay whole until the new commits.
+    struct fat32_dirent existing;
+    uint32_t slot_block = 0, slot_offset = 0, old_start = 0;
+    int exists = 0;
+    int found = locate_root_entry(name83, &existing, &slot_block, &slot_offset);
+    if (found == 0) {
+        if (existing.attr & FAT32_ATTR_DIRECTORY) {
+            return -1;   // refuse to replace a directory with a file
+        }
+        exists = 1;
+        old_start = dirent_first_cluster(&existing);
+    } else if (found != FAT32_DIR_NOT_FOUND) {
+        return -1;   // a read error or corrupt directory, not a plain "absent"
+    }
+
+    // Step 3: allocate the new chain. A zero-length file owns no clusters, so its
+    // start cluster stays 0 and nothing is allocated. Out of space fails here,
+    // with the old file still untouched.
+    uint32_t new_start = 0;
+    if (len > 0) {
+        if (alloc_chain(len, &new_start) != 0) {
+            return -1;
+        }
+    }
+
+    // Step 4: write the data into the new clusters, one cluster at a time, zero-
+    // filling the tail of the last cluster past len. A reader never sees those
+    // trailing bytes (the size field stops it), but leaving a previous file's
+    // contents there would be an information leak, and it costs one memset.
+    if (len > 0) {
+        uint8_t *cluster_buf = (uint8_t *)kmalloc(fs_bytes_per_cluster);
+        if (cluster_buf == NULL) {
+            free_chain(new_start);
+            return -1;
+        }
+        const uint8_t *src = (const uint8_t *)buf;
+        uint32_t remaining = len;
+        uint32_t cluster = new_start;
+        int failed = 0;
+
+        while (remaining > 0) {
+            uint32_t chunk = remaining < fs_bytes_per_cluster ? remaining
+                                                              : fs_bytes_per_cluster;
+            memcpy(cluster_buf, src, chunk);
+            if (chunk < fs_bytes_per_cluster) {
+                memset(cluster_buf + chunk, 0, fs_bytes_per_cluster - chunk);
+            }
+            if (disk_write(cluster_to_block(cluster),
+                           (uint8_t)fs_sectors_per_cluster, cluster_buf) != 0) {
+                failed = 1;
+                break;
+            }
+            src += chunk;
+            remaining -= chunk;
+            if (remaining == 0) {
+                break;
+            }
+            uint32_t next;
+            if (fat32_next_cluster(cluster, &next) != FAT32_CHAIN_NEXT) {
+                failed = 1;   // chain shorter than its data: alloc_chain is broken
+                break;
+            }
+            cluster = next;
+        }
+        kfree(cluster_buf);
+        if (failed) {
+            free_chain(new_start);
+            return -1;
+        }
+    }
+
+    // Step 5: build the entry. Archive attribute, size = len, start cluster split
+    // across its two 16-bit halves (both 0 for a zero-length file). The rest,
+    // including the create/write date and time fields, is left zero: MiniOS keeps
+    // no clock to stamp them with (see docs/decisions/0020-writable-fat32.md).
+    struct fat32_dirent entry;
+    memset(&entry, 0, sizeof(entry));
+    for (int i = 0; i < FAT32_NAME_LENGTH; i++) {
+        entry.name[i] = (uint8_t)name83[i];
+    }
+    entry.attr = FAT32_ATTR_ARCHIVE;
+    entry.first_cluster_high = (uint16_t)(new_start >> 16);
+    entry.first_cluster_low  = (uint16_t)(new_start & 0xFFFF);
+    entry.size = len;
+
+    // Step 6: publish. Reuse the old slot if the file existed, otherwise find a
+    // free one (growing the directory if it is full). This write is the commit
+    // point. If it cannot be placed, reclaim the new chain and fail — nothing
+    // visible changed.
+    uint32_t block, offset;
+    if (exists) {
+        block = slot_block;
+        offset = slot_offset;
+    } else if (find_free_dirent(&block, &offset) != 0) {
+        if (new_start != 0) {
+            free_chain(new_start);
+        }
+        return -1;
+    }
+    if (write_dirent_at(block, offset, &entry) != 0) {
+        if (new_start != 0) {
+            free_chain(new_start);
+        }
+        return -1;
+    }
+
+    // Step 7: the new entry is on disk, so the old chain is finally safe to free.
+    // Doing it here and not at step 3 is what kept the old file intact across the
+    // whole operation.
+    if (exists && old_start != 0) {
+        free_chain(old_start);
+    }
+
     return 0;
 }
