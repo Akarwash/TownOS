@@ -392,11 +392,7 @@ static int fat32_next_cluster(uint32_t cluster, uint32_t *next) {
 // not own, and is exactly what makes a host fsck call the volume damaged.
 //
 // Returns 0 once every copy is written, -1 the moment any read or write fails.
-//
-// The unused attribute is a stage-1 scaffold: this writer has no caller until the
-// chain allocators arrive, and -Wall would otherwise flag it. The attribute comes
-// off the moment alloc_chain/free_chain call it.
-static int __attribute__((unused)) fat32_set_entry(uint32_t cluster, uint32_t value) {
+static int fat32_set_entry(uint32_t cluster, uint32_t value) {
     uint32_t entries_per_block = fs_bytes_per_sector / FAT32_ENTRY_BYTES;
     uint32_t block_in_fat = cluster / entries_per_block;
     uint32_t offset       = (cluster % entries_per_block) * FAT32_ENTRY_BYTES;
@@ -460,7 +456,7 @@ static int read_cluster(uint32_t cluster, uint8_t *buf) {
 // this returns -1. Entries 0 and 1 are reserved (they hold a media descriptor and
 // an end-of-chain marker, never free space), so the range scanned is the data
 // clusters only, [FAT32_FIRST_DATA_CLUSTER, fs_total_clusters + 2).
-static int __attribute__((unused)) find_free_cluster(uint32_t *out_cluster) {
+static int find_free_cluster(uint32_t *out_cluster) {
     uint32_t first = FAT32_FIRST_DATA_CLUSTER;
     uint32_t limit = fs_total_clusters + FAT32_FIRST_DATA_CLUSTER;   // exclusive
 
@@ -542,6 +538,118 @@ uint32_t fat32_free_count(void) {
         }
     }
     return free;
+}
+
+// ---------------------------------------------------------------------------
+// Allocating and freeing chains.
+// ---------------------------------------------------------------------------
+
+// Free every cluster in the chain beginning at first_cluster, returning them all
+// to the free list. Used both to delete a file and to unwind a half-built chain.
+//
+// Read the next pointer before zeroing the current entry. The FAT slot IS the
+// only record of what comes next, so freeing (zeroing) it first would lose the
+// rest of the chain irrecoverably.
+//
+// The walk is bounded exactly like walk_directory and the file read: no valid
+// chain is longer than the volume's data-cluster count, so a walk that runs past
+// that bound is following a cycle, and a filesystem that hangs the machine on a
+// corrupt FAT is worse than one that reports an error. Freeing the same chain
+// twice is worse than a leak (it marks live clusters free), so callers must never
+// call this on a chain whose start they have already freed.
+//
+// Returns 0 on success, -1 on a read/write failure or a detected cycle.
+static int free_chain(uint32_t first_cluster) {
+    uint32_t cluster = first_cluster;
+    uint32_t lowest = 0;
+    int found_lowest = 0;
+
+    uint32_t steps;
+    for (steps = 0; steps <= fs_total_clusters; steps++) {
+        if (!cluster_in_range(cluster)) {
+            break;   // clean end: an end-of-chain marker, a free slot, or off-volume
+        }
+        // Next pointer first, then free this slot: reverse the order and the tail
+        // is gone the instant the slot is zeroed.
+        uint32_t next;
+        if (fat32_get_entry(cluster, &next) != 0) {
+            return -1;
+        }
+        if (fat32_set_entry(cluster, FAT32_CLUSTER_FREE) != 0) {
+            return -1;
+        }
+        if (!found_lowest || cluster < lowest) {
+            lowest = cluster;
+            found_lowest = 1;
+        }
+        cluster = next;
+    }
+
+    if (steps > fs_total_clusters) {
+        print_string("FAT32: chain to free exceeds volume size (cycle?)\n");
+        return -1;
+    }
+
+    // Freed space near the front of the volume is the best place to allocate from
+    // next, so pull the hint back to the lowest cluster just freed.
+    if (found_lowest) {
+        fs_next_free_hint = lowest;
+    }
+    return 0;
+}
+
+// Allocate a chain long enough to hold `bytes` and return its first cluster.
+// Must not be called with bytes == 0: a zero-length file owns no clusters, and
+// the caller handles that case without allocating.
+//
+// Each cluster is claimed the moment it is found — its FAT entry is written
+// before the next find_free_cluster runs — so the same cluster can never be
+// handed out twice within one allocation. Clusters are linked as they are taken
+// and the last is marked end-of-chain.
+//
+// On running out of space partway, everything already allocated is freed and -1
+// returned. A half-linked orphan chain left behind would be leaked space that no
+// file owns, the same teardown discipline as task_create_from_file unwinding a
+// partial address space.
+static int __attribute__((unused)) alloc_chain(uint32_t bytes, uint32_t *out_first) {
+    if (bytes == 0) {
+        return -1;   // caller's contract: zero-length files allocate nothing
+    }
+    uint32_t needed = (bytes + fs_bytes_per_cluster - 1) / fs_bytes_per_cluster;
+
+    uint32_t first = 0;
+    uint32_t prev  = 0;
+    for (uint32_t i = 0; i < needed; i++) {
+        uint32_t cluster;
+        if (find_free_cluster(&cluster) != 0) {
+            if (first != 0) {
+                free_chain(first);   // undo the partial chain, leak nothing
+            }
+            return -1;
+        }
+        // Claim it immediately as the new tail. Writing the entry now (rather than
+        // after the loop) is what stops a later find_free_cluster in this same
+        // allocation from returning it again: its slot is no longer zero.
+        if (fat32_set_entry(cluster, FAT32_CLUSTER_END) != 0) {
+            if (first != 0) {
+                free_chain(first);
+            }
+            return -1;
+        }
+        if (prev != 0) {
+            // Repoint the old tail at the new cluster, extending the chain.
+            if (fat32_set_entry(prev, cluster) != 0) {
+                free_chain(first);
+                return -1;
+            }
+        } else {
+            first = cluster;
+        }
+        prev = cluster;
+    }
+
+    *out_first = first;
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
