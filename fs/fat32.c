@@ -89,6 +89,30 @@
 #define FAT32_DISPLAY_NAME_MAX 13
 
 // ---------------------------------------------------------------------------
+// The FSInfo sector.
+// ---------------------------------------------------------------------------
+// A single sector (its number is named by the BPB) caching two things a writer
+// would otherwise recompute: the free-cluster count and a next-free hint. MiniOS
+// does not maintain them — keeping them correct is a caching problem, and getting
+// it subtly wrong is worse than not having them — so on every write it sets both
+// to the format's "unknown, recount" value and lets anything that cares recount.
+// See docs/decisions/0020-writable-fat32.md.
+//
+// Three signatures fence the sector. All must match before a byte is written into
+// it: the sector number came from a boot sector that might be corrupt, and writing
+// into the wrong sector on that guess is how a volume gets destroyed.
+#define FAT32_FSINFO_LEAD_SIG_OFFSET    0
+#define FAT32_FSINFO_LEAD_SIG           0x41615252
+#define FAT32_FSINFO_STRUCT_SIG_OFFSET  484
+#define FAT32_FSINFO_STRUCT_SIG         0x61417272
+#define FAT32_FSINFO_TRAIL_SIG_OFFSET   508
+#define FAT32_FSINFO_TRAIL_SIG          0xAA550000
+#define FAT32_FSINFO_FREE_COUNT_OFFSET  488
+#define FAT32_FSINFO_NEXT_FREE_OFFSET   492
+// The legal "unknown" value for both cached fields: recount before trusting.
+#define FAT32_FSINFO_UNKNOWN            0xFFFFFFFF
+
+// ---------------------------------------------------------------------------
 // The BIOS Parameter Block: the filesystem describing its own shape.
 // ---------------------------------------------------------------------------
 // __attribute__((packed)) is load-bearing, not decoration. These fields sit at
@@ -120,12 +144,13 @@ struct fat32_bpb {
     uint16_t ext_flags;                // 40: FAT mirroring flags
     uint16_t fs_version;               // 42: format version
     uint32_t root_cluster;             // 44: first cluster of the root directory
+    uint16_t fs_info;                  // 48: sector number of the FSInfo structure
 } __attribute__((packed));
 
 // Compile-time guard on the above. If padding ever creeps back in, the array
 // size goes negative and the build fails here rather than at runtime with
-// nonsense geometry. 48 is where root_cluster ends (offset 44 plus 4 bytes).
-#define FAT32_BPB_SIZE 48
+// nonsense geometry. 50 is where fs_info ends (offset 48 plus 2 bytes).
+#define FAT32_BPB_SIZE 50
 typedef char fat32_bpb_is_packed[(sizeof(struct fat32_bpb) == FAT32_BPB_SIZE) ? 1 : -1];
 
 // One cluster is always one disk_read: an 8-bit block count can hold any value
@@ -179,6 +204,7 @@ static uint32_t fs_num_fats;           // how many identical FAT copies to keep 
 static uint32_t fs_first_data_block;   // block where cluster 2 begins
 static uint32_t fs_root_cluster;
 static uint32_t fs_total_clusters;     // count of data clusters on the volume
+static uint32_t fs_fsinfo_block;       // LBA of the FSInfo sector, or 0/0xFFFF if none
 static int      fs_ready;              // 0 until a successful fat32_init
 
 // Where the next free-cluster scan starts, so allocation does not restart from
@@ -250,6 +276,10 @@ int fat32_init(void) {
     fs_sectors_per_fat     = bpb->sectors_per_fat_32;
     fs_num_fats            = bpb->num_fats;
     fs_root_cluster        = bpb->root_cluster;
+    // The volume starts at block 0 (a superfloppy), so the FSInfo sector number
+    // from the BPB is already an LBA. Nothing is read from it at mount; it is only
+    // written, to invalidate it, and only after its signatures are verified there.
+    fs_fsinfo_block        = bpb->fs_info;
 
     // The volume is laid out as: reserved area, then num_fats copies of the FAT
     // back to back, then the data area. So the first FAT starts right after the
@@ -1253,6 +1283,56 @@ static int write_dirent_at(uint32_t block, uint32_t offset,
 }
 
 // ---------------------------------------------------------------------------
+// FSInfo.
+// ---------------------------------------------------------------------------
+
+// Mark the FSInfo sector's cached free-cluster count and next-free hint as
+// unknown, so nothing downstream trusts a value our writes have just made stale.
+// This is called once per write or delete (batched, not once per cluster).
+//
+// It verifies all three FSInfo signatures before writing a single byte. The
+// sector number was taken from the boot sector, which could be corrupt; if the
+// signatures do not all match, this is not an FSInfo sector and gets left
+// entirely alone rather than overwritten on a bad guess. Best effort throughout:
+// a stale FSInfo is a performance hint at worst, never a correctness problem, so a
+// read or write failure here is swallowed rather than failing the whole operation.
+static void fat32_fsinfo_invalidate(void) {
+    if (fs_fsinfo_block == 0 || fs_fsinfo_block == 0xFFFF) {
+        return;   // the BPB declares no FSInfo sector (0 and 0xFFFF both mean none)
+    }
+
+    uint8_t block_buf[DISK_SECTOR_SIZE];
+    if (disk_read(fs_fsinfo_block, 1, block_buf) != 0) {
+        return;
+    }
+
+    uint32_t lead = (uint32_t)block_buf[FAT32_FSINFO_LEAD_SIG_OFFSET] |
+        ((uint32_t)block_buf[FAT32_FSINFO_LEAD_SIG_OFFSET + 1] << 8) |
+        ((uint32_t)block_buf[FAT32_FSINFO_LEAD_SIG_OFFSET + 2] << 16) |
+        ((uint32_t)block_buf[FAT32_FSINFO_LEAD_SIG_OFFSET + 3] << 24);
+    uint32_t struc = (uint32_t)block_buf[FAT32_FSINFO_STRUCT_SIG_OFFSET] |
+        ((uint32_t)block_buf[FAT32_FSINFO_STRUCT_SIG_OFFSET + 1] << 8) |
+        ((uint32_t)block_buf[FAT32_FSINFO_STRUCT_SIG_OFFSET + 2] << 16) |
+        ((uint32_t)block_buf[FAT32_FSINFO_STRUCT_SIG_OFFSET + 3] << 24);
+    uint32_t trail = (uint32_t)block_buf[FAT32_FSINFO_TRAIL_SIG_OFFSET] |
+        ((uint32_t)block_buf[FAT32_FSINFO_TRAIL_SIG_OFFSET + 1] << 8) |
+        ((uint32_t)block_buf[FAT32_FSINFO_TRAIL_SIG_OFFSET + 2] << 16) |
+        ((uint32_t)block_buf[FAT32_FSINFO_TRAIL_SIG_OFFSET + 3] << 24);
+
+    if (lead != FAT32_FSINFO_LEAD_SIG || struc != FAT32_FSINFO_STRUCT_SIG ||
+        trail != FAT32_FSINFO_TRAIL_SIG) {
+        return;   // not an FSInfo sector: do not write into it
+    }
+
+    // Both fields to 0xFFFFFFFF. That is eight contiguous 0xFF bytes covering the
+    // free count at offset 488 and the next-free hint at 492.
+    for (int i = 0; i < 8; i++) {
+        block_buf[FAT32_FSINFO_FREE_COUNT_OFFSET + i] = 0xFF;
+    }
+    disk_write(fs_fsinfo_block, 1, block_buf);   // best effort; a failure is harmless
+}
+
+// ---------------------------------------------------------------------------
 // Deleting a file.
 // ---------------------------------------------------------------------------
 
@@ -1291,6 +1371,10 @@ int fat32_delete(const char *name) {
     if (write_dirent_at(block, offset, &entry) != 0) {
         return -1;
     }
+
+    // The free-cluster picture changed, so the FSInfo cache is now stale. One
+    // invalidation for the whole delete, after the chain has been freed.
+    fat32_fsinfo_invalidate();
     return 0;
 }
 
@@ -1453,5 +1537,8 @@ int fat32_write_file(const char *name, const void *buf, uint32_t len) {
         free_chain(old_start);
     }
 
+    // Allocation and/or freeing changed the free-cluster picture, so the FSInfo
+    // cache is stale. Invalidate once here, not once per cluster touched above.
+    fat32_fsinfo_invalidate();
     return 0;
 }
