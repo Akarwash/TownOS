@@ -175,6 +175,7 @@ static uint32_t fs_sectors_per_cluster;
 static uint32_t fs_bytes_per_cluster;
 static uint32_t fs_first_fat_block;    // block of the first FAT copy
 static uint32_t fs_sectors_per_fat;
+static uint32_t fs_num_fats;           // how many identical FAT copies to keep in step
 static uint32_t fs_first_data_block;   // block where cluster 2 begins
 static uint32_t fs_root_cluster;
 static uint32_t fs_total_clusters;     // count of data clusters on the volume
@@ -239,14 +240,17 @@ int fat32_init(void) {
     fs_sectors_per_cluster = bpb->sectors_per_cluster;
     fs_bytes_per_cluster   = fs_bytes_per_sector * fs_sectors_per_cluster;
     fs_sectors_per_fat     = bpb->sectors_per_fat_32;
+    fs_num_fats            = bpb->num_fats;
     fs_root_cluster        = bpb->root_cluster;
 
     // The volume is laid out as: reserved area, then num_fats copies of the FAT
     // back to back, then the data area. So the first FAT starts right after the
-    // reserved area, and the data starts right after the last FAT copy.
+    // reserved area, and the data starts right after the last FAT copy. The FAT
+    // copy count is cached (fs_num_fats), not just used here and discarded: a
+    // writer has to patch every copy on every edit, so it needs it later too.
     fs_first_fat_block  = bpb->reserved_sector_count;
     fs_first_data_block = bpb->reserved_sector_count +
-                          (uint32_t)bpb->num_fats * fs_sectors_per_fat;
+                          fs_num_fats * fs_sectors_per_fat;
 
     if (bpb->total_sectors_32 <= fs_first_data_block) {
         print_string("FAT32: volume smaller than its own metadata\n");
@@ -298,19 +302,20 @@ static int cluster_in_range(uint32_t cluster) {
            cluster < fs_total_clusters + FAT32_FIRST_DATA_CLUSTER;
 }
 
-// Look up one cluster's FAT entry and report what follows it.
+// Locate one cluster's FAT entry and hand back its value, with no interpretation
+// of what that value means. This is the raw accessor shared by the chain reader
+// (fat32_next_cluster) and, in stage 3 onward, the allocators.
 //
 // The FAT is a flat array of 32-bit entries starting at the first FAT block, so
 // finding an entry is a division: which block of the table holds it, and where
 // in that block it sits.
 //
-// Only the first FAT copy is consulted. The format keeps num_fats identical
-// copies for redundancy, and reading needs just one of them. A writer would have
-// to update every copy, or they disagree and the volume is corrupt.
-//
-// Returns FAT32_CHAIN_NEXT with *next set, FAT32_CHAIN_END at the end of the
-// chain, or FAT32_CHAIN_ERROR on a read failure or a corrupt entry.
-static int fat32_next_cluster(uint32_t cluster, uint32_t *next) {
+// Only the first FAT copy is read. The format keeps num_fats identical copies
+// for redundancy, and reading needs just one of them; fat32_set_entry is what
+// keeps them identical. *out_value is masked to the low 28 bits, because the read
+// side does not care about the reserved top four; a writer that owns those bits
+// preserves them itself. Returns 0 on success, -1 on a read failure.
+static int fat32_get_entry(uint32_t cluster, uint32_t *out_value) {
     uint32_t entries_per_block = fs_bytes_per_sector / FAT32_ENTRY_BYTES;
     uint32_t block  = fs_first_fat_block + (cluster / entries_per_block);
     uint32_t offset = (cluster % entries_per_block) * FAT32_ENTRY_BYTES;
@@ -319,7 +324,7 @@ static int fat32_next_cluster(uint32_t cluster, uint32_t *next) {
     // (see fat32_read_file) because a cluster can be far larger than a block.
     uint8_t block_buf[DISK_SECTOR_SIZE];
     if (disk_read(block, 1, block_buf) != 0) {
-        return FAT32_CHAIN_ERROR;
+        return -1;
     }
 
     // Assembled byte by byte rather than cast through a uint32_t pointer: the
@@ -329,7 +334,19 @@ static int fat32_next_cluster(uint32_t cluster, uint32_t *next) {
                      ((uint32_t)block_buf[offset + 2] << 16) |
                      ((uint32_t)block_buf[offset + 3] << 24);
 
-    entry &= FAT32_ENTRY_MASK;   // the top 4 bits are reserved, never compared
+    *out_value = entry & FAT32_ENTRY_MASK;   // top 4 bits are reserved, dropped here
+    return 0;
+}
+
+// Look up one cluster's FAT entry and report what follows it.
+//
+// Returns FAT32_CHAIN_NEXT with *next set, FAT32_CHAIN_END at the end of the
+// chain, or FAT32_CHAIN_ERROR on a read failure or a corrupt entry.
+static int fat32_next_cluster(uint32_t cluster, uint32_t *next) {
+    uint32_t entry;
+    if (fat32_get_entry(cluster, &entry) != 0) {
+        return FAT32_CHAIN_ERROR;
+    }
 
     if (entry >= FAT32_CLUSTER_END) {
         return FAT32_CHAIN_END;
@@ -343,6 +360,65 @@ static int fat32_next_cluster(uint32_t cluster, uint32_t *next) {
 
     *next = entry;
     return FAT32_CHAIN_NEXT;
+}
+
+// Write `value` into cluster's FAT slot, in every copy of the table.
+//
+// THE SINGLE MOST LIKELY BUG IN THE ENTIRE WRITE PATH IS UPDATING ONLY THE FIRST
+// COPY. It is invisible from inside QEMU: MiniOS reads the first copy (see
+// fat32_get_entry), so the volume stays self-consistent to itself and every
+// in-kernel check keeps passing. The damage only surfaces off-machine, when the
+// host's tools (mtools, or any real OS) read the volume, consult a different copy
+// or cross-check them, and find them disagreeing. So this loops over all
+// fs_num_fats copies, and the loop is not optional.
+//
+// Copy n of the FAT begins at fs_first_fat_block + n * fs_sectors_per_fat, and
+// the slot for `cluster` sits at the same block-and-offset within each copy. The
+// write is read-modify-write: the disk's unit is a 512-byte block and one entry
+// is four bytes, so the block holding the slot is read, four bytes are patched
+// little-endian, and the whole block is written back.
+//
+// Only the low 28 bits belong to us. The top four are reserved by the format, so
+// the value on disk keeps its existing top four bits and takes only the low 28
+// of `value`. Zeroing the reserved bits would be modifying fields this code does
+// not own, and is exactly what makes a host fsck call the volume damaged.
+//
+// Returns 0 once every copy is written, -1 the moment any read or write fails.
+//
+// The unused attribute is a stage-1 scaffold: this writer has no caller until the
+// chain allocators arrive, and -Wall would otherwise flag it. The attribute comes
+// off the moment alloc_chain/free_chain call it.
+static int __attribute__((unused)) fat32_set_entry(uint32_t cluster, uint32_t value) {
+    uint32_t entries_per_block = fs_bytes_per_sector / FAT32_ENTRY_BYTES;
+    uint32_t block_in_fat = cluster / entries_per_block;
+    uint32_t offset       = (cluster % entries_per_block) * FAT32_ENTRY_BYTES;
+
+    for (uint32_t copy = 0; copy < fs_num_fats; copy++) {
+        uint32_t block = fs_first_fat_block + copy * fs_sectors_per_fat + block_in_fat;
+
+        uint8_t block_buf[DISK_SECTOR_SIZE];
+        if (disk_read(block, 1, block_buf) != 0) {
+            return -1;
+        }
+
+        // Reassemble the entry already on disk so its reserved top four bits can
+        // be carried over, then splice in only the low 28 bits of the new value.
+        uint32_t old = (uint32_t)block_buf[offset] |
+                       ((uint32_t)block_buf[offset + 1] << 8) |
+                       ((uint32_t)block_buf[offset + 2] << 16) |
+                       ((uint32_t)block_buf[offset + 3] << 24);
+        uint32_t merged = (old & ~FAT32_ENTRY_MASK) | (value & FAT32_ENTRY_MASK);
+
+        block_buf[offset]     = (uint8_t)(merged & 0xFF);
+        block_buf[offset + 1] = (uint8_t)((merged >> 8) & 0xFF);
+        block_buf[offset + 2] = (uint8_t)((merged >> 16) & 0xFF);
+        block_buf[offset + 3] = (uint8_t)((merged >> 24) & 0xFF);
+
+        if (disk_write(block, 1, block_buf) != 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 // Read one whole cluster into buf, which must hold bytes_per_cluster bytes.
