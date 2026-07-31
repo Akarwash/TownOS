@@ -181,6 +181,14 @@ static uint32_t fs_root_cluster;
 static uint32_t fs_total_clusters;     // count of data clusters on the volume
 static int      fs_ready;              // 0 until a successful fat32_init
 
+// Where the next free-cluster scan starts, so allocation does not restart from
+// cluster 2 every time and re-examine a long prefix it already knows is full.
+// This is the in-memory twin of the FSInfo sector's next-free field, and exists
+// for the same reason. It is only a hint: a stale value costs at most one wasted
+// wrap of the scan, never a wrong answer, because every candidate is still
+// checked against the FAT itself.
+static uint32_t fs_next_free_hint = FAT32_FIRST_DATA_CLUSTER;
+
 // A power of two has exactly one bit set, so n & (n - 1) clears it to zero.
 static int is_power_of_two(uint32_t n) {
     return n != 0 && (n & (n - 1)) == 0;
@@ -429,6 +437,111 @@ static int read_cluster(uint32_t cluster, uint8_t *buf) {
     }
     return disk_read(cluster_to_block(cluster),
                      (uint8_t)fs_sectors_per_cluster, buf);
+}
+
+// ---------------------------------------------------------------------------
+// Free space.
+// ---------------------------------------------------------------------------
+
+// Find one free cluster and hand back its number, marking nothing: the caller
+// claims it by writing its FAT entry. A cluster is free when its FAT entry is
+// FAT32_CLUSTER_FREE (zero), so the same table that chains files is also the free
+// list.
+//
+// Scanned a block at a time, not a cluster at a time. One 512-byte FAT block
+// holds 128 entries, so reading the block and scanning it in memory costs one
+// disk read per 128 clusters examined. A loop calling fat32_get_entry per cluster
+// would read a whole block for each one, turning a scan of this volume into
+// ~129000 reads; the same scan here is ~1009.
+//
+// The scan starts at fs_next_free_hint and wraps to the front exactly once, so a
+// volume with a full prefix is not re-walked from cluster 2 every allocation. If
+// it returns to where it began without finding a zero, the volume is full and
+// this returns -1. Entries 0 and 1 are reserved (they hold a media descriptor and
+// an end-of-chain marker, never free space), so the range scanned is the data
+// clusters only, [FAT32_FIRST_DATA_CLUSTER, fs_total_clusters + 2).
+static int __attribute__((unused)) find_free_cluster(uint32_t *out_cluster) {
+    uint32_t first = FAT32_FIRST_DATA_CLUSTER;
+    uint32_t limit = fs_total_clusters + FAT32_FIRST_DATA_CLUSTER;   // exclusive
+
+    // A hint left out of range (never set, or pointing past a shrunk volume)
+    // falls back to the first data cluster rather than skipping the scan.
+    uint32_t start = fs_next_free_hint;
+    if (start < first || start >= limit) {
+        start = first;
+    }
+
+    uint32_t entries_per_block = fs_bytes_per_sector / FAT32_ENTRY_BYTES;
+    uint8_t block_buf[DISK_SECTOR_SIZE];
+
+    // Two spans cover the whole table starting at the hint and wrapping once:
+    // [start, limit) then [first, start). If start == first the second span is
+    // empty, so nothing is scanned twice.
+    for (int pass = 0; pass < 2; pass++) {
+        uint32_t lo = (pass == 0) ? start : first;
+        uint32_t hi = (pass == 0) ? limit : start;
+
+        uint32_t cluster = lo;
+        while (cluster < hi) {
+            uint32_t block = fs_first_fat_block + cluster / entries_per_block;
+            if (disk_read(block, 1, block_buf) != 0) {
+                return -1;
+            }
+            // Scan from this cluster's slot to the end of the block, in memory.
+            for (uint32_t idx = cluster % entries_per_block;
+                 idx < entries_per_block && cluster < hi; idx++, cluster++) {
+                uint32_t offset = idx * FAT32_ENTRY_BYTES;
+                uint32_t entry = (uint32_t)block_buf[offset] |
+                                 ((uint32_t)block_buf[offset + 1] << 8) |
+                                 ((uint32_t)block_buf[offset + 2] << 16) |
+                                 ((uint32_t)block_buf[offset + 3] << 24);
+                if ((entry & FAT32_ENTRY_MASK) == FAT32_CLUSTER_FREE) {
+                    // Advance the hint past what we hand out, wrapping at the end.
+                    fs_next_free_hint = (cluster + 1 < limit) ? cluster + 1 : first;
+                    *out_cluster = cluster;
+                    return 0;
+                }
+            }
+        }
+    }
+    return -1;   // scanned the whole table without a free cluster: volume is full
+}
+
+// Count every free cluster on the volume. A full recount, deliberately: it walks
+// the entire FAT rather than trusting any cached total, because its whole purpose
+// is to be the independent check that catches cluster leaks. It is not on the
+// allocation path (that is find_free_cluster with its hint), so its cost does not
+// matter; it is still scanned a block at a time so the leak test does not freeze
+// the machine for the length of ~129000 single-sector reads.
+uint32_t fat32_free_count(void) {
+    if (!fs_ready) {
+        return 0;
+    }
+    uint32_t first = FAT32_FIRST_DATA_CLUSTER;
+    uint32_t limit = fs_total_clusters + FAT32_FIRST_DATA_CLUSTER;   // exclusive
+    uint32_t entries_per_block = fs_bytes_per_sector / FAT32_ENTRY_BYTES;
+    uint8_t block_buf[DISK_SECTOR_SIZE];
+
+    uint32_t free = 0;
+    uint32_t cluster = first;
+    while (cluster < limit) {
+        uint32_t block = fs_first_fat_block + cluster / entries_per_block;
+        if (disk_read(block, 1, block_buf) != 0) {
+            return free;   // no error channel here; stop counting on a bad read
+        }
+        for (uint32_t idx = cluster % entries_per_block;
+             idx < entries_per_block && cluster < limit; idx++, cluster++) {
+            uint32_t offset = idx * FAT32_ENTRY_BYTES;
+            uint32_t entry = (uint32_t)block_buf[offset] |
+                             ((uint32_t)block_buf[offset + 1] << 8) |
+                             ((uint32_t)block_buf[offset + 2] << 16) |
+                             ((uint32_t)block_buf[offset + 3] << 24);
+            if ((entry & FAT32_ENTRY_MASK) == FAT32_CLUSTER_FREE) {
+                free++;
+            }
+        }
+    }
+    return free;
 }
 
 // ---------------------------------------------------------------------------

@@ -62,4 +62,11 @@ int fat32_stat(const char *name, uint32_t *out_size);
 int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
                     uint32_t *out_size);
 
+// Count every free cluster on the volume by walking the whole FAT. This is a full
+// recount that trusts no cached total, so it is the independent yardstick a leak
+// test measures against: allocate and free the same file repeatedly and this must
+// return to its starting value. Slow by design and off the allocation path.
+// Returns the free-cluster count, or 0 if the filesystem is not ready.
+uint32_t fat32_free_count(void);
+
 #endif
