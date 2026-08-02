@@ -58,24 +58,44 @@ omission is the entire program; it is not a bug and must not be tidied away.
 D exists to orphan E. Normally a child is reaped by its parent's `SYS_WAIT` before
 the scheduler's sweeper ever sees it — the exiting child wakes its parent and
 switches straight to it, so the parent re-enters `SYS_WAIT` before a timer tick has
-gone by. That leaves the sweeper's free path, and the branch of `parent_alive` that
-answers "no", unreachable in every other test here. A zombie whose parent is already
-dead is the only way in.
+gone by. That leaves two pieces of `reap_sweep` unreached in every other test
+here: the free path that tears a zombie's address space down, and the branch of
+`parent_alive` that answers "no" and drops an unwatched tombstone. `run d.elf` is
+what reaches them, and the output below shows how.
 
     > run d.elf
-    run: started d.elf
     D: starting E
+    run: started d.elf
     D: not waiting, exiting
-    reap (wait):    task 1 exited (status 0), free frames: 30592
+    reap (sweeper): task 1 exited (status 0), free frames: 30519
     run: d.elf exited with status 0
     > EEEEEEEEEEEEEEE
-    reap (sweeper): task 2 exited (status 7), free frames: 30592
+    reap (sweeper): task 2 exited (status 7), free frames: 30591
 
-Three things to check in that output. The prompt comes back while E is still
-printing: the shell waited for D, not for E, and stays usable throughout. D is
-reaped by `wait` and E by `sweeper` — **if E's line says `reap (wait):`, something
-collected it that should not have been able to.** And the free frame count is back
-to the same number it was before, from a path that had never run until now.
+Both D and E are reaped by the **sweeper**, and which path frees which is decided
+by where they sit in the task table, not by luck. The table is `shell` = 0, `D` =
+1, `E` = 2. When D exits it wakes the shell, its parent, but `find_next_ready` scans
+forward from the slot *after* D and so reaches E at slot 2 before it wraps back to
+the shell at slot 0: E, not the shell, is what runs next, and it gets a full
+timeslice. The next timer tick enters `schedule` with `current` = E, and
+`reap_sweep` — which runs at the top of every `schedule` and frees any zombie that
+is not the running task — finds D and frees its address space. That is D's
+`reap (sweeper):` line. The shell's `SYS_WAIT` runs only afterwards, finds D's
+address space already gone, and quietly collects the tombstone alone, so **D
+produces no `reap (wait):` line at all, even though it was waited on.**
+
+That outcome hangs entirely on the task-table order and on how `find_next_ready`
+walks it. Reorder the table, or change the scan so the shell is reached before E
+when D exits, and D would be reaped by the shell's `SYS_WAIT` and its line would
+read `reap (wait):` instead. Treat the labels here as a fact about today's
+scheduler, not a guarantee: if the table or `find_next_ready` changes, work out
+again which path frees D before trusting this output.
+
+Two more things the run shows. The prompt returns while E is still printing,
+because the shell waited for D and not for E and stays usable throughout. And D's
+line reports fewer free frames than E's (30519 against 30591 here): when D is swept
+E is still running and holding its own address space, and E's line is the count
+coming back to the baseline once E is gone too.
 
 ## E.ELF — the orphan
 

@@ -25,3 +25,6 @@ disk.img.known-good
 # Generated rather than committed: it is 40KB of padding whose entire content is
 # described by three lines of the rule that writes it.
 HUGE.TXT
+
+# Per-tranche scratch checklist, never committed and deleted when the tranche ends.
+LOOSE-ENDS-TASK.md
