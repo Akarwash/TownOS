@@ -32,6 +32,41 @@ corrected on sight, or the source.
 
 ### Added
 
+- `SYS_STAT` (10), the eleventh syscall: report a file's size without reading it,
+  so a caller can size a buffer before it reads. It wraps `fat32_stat`, which had
+  existed since the read-only rung but had never been reachable from ring 3, and it
+  takes `RDI` = filename, `RSI` = `uint64_t *out_size`, returning 0 or
+  `SYSCALL_ERROR` when the file is not found (a directory or a non-8.3 name folds
+  into the same error). Both pointers are untrusted: the filename is copied in and
+  length-capped like `SYS_RUN`'s, and the **`out_size` pointer is a write target**,
+  so its whole `[ptr, ptr+8)` range is bounds-checked with `user_range_ok` — the
+  same check `SYS_READFILE` applies to its destination — rather than only its start,
+  which would let a pointer just below `USER_REGION_END` have the kernel write a
+  `uint64_t` into kernel pages. Like the write-side calls it **does not block**, so
+  it has none of the RAX-discipline problem `SYS_READKEY`/`SYS_WAIT` carry. Added to
+  `include/syscalls.h`, `kernel/syscall.c`, and `user/userlib.h` (`sys_stat`). This
+  fixes two problems the writable-FAT32 rung's `HUGE.TXT` (40981 bytes) had exposed.
+  `fat32_read_file` refuses a file larger than the caller's buffer outright, so
+  `read HUGE.TXT` printed `read: cannot read huge.txt` — and that one line was three
+  different failures (absent, too big, disk error) wearing one message. `cmd_read`
+  (`user/shell.c`) now **stats first, then decides**: not found →
+  `read: no such file: X`; found but larger than the buffer →
+  `read: X is N bytes, the buffer holds M` (both numbers, e.g. `read: HUGE.TXT is
+  40981 bytes, the buffer holds 32767`); otherwise read and print as before, with
+  the old `read: cannot read X` now reachable only for a genuine disk error. There
+  are **no partial reads and no offset** — `read` still delivers the whole file or
+  none, it just says why when it declines; a prefix would need an offset on
+  `SYS_READFILE`, a rung of its own. This also retired the shell's unreachable
+  "showing the first N bytes, the file may be longer" notice (`TODO(read-truncation)`,
+  removed from `user/shell.c` and `docs/reference/shell.md`), which could only ever
+  fire for a file of exactly the buffer size, which is complete. Verified under QEMU:
+  `read HUGE.TXT` reports `read: HUGE.TXT is 40981 bytes, the buffer holds 32767`,
+  `read NOSUCH.TXT` reports `read: no such file: NOSUCH.TXT` (distinct from the
+  too-big case), and `read HELLO.TXT` and `read BIG.TXT` still print their contents
+  whole. Builds warning-clean. See `docs/decisions/0021-sys-stat.md`,
+  `docs/reference/syscalls.md`, `docs/reference/shell.md`, and
+  `docs/reference/fat32.md`.
+
 - Writing to the FAT32 filesystem: files can now be created, replaced, and deleted
   by name, and what the kernel writes survives a reboot. `fs/fat32.c` gains the
   whole write side. `fat32_set_entry` writes a FAT entry into **every** copy of the

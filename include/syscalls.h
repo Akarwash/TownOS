@@ -23,5 +23,6 @@
 #define SYS_WRITEFILE 7  // RDI = filename ptr, RSI = buffer, RDX = length; 0 on success, SYSCALL_ERROR on failure
 #define SYS_DELETE    8  // RDI = filename ptr; 0 on success, SYSCALL_ERROR on failure
 #define SYS_FREECOUNT 9  // no args; return the count of free clusters on the volume. Exposes fat32_free_count so the shell's `free` command (and the leak test) can watch it.
+#define SYS_STAT     10  // RDI = name, RSI = uint64_t *out_size; 0 on success, SYSCALL_ERROR if not found. Reports a file's size without reading it, so a caller can size a buffer first. Does not block.
 
 #endif

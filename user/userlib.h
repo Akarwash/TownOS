@@ -181,6 +181,16 @@ unsigned long sys_freecount(void) {
     return syscall0(SYS_FREECOUNT);
 }
 
+// SYS_STAT: report the size in bytes of the named file, writing it through
+// `out_size`, so a caller can size a buffer before it reads. Returns 0 on success,
+// (unsigned long)-1 if the file is not found (or the name is not 8.3, or names a
+// directory). This is what lets `read` tell a missing file from one too big for
+// its buffer, and report the size instead of a bare failure.
+static inline __attribute__((always_inline))
+unsigned long sys_stat(const char *name, unsigned long *out_size) {
+    return syscall2(SYS_STAT, (unsigned long)name, (unsigned long)out_size);
+}
+
 // A crude busy-wait so the letters do not scroll past faster than the eye can
 // follow. This is NOT a timed delay, just a spin; the count was tuned by eye
 // under QEMU for a readable interleave. A real system would sleep, not spin.

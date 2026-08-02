@@ -148,7 +148,43 @@ static void cmd_read(char *name) {
         sys_write("read: missing filename\n");
         return;
     }
-    // Ask for at most SHELL_FILE_MAX - 1 bytes so there is room to terminate.
+
+    // STAT FIRST, then decide. Before this, a missing file, a file too big for the
+    // buffer, and a disk error all printed the same "cannot read" line, so a user
+    // could not tell which had happened. Asking for the size up front splits the
+    // two common cases off with their own messages, and only a genuine read error
+    // falls through to the old line.
+    unsigned long size = 0;
+    if (sys_stat(name, &size) == SYS_FAIL) {
+        sys_write("read: no such file: ");
+        sys_write(name);
+        sys_write("\n");
+        return;
+    }
+
+    // The buffer holds SHELL_FILE_MAX - 1 bytes of file content (one byte is kept
+    // for the NUL appended below before printing). A file larger than that is
+    // refused, now WITH BOTH NUMBERS so the reason is unambiguous. There is
+    // deliberately no partial read: `read` still delivers the whole file or none of
+    // it, it just says why when it declines. Showing a prefix would need an offset
+    // argument on SYS_READFILE, which is a rung of its own; see
+    // docs/decisions/0021-sys-stat.md. This also retires the old unreachable
+    // "showing the first N bytes" notice, which only ever fired for a file of
+    // exactly the buffer size, which is complete (TODO(read-truncation), now gone).
+    if (size > sizeof(file_buf) - 1) {
+        sys_write("read: ");
+        sys_write(name);
+        sys_write(" is ");
+        print_uint(size);
+        sys_write(" bytes, the buffer holds ");
+        print_uint(sizeof(file_buf) - 1);
+        sys_write("\n");
+        return;
+    }
+
+    // Small enough to fit. The size is known, so this is not the too-large case; a
+    // failure here is a genuine disk or filesystem error, which the "cannot read"
+    // line now names on its own.
     unsigned long n = sys_readfile(name, file_buf, sizeof(file_buf) - 1);
     if (n == SYS_FAIL) {
         sys_write("read: cannot read ");
@@ -160,29 +196,6 @@ static void cmd_read(char *name) {
     file_buf[n] = '\0';
     sys_write(file_buf);
     sys_write("\n");   // the file may not end in a newline; keep the prompt tidy
-
-    // SAY SO WHEN THE BUFFER FILLED UP. Without this, `read` on a file bigger than
-    // the buffer prints a bufferful and stops at whatever byte it reached, and the
-    // output is indistinguishable from a complete file that happens to end there:
-    // no error, no marker, just a truncated file quietly presented as the whole
-    // thing. That is the worst kind of wrong answer, because nothing about it looks
-    // wrong.
-    //
-    // "may be longer", not "is longer", because the shell genuinely cannot tell. A
-    // full buffer is what a too-large file looks like AND what a file of exactly
-    // this size looks like. SYS_READFILE returns bytes copied, not bytes available,
-    // so there is no number here to compare against. Reporting the true size is the
-    // real fix and it belongs in the syscall, not in this test: it would change
-    // SYS_READFILE's contract and every caller of it, which is a rung of its own.
-    //
-    // The count is printed rather than spelled into the string so it cannot drift
-    // away from SHELL_FILE_MAX, and it is one less than the buffer because a byte is
-    // held back above for the terminator.
-    if (n == sizeof(file_buf) - 1) {
-        sys_write("read: showing the first ");
-        print_uint(sizeof(file_buf) - 1);
-        sys_write(" bytes, the file may be longer\n");
-    }
 }
 
 // `write <file> <text>`: store the rest of the line, verbatim, as the file's

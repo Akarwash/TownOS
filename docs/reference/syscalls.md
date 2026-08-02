@@ -2,16 +2,17 @@
 
 MiniOS lets a ring-3 program request kernel services through a single software
 interrupt, `int 0x50`. This page documents the gate, the calling convention, the
-ten calls that exist, and the pointer checks that guard the untrusted ones. Read
+eleven calls that exist, and the pointer checks that guard the untrusted ones. Read
 from `kernel/syscall.c`, `kernel/isr_stubs.asm`, `kernel/isr.c`,
 `include/syscalls.h`, `drivers/keyboard.c`, and `user/userlib.h`. For the
 rationale and the alternatives considered, see
 [decision 0007](../decisions/0007-syscalls-via-int-0x50.md). The calls the
-interactive shell needs (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`, and
-now `SYS_WRITEFILE`, `SYS_DELETE`, `SYS_FREECOUNT`) are covered here and in
-[shell.md](shell.md); see
-[decision 0016](../decisions/0016-interactive-shell.md) and
-[decision 0020](../decisions/0020-writable-fat32.md).
+interactive shell needs (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`,
+`SYS_WRITEFILE`, `SYS_DELETE`, `SYS_FREECOUNT`, and now `SYS_STAT`) are covered here
+and in [shell.md](shell.md); see
+[decision 0016](../decisions/0016-interactive-shell.md),
+[decision 0020](../decisions/0020-writable-fat32.md), and
+[decision 0021](../decisions/0021-sys-stat.md).
 
 ## The doorway
 
@@ -64,6 +65,7 @@ not do (kernel pages are not user-readable).
 | 7 | `SYS_WRITEFILE` | RDI = filename, RSI = buffer, RDX = length | 0 on success, -1 on failure | Creates or wholly replaces a file with the buffer's bytes. |
 | 8 | `SYS_DELETE` | RDI = filename | 0 on success, -1 on failure | Deletes a file from the root directory. |
 | 9 | `SYS_FREECOUNT` | none | free-cluster count | Reports how many clusters on the volume are free. |
+| 10 | `SYS_STAT` | RDI = filename, RSI = `uint64_t *out_size` | 0 on success, -1 if not found | Reports a file's size without reading it. |
 
 `SYS_EXIT` **ends the calling task**, and no longer halts the machine. That was
 what it meant when there was no scheduler and no parent to return to; now the task
@@ -141,6 +143,18 @@ count one layer up. **None of the three blocks**, so unlike `SYS_READKEY` and
 `SYS_WAIT` none has the RAX-discipline problem below: each computes an answer and
 returns it through the dispatcher normally.
 
+`SYS_STAT` reports a file's size without reading it, wrapping `fat32_stat`
+([decision 0021](../decisions/0021-sys-stat.md)). It is what lets the shell's
+`read` ask how big a file is before it commits a buffer, so it can tell a missing
+file from one too large for the buffer and report the size instead of a bare
+failure. Its `out_size` pointer is a **write target**: the kernel writes a
+`uint64_t` through it, so the whole `[ptr, ptr+8)` range is bounds-checked with
+`user_range_ok` exactly as `SYS_READFILE` checks its destination buffer — a
+start-only check would let a pointer just below `USER_REGION_END` have the kernel
+write off the end of the region. It returns `(uint64_t)-1` when the file is not
+found (a directory or a non-8.3 name folds into the same error), and like the write
+side it **does not block**, so it has no RAX-discipline problem.
+
 An **unknown syscall number** is not fatal. `syscall_handler` prints the offending
 number and returns `(uint64_t)-1` in RAX; a bad request from ring 3 must never
 fault or halt the kernel.
@@ -198,8 +212,8 @@ length, which the stopgap does not.
 `always_inline` helpers built on inline asm with explicit register constraints
 (`"a"` = RAX, `"D"` = RDI, `"S"` = RSI, `"d"` = RDX), one per arity: `syscall0`
 through `syscall3`, with `sys_write`, `sys_exit`, `sys_wait`, `sys_readkey`,
-`sys_list`, `sys_run`, `sys_readfile`, `sys_writefile`, `sys_delete`, and
-`sys_freecount` over them. `SYSCALL_VECTOR` reaches the `int`
+`sys_list`, `sys_run`, `sys_readfile`, `sys_writefile`, `sys_delete`,
+`sys_freecount`, and `sys_stat` over them. `SYSCALL_VECTOR` reaches the `int`
 instruction as an immediate through an `"i"` constraint so the vector stays a named
 constant. `always_inline` is kept: it folds the trap
 directly into the caller, so every instruction the program runs is inside its own

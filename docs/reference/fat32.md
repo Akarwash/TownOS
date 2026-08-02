@@ -384,6 +384,7 @@ command.
 ```c
 int fat32_init(void);
 int fat32_list_root(void);
+int fat32_stat(const char *name, uint32_t *out_size);
 int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
                     uint32_t *out_size);
 int fat32_write_file(const char *name, const void *buf, uint32_t len);
@@ -393,7 +394,15 @@ uint32_t fat32_free_count(void);
 
 `fat32_init` must be called once, after `disk_init`, and returns -1 if the disk
 is unreadable or does not hold a FAT32 volume it can trust. `fat32_list_root`
-prints each entry's name and either its size in bytes or `<DIR>`.
+prints each entry's name and either its size in bytes or `<DIR>`. `fat32_stat`
+reports a file's size straight from its directory entry, reading none of its
+contents, and returns -1 if the name is not 8.3, is not found, or names a
+directory. It shares one root-directory lookup path with `fat32_read_file` and
+exists because reading a file means sizing a buffer for it first: a caller with no
+way to ask the size is left with a fixed buffer assumed to be big enough, which is
+a limit that fails quietly the day a file outgrows it. It is now reachable from
+ring 3 through `SYS_STAT`, which is what lets the shell's `read` tell a missing
+file from one too big for its buffer ([decision 0021](../decisions/0021-sys-stat.md)).
 `fat32_read_file` takes an 8.3 name (case insensitive) from the root directory,
 fills `buf`, writes the real byte count to `out_size`, and returns -1 if the name
 is not 8.3, is not found, names a directory, does not fit in `bufsize`, or the

@@ -56,7 +56,9 @@ the known limitations. It is a factual snapshot, not a roadmap.
   names rejected, not mangled), the first FAT copy for reads, the root directory
   only, and no timestamps or subdirectory creation. The image is first formatted by
   the host build system (`tools/mkdisk.sh`, mtools), then read and written by the
-  kernel. `fat32_stat` reports a file's size without reading it. The ELF loader
+  kernel. `fat32_stat` reports a file's size without reading it, now reachable from
+  ring 3 as `SYS_STAT` so the shell's `read` can size a buffer first
+  ([decisions/0021-sys-stat.md](decisions/0021-sys-stat.md)). The ELF loader
   reads every program file through this layer, so the filesystem is on the boot
   path. See [reference/fat32.md](reference/fat32.md),
   [decisions/0014-read-only-fat32.md](decisions/0014-read-only-fat32.md) (the
@@ -82,22 +84,25 @@ the known limitations. It is a factual snapshot, not a roadmap.
   and [decisions/0006-user-mode-with-separate-pages.md](decisions/0006-user-mode-with-separate-pages.md).
 - System calls (`kernel/syscall.c`, `include/syscalls.h`): the ring-3 programs
   call back into the kernel through one `int 0x50` gate, the only DPL 3 gate in
-  the IDT. Ten calls: `SYS_WRITE` prints a string; `SYS_EXIT` ends the calling
+  the IDT. Eleven calls: `SYS_WRITE` prints a string; `SYS_EXIT` ends the calling
   task with a status; `SYS_READKEY`
   pops one key from the keyboard ring buffer, sleeping the caller until one
   arrives; `SYS_LIST` writes the
   root directory's names into a caller buffer; `SYS_RUN` loads and starts a named
   program; `SYS_READFILE` reads a whole file into a caller buffer; `SYS_WAIT`
   blocks until any child exits and returns its status; `SYS_WRITEFILE` writes a
-  whole file; `SYS_DELETE` removes one; and `SYS_FREECOUNT` reports the free-cluster
-  count (so the shell's `free` command and the leak test can watch it). The
+  whole file; `SYS_DELETE` removes one; `SYS_FREECOUNT` reports the free-cluster
+  count (so the shell's `free` command and the leak test can watch it); and
+  `SYS_STAT` reports a file's size without reading it, so the shell's `read` can
+  size a buffer first and tell a missing file from one too big for it. The
   dispatcher switches on RAX and returns its result in RAX; an unknown number is
   rejected, not fatal. The `SYS_WRITE` pointer check is a stopgap (see limitations
   below), but the data calls bound the whole `[ptr, ptr+len)` range with
   `user_range_ok` and cap copied filenames with `copy_user_string`. See
   [reference/syscalls.md](reference/syscalls.md),
   [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md),
-  and [decisions/0020-writable-fat32.md](decisions/0020-writable-fat32.md).
+  [decisions/0020-writable-fat32.md](decisions/0020-writable-fat32.md), and
+  [decisions/0021-sys-stat.md](decisions/0021-sys-stat.md).
 - An interactive shell (`user/shell.c`, booted as `SHELL.ELF`): a ring-3 program,
   loaded off the disk like any other, that reads typed commands and runs them using
   only syscalls. It reads a line a key at a time through `SYS_READKEY` (blocking, so
@@ -243,7 +248,7 @@ The remaining steps build on it.
 **System calls.** Done. Ring-3 code re-enters the kernel through one DPL 3 IDT
 gate at `int 0x50` (`kernel/syscall.c`), the first and only deliberate exception
 to the DPL-0-everywhere IDT policy. A call number in RAX selects a handler; there
-are ten. See
+are eleven. See
 [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
 What remains for a real syscall layer is safe argument validation (see the
 untrusted-pointer limitation below) and more calls, both of which wait on

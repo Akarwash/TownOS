@@ -271,6 +271,42 @@ static uint64_t sys_freecount(void) {
     return (uint64_t)fat32_free_count();
 }
 
+// SYS_STAT: report the size in bytes of a named file, so a caller can size a
+// buffer before it reads.
+//   RDI = user pointer to a NUL-terminated 8.3 filename,
+//   RSI = user pointer to a uint64_t the size is written into.
+// BOTH pointers are untrusted. The filename is copied in and length-capped exactly
+// like SYS_RUN's. The out_size pointer is a WRITE TARGET, not just a read: the
+// kernel writes eight bytes through it, so the whole [ptr, ptr+8) range is bounds-
+// checked with user_range_ok, the same check SYS_READFILE uses on its destination
+// buffer. Checking only the start pointer would let a crafted pointer sitting just
+// below USER_REGION_END have the kernel write a uint64_t off the end of the region
+// and into kernel pages. Returns 0 on success, SYSCALL_ERROR if the file is not
+// found (or the name is not 8.3, or it names a directory) — fat32_stat folds those
+// into one -1, and the shell tells "no such file" apart from "too big" by the size
+// it gets back, not by which of these failed.
+//
+// DOES NOT BLOCK, so unlike SYS_READKEY and SYS_WAIT it has no RAX-discipline
+// problem: it computes an answer and returns it through the dispatcher normally,
+// and rax is never left holding the call number across a reschedule.
+static uint64_t sys_stat(uint64_t user_name, uint64_t user_size) {
+    char name[SYSCALL_NAME_MAX];
+    if (copy_user_string(user_name, name, sizeof(name)) != 0) {
+        print_string("syscall: SYS_STAT rejected a bad filename pointer\n");
+        return SYSCALL_ERROR;
+    }
+    if (!user_range_ok(user_size, sizeof(uint64_t))) {
+        print_string("syscall: SYS_STAT rejected an out-of-bounds size pointer\n");
+        return SYSCALL_ERROR;
+    }
+    uint32_t size = 0;
+    if (fat32_stat(name, &size) != 0) {
+        return SYSCALL_ERROR;   // not found, not 8.3, or a directory
+    }
+    *(uint64_t *)user_size = size;   // validated writable above; zero-extends
+    return 0;
+}
+
 // SYS_EXIT: end the calling task with the status in RDI.
 //   RDI = exit status, masked to 0..255 by task_exit.
 // This used to halt the machine, because there was no way for a task to stop
@@ -330,6 +366,9 @@ void syscall_handler(registers_t *regs) {
             break;
         case SYS_FREECOUNT:
             regs->rax = sys_freecount();
+            break;
+        case SYS_STAT:
+            regs->rax = sys_stat(regs->rdi, regs->rsi);
             break;
         case SYS_WAIT:
             sys_wait(regs);   // writes rax itself, and must not on the block path
