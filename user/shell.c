@@ -125,7 +125,7 @@ static void print_help(void) {
     sys_write("commands:\n");
     sys_write("  list                 list files in the root directory\n");
     sys_write("  read <file>          print a file's contents\n");
-    sys_write("  write <file> <text>  write the rest of the line to a file (creates or replaces)\n");
+    sys_write("  write <file> <text>  write the rest of the line to a file (creates/replaces)\n");
     sys_write("  delete <file>        delete a file\n");
     sys_write("  free                 how many clusters on the volume are free\n");
     sys_write("  run <file>           run a program and wait for it to finish\n");
