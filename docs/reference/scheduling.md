@@ -1,6 +1,6 @@
 # Scheduling reference
 
-MiniOS runs ring-3 programs by switching between them on every timer tick. It
+TownOS runs ring-3 programs by switching between them on every timer tick. It
 boots one task (the shell) and gains more whenever the shell runs a program; they
 now also go away again when those programs finish. This page documents how the
 switch works, why it is safe, and the things that are easy to get wrong. Read from
@@ -204,7 +204,7 @@ resume a program in the middle of a wait it has not finished.
 **Step 4: load the incoming task's CR3.** With per-process paging, switching the
 register frame is only half the switch: the next task's code and stack live in
 ITS tree, at the same virtual addresses the outgoing task used, so its CR3 must
-be loaded too. Writing CR3 also flushes the TLB (MiniOS uses no global pages),
+be loaded too. Writing CR3 also flushes the TLB (TownOS uses no global pages),
 dropping the outgoing task's stale user translations for free. The switch is safe
 mid-interrupt because everything the CPU still needs on the way out (the frame
 `r` on the kernel stack, the `tasks[]` array and this code, and the IDT/GDT/TSS/

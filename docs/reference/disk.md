@@ -1,6 +1,6 @@
 # The disk driver
 
-This is the factual description of MiniOS's disk driver, read from
+This is the factual description of TownOS's disk driver, read from
 `drivers/disk.c`, `drivers/disk.h`, and the `port_word_out`/`port_word_in`
 helpers in `drivers/ports.c`. It is a polled ATA PIO driver for the primary bus
 master, using LBA28 addressing. For why polled PIO was chosen over interrupts or

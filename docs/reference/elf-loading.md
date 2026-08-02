@@ -1,6 +1,6 @@
 # ELF program loading
 
-This is the factual description of MiniOS's program loader, read from
+This is the factual description of TownOS's program loader, read from
 `kernel/elf.c`, `kernel/elf.h`, `user/user.ld`, and the `USER_*` rules in the
 `Makefile`. It loads statically linked ELF64 executables off the FAT32 disk image
 and runs them as ring-3 tasks. For why programs became files at all, and what the
@@ -90,7 +90,7 @@ bug can have.
 front of it, rather than copying first and zeroing the tail. It writes some bytes
 twice and makes the boundary case impossible to get wrong.
 
-MiniOS's own programs make this concrete. Each carries a zero-initialised global
+TownOS's own programs make this concrete. Each carries a zero-initialised global
 specifically so it has a real `.bss`, and `readelf -l A.ELF` shows the result:
 
 ```
@@ -174,7 +174,7 @@ For each `PT_LOAD` segment, in `load_segment`:
 1. **Bounds-check** the destination range, as above. Reject the file otherwise.
 2. **Derive the page flags** from `p_flags`: always `PG_PRESENT | PG_USER`, plus
    `PG_WRITABLE` only if `PF_W` is set. Only the write bit is actually
-   enforceable, since MiniOS does not enable NX, so R+X and R map identically.
+   enforceable, since TownOS does not enable NX, so R+X and R map identically.
    Leaving the writable bit off for text is real, though: a program cannot
    overwrite its own code.
 3. **For each page** of `p_memsz`: allocate a frame, zero it, copy in whatever
@@ -208,7 +208,7 @@ that differ are where the bytes come from and where the entry address comes from
 ## The separate user build
 
 A user program is compiled and linked entirely on its own. Nothing about it is
-part of `minios.bin`.
+part of `townos.bin`.
 
 ```
 CC -ffreestanding -m64 -mno-red-zone -mcmodel=small -fno-pie -no-pie \

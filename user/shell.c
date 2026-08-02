@@ -1,4 +1,4 @@
-// The MiniOS interactive shell, as a ring-3 program.
+// The TownOS interactive shell, as a ring-3 program.
 //
 // This is the capstone of the syscall boundary. The shell is a fully fenced-in
 // user program: it is loaded off the disk like any other (as SHELL.ELF), runs at
@@ -121,7 +121,7 @@ static void print_uint(unsigned long value) {
 }
 
 static void print_help(void) {
-    // The command names are MiniOS's own and deliberately not the Unix ones.
+    // The command names are TownOS's own and deliberately not the Unix ones.
     sys_write("commands:\n");
     sys_write("  list                 list files in the root directory\n");
     sys_write("  read <file>          print a file's contents\n");
@@ -365,7 +365,7 @@ static void read_line(void) {
 // The entry point named by user.ld's ENTRY(_start). The loader takes the entry
 // address from the ELF header, so this symbol only has to match the linker script.
 void _start(void) {
-    sys_write("MiniOS shell. type 'help'.\n");
+    sys_write("TownOS shell. type 'help'.\n");
 
     for (;;) {
         sys_write("> ");

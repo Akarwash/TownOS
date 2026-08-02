@@ -1,6 +1,6 @@
 # System call reference
 
-MiniOS lets a ring-3 program request kernel services through a single software
+TownOS lets a ring-3 program request kernel services through a single software
 interrupt, `int 0x50`. This page documents the gate, the calling convention, the
 eleven calls that exist, and the pointer checks that guard the untrusted ones. Read
 from `kernel/syscall.c`, `kernel/isr_stubs.asm`, `kernel/isr.c`,

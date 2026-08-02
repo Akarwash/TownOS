@@ -43,7 +43,7 @@
 
 #define PT_LOAD       1    // a segment to copy into memory; the only kind we load
 
-// Program header flag bits. Only PF_W is enforceable in MiniOS's page tables
+// Program header flag bits. Only PF_W is enforceable in TownOS's page tables
 // (there is no NX bit enabled), so PF_R and PF_X are read and reported but
 // cannot be honoured by the hardware here.
 #define PF_X          0x1
@@ -296,7 +296,7 @@ static int load_segment(const struct elf64_phdr *ph, const void *file,
         return -1;
     }
 
-    // (2) Honour the segment's flags. Only the write bit is enforceable: MiniOS
+    // (2) Honour the segment's flags. Only the write bit is enforceable: TownOS
     // does not enable NX, so a segment marked R+X and one marked R are mapped
     // identically. Leaving the writable bit OFF for the text segment is real
     // though, and means a program cannot overwrite its own code.

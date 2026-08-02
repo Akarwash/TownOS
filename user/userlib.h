@@ -2,7 +2,7 @@
 #define USERLIB_H
 
 // ============================================================================
-// The entire runtime a MiniOS user program gets.
+// The entire runtime a TownOS user program gets.
 // ============================================================================
 // A user program is now a separately compiled, statically linked ELF64 binary
 // that lives on the disk image. It links against NOTHING: no host libc, no

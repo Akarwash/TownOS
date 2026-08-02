@@ -28,7 +28,7 @@ void kernel_main(uint64_t multiboot_info_addr) {
     keyboard_init();     // listen for keypresses on IRQ1
 
     screen_clear();
-    print_string("Welcome to MiniOS!\n");
+    print_string("Welcome to TownOS!\n");
 
     // Read the real amount of RAM from the Multiboot map, extend the identity map
     // to cover it (capped at 1GB), and flush the TLB. This must happen before

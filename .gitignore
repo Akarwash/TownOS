@@ -3,8 +3,8 @@
 
 # Build artifacts
 *.o
-minios.elf
-minios.bin
+townos.elf
+townos.bin
 
 # User programs, built separately and copied onto the disk image. The second
 # pattern is needed as well as the first: `user/*.ELF` does NOT match a

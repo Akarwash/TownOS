@@ -1,13 +1,13 @@
 # Architecture
 
-MiniOS is a small x86-64 hobby kernel that boots via Multiboot, climbs into
+TownOS is a small x86-64 hobby kernel that boots via Multiboot, climbs into
 64-bit long mode, and boots into an interactive shell. It is a learning kernel
 with a read-only filesystem: files on the disk can be listed and read by name, but
 nothing can be written back. Its user programs are separately compiled ELF64
 binaries that live on that disk and are loaded at runtime, not code welded into the
 kernel image. The shell is one of them: a fenced-in ring-3 program (`SHELL.ELF`)
 that reads typed commands and runs them using nothing but syscalls, which is what
-proves the syscall boundary is complete. MiniOS drops to ring 3 (CPL 3) to run
+proves the syscall boundary is complete. TownOS drops to ring 3 (CPL 3) to run
 those programs in their own user-accessible pages, and those programs call back
 into the kernel through a single `int 0x50` syscall gate (`SYS_WRITE`, `SYS_EXIT`,
 `SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`, `SYS_WAIT`) rather than
@@ -40,7 +40,7 @@ This page is a map, not a tutorial. For the concepts behind each subsystem, see
 | `drivers/` | Hardware drivers: VGA text screen, PS/2 keyboard, the polled ATA PIO disk driver, port I/O helpers. |
 | `fs/` | The filesystem layer, above the disk driver: read-only FAT32 (list the root directory, read a file by name). |
 | `libc/` | Minimal freestanding C library: `string` and `mem` routines. |
-| `user/` | The ring-3 programs, built as standalone static ELF64 binaries (linked with `user/user.ld`) that live on the disk image and are loaded at runtime, not part of `minios.bin`. Holds the interactive shell (`user/shell.c`, booted as `SHELL.ELF`), which is the program the machine is for, and the runtime everything compiles against (`user/userlib.h`, `user/user.ld`). |
+| `user/` | The ring-3 programs, built as standalone static ELF64 binaries (linked with `user/user.ld`) that live on the disk image and are loaded at runtime, not part of `townos.bin`. Holds the interactive shell (`user/shell.c`, booted as `SHELL.ELF`), which is the program the machine is for, and the runtime everything compiles against (`user/userlib.h`, `user/user.ld`). |
 | `user/tests/` | Kernel test fixtures: ring-3 programs that exist to prove a piece of the kernel works and would be pointless on a machine anybody used (`A.c`, `B.c`, `C.c`, `D.c`, `E.c`). They build identically to the shell and land on the same disk; the split is about what a reader should conclude when one of them looks strange. See `user/tests/README.md`. |
 | `include/` | Shared definitions (`types.h`, the vector map, the syscall ABI numbers). |
 
@@ -105,8 +105,8 @@ boot (boot.asm) ............ long-mode climb, hands off to kernel_main
   -> syscall_handler ...... dispatches the call and writes the result to RAX (syscall.c)
 ```
 
-The kernel links into `minios.elf`, is repackaged as a Multiboot-loadable
-`minios.bin`, and boots under QEMU. See [building.md](building.md) for the build
+The kernel links into `townos.elf`, is repackaged as a Multiboot-loadable
+`townos.bin`, and boots under QEMU. See [building.md](building.md) for the build
 and run steps, [reference/idt.md](reference/idt.md) for the interrupt path, and
 [reference/user-mode.md](reference/user-mode.md) for the ring-3 drop.
 

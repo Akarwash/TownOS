@@ -37,7 +37,7 @@ fi
 # exercises FAT chain following. A single-cluster file can be read correctly by
 # code whose chain logic is completely broken, so it proves nothing on its own.
 HELLO_TEXT="Hello from FAT32!"
-TEST_TEXT="MiniOS reads files."
+TEST_TEXT="TownOS reads files."
 BIG_PATTERN="0123456789ABCDEF"   # repeated BIG_REPEATS times, no newlines
 BIG_REPEATS=1024                 # 1024 * 16 = 16384 bytes
 

@@ -92,7 +92,7 @@
 // The FSInfo sector.
 // ---------------------------------------------------------------------------
 // A single sector (its number is named by the BPB) caching two things a writer
-// would otherwise recompute: the free-cluster count and a next-free hint. MiniOS
+// would otherwise recompute: the free-cluster count and a next-free hint. TownOS
 // does not maintain them — keeping them correct is a caching problem, and getting
 // it subtly wrong is worse than not having them — so on every write it sets both
 // to the format's "unknown, recount" value and lets anything that cares recount.
@@ -403,7 +403,7 @@ static int fat32_next_cluster(uint32_t cluster, uint32_t *next) {
 // Write `value` into cluster's FAT slot, in every copy of the table.
 //
 // THE SINGLE MOST LIKELY BUG IN THE ENTIRE WRITE PATH IS UPDATING ONLY THE FIRST
-// COPY. It is invisible from inside QEMU: MiniOS reads the first copy (see
+// COPY. It is invisible from inside QEMU: TownOS reads the first copy (see
 // fat32_get_entry), so the volume stays self-consistent to itself and every
 // in-kernel check keeps passing. The damage only surfaces off-machine, when the
 // host's tools (mtools, or any real OS) read the volume, consult a different copy
@@ -694,7 +694,7 @@ static char to_upper(char c) {
 // ("HELLO   TXT"): base name padded to 8 with spaces, extension padded to 3, no
 // dot stored, uppercase. Returns 0 on success, -1 if the name cannot be
 // expressed in 8.3 (too long a base or extension, or empty). A name this
-// rejects is one MiniOS cannot see at all, since long-filename entries are
+// rejects is one TownOS cannot see at all, since long-filename entries are
 // skipped when a directory is walked.
 static int name_to_83(const char *name, char out[FAT32_NAME_LENGTH]) {
     for (int i = 0; i < FAT32_NAME_LENGTH; i++) {
@@ -1497,7 +1497,7 @@ int fat32_write_file(const char *name, const void *buf, uint32_t len) {
 
     // Step 5: build the entry. Archive attribute, size = len, start cluster split
     // across its two 16-bit halves (both 0 for a zero-length file). The rest,
-    // including the create/write date and time fields, is left zero: MiniOS keeps
+    // including the create/write date and time fields, is left zero: TownOS keeps
     // no clock to stamp them with (see docs/decisions/0020-writable-fat32.md).
     struct fat32_dirent entry;
     memset(&entry, 0, sizeof(entry));

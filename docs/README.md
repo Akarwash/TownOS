@@ -1,17 +1,42 @@
-# MiniOS project documentation
+# TownOS project documentation
 
-This is the factual documentation for MiniOS: what it is, how it is put together,
+This is the factual documentation for TownOS: what it is, how it is put together,
 how to build and run it, and why the load-bearing decisions were made. It is
 derived from the source, not from concepts. For the conceptual "how operating
 systems work" material, see [`../learnings/`](../learnings/README.md) instead.
 The two are kept separate on purpose: `docs/` states facts about this codebase,
 `learnings/` teaches ideas.
 
+## A note on the name
+
+The project was renamed from **MiniOS** to **TownOS**. That rename is deliberately
+finished in one direction only, and this note is here so the next person does not
+"finish" it the wrong way.
+
+**Live documentation carries the new name.** Everything whose job is to describe the
+project as it is now — this `docs/` tree, the top-level `README.md`, the code
+comments, and the strings the kernel prints — says TownOS, and should be corrected
+to TownOS the day any of it goes stale.
+
+**The records still say MiniOS, on purpose.** The architecture decision records in
+[`decisions/`](decisions/) and the entries in [`../CHANGELOG.md`](../CHANGELOG.md)
+keep the old name. Their whole value is in being a record of a moment: an ADR says
+what was decided *then*, under the name the project carried *then*, and a changelog
+entry says what shipped in a given release. Rewrite either to say TownOS and it now
+claims to have been written about a project that did not yet have that name — it
+forges the past into agreement with the present, which is the exact failure
+[`decisions/README.md`](decisions/README.md) freezes ADR bodies to avoid. A record
+that reads MiniOS under a dated heading is honest and datable; one retrofitted to
+TownOS is a claim nobody can check.
+
+So the split is not an unfinished chore. Correct the live pages forward; leave every
+ADR body and changelog entry exactly as it was written.
+
 ## Pages
 
 | Page | What it covers |
 |------|----------------|
-| [architecture.md](architecture.md) | What MiniOS is, the directory layout, the subsystem map, and control flow from `_start` to the event loop |
+| [architecture.md](architecture.md) | What TownOS is, the directory layout, the subsystem map, and control flow from `_start` to the event loop |
 | [building.md](building.md) | Toolchain and versions, install commands, how to build and run, and how to debug |
 | [reference/boot-sequence.md](reference/boot-sequence.md) | The 32 to 64 long-mode climb in `boot/boot.asm`, step by step |
 | [reference/memory-map.md](reference/memory-map.md) | Physical memory layout: load address, VGA buffer, identity-mapped region, page tables, stacks |
@@ -57,14 +82,14 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 
 ## Status
 
-MiniOS **builds, links, and boots to an interactive shell** under QEMU, reads and
+TownOS **builds, links, and boots to an interactive shell** under QEMU, reads and
 writes files by name on a FAT32 disk, and loads and runs its ring-3 programs from
 that disk as ELF64 binaries. The shell itself is one of those ring-3 programs.
 
 - All C sources compile cleanly under `-Wall -Wextra`.
 - All assembly sources assemble cleanly with `nasm -f elf64`.
-- The kernel links into `minios.elf` and is repackaged as a Multiboot-loadable
-  `minios.bin`. `make run` boots it under QEMU: the banner appears, the timer ticks
+- The kernel links into `townos.elf` and is repackaged as a Multiboot-loadable
+  `townos.bin`. `make run` boots it under QEMU: the banner appears, the timer ticks
   on IRQ 0, the keyboard delivers keypresses on IRQ 1, and `SHELL.ELF` runs at
   ring 3, dispatching `list`, `read`, `write`, `delete`, `free`, `run`, `help`,
   `clear`, and `return` through the syscall gate. With nobody typing, the shell

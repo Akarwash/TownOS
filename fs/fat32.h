@@ -38,7 +38,7 @@ int fat32_init(void);
 
 // Print every entry in the root directory (name, and either a size in bytes or a
 // <DIR> marker). Long-filename fragments, deleted entries, and the volume label
-// are skipped, so what prints is what MiniOS can actually name. Returns 0 on
+// are skipped, so what prints is what TownOS can actually name. Returns 0 on
 // success, -1 on a read error or a corrupt directory chain.
 int fat32_list_root(void);
 

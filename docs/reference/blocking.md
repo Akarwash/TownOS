@@ -147,7 +147,7 @@ task to enter the kernel writes over them. There is nothing to come back to.
 
 Mid-syscall resume is what a per-task kernel stack buys you, and it is a real
 design with real advantages: an operation could block at an arbitrary depth and
-pick up exactly where it left off, with its locals intact. MiniOS does not have
+pick up exactly where it left off, with its locals intact. TownOS does not have
 one, so it uses the tool it does have. Re-arming needs no extra memory per task,
 no second stack to switch, and no care about what was live on the kernel stack at
 the moment of the block, because nothing is expected to survive. It is recorded

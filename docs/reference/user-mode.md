@@ -1,6 +1,6 @@
 # User mode (ring 3)
 
-This page documents how MiniOS drops to CPL 3 and how it proves the drop is
+This page documents how TownOS drops to CPL 3 and how it proves the drop is
 real. Read from `kernel/usermode.c`, `user/shell.c`, `boot/boot.asm`,
 `linker.ld`, and `kernel/gdt.c`. For the rationale and trade-offs see
 [decision 0006](../decisions/0006-user-mode-with-separate-pages.md).
@@ -56,7 +56,7 @@ into a task goes through the scheduler restoring its saved frame instead.
 ## Why the isolation holds
 
 The x86 page walk grants ring-3 access only if the user (US) bit is set at
-*every* level from PML4 to the leaf — the bits are ANDed down the walk. MiniOS
+*every* level from PML4 to the leaf — the bits are ANDed down the walk. TownOS
 uses that: the two upper levels are permissive and the PD leaves decide access.
 
 ```

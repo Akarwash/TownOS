@@ -1,6 +1,6 @@
 # Project status
 
-MiniOS is a learning kernel: it boots x86-64 long mode, drops to ring 3, and
+TownOS is a learning kernel: it boots x86-64 long mode, drops to ring 3, and
 preempts between ring-3 tasks on the timer tick, each in its own address space
 (per-process paging). It reads and writes files on a FAT32 disk by name, and its
 ring-3 programs are ELF64 binaries loaded from that disk rather than code compiled
@@ -72,7 +72,7 @@ the known limitations. It is a factual snapshot, not a roadmap.
   address space, maps each `PT_LOAD` segment into it (bounds-checked, with flags
   from the segment so text is mapped read-only), copies the file bytes, zeroes
   from file size up to memory size, and forges the task's frame with the entry
-  point from the ELF header. Nothing ring-3 remains in `minios.bin`: changing a
+  point from the ELF header. Nothing ring-3 remains in `townos.bin`: changing a
   program means rebuilding one binary and copying it onto the image, with no
   kernel rebuild. A missing or malformed file is reported and skipped, costing
   only its own task. See [reference/elf-loading.md](reference/elf-loading.md) and
@@ -172,7 +172,7 @@ the known limitations. It is a factual snapshot, not a roadmap.
   [reference/heap.md](reference/heap.md) and
   [decisions/0010-kernel-heap-ported-from-p5.md](decisions/0010-kernel-heap-ported-from-p5.md).
 
-The kernel builds, links into `minios.elf`, is repackaged as `minios.bin`, and
+The kernel builds, links into `townos.elf`, is repackaged as `townos.bin`, and
 boots under QEMU. In the current build `kernel_main` hands off to the scheduler as
 its last act: it creates one ring-3 task from `SHELL.ELF` and enters it, and the
 shell then runs the machine, launching further tasks on demand with `run`. Verified
@@ -186,7 +186,7 @@ idle seconds. See [building.md](building.md).
 
 ## What was never built
 
-These are absent by design. MiniOS now loads programs from files and gives them a
+These are absent by design. TownOS now loads programs from files and gives them a
 parent, an exit status, and a cleanup path, but they are still not processes in the
 Unix sense: nothing can be passed in on the way in, and nothing can be stopped once
 it is running.
@@ -218,11 +218,11 @@ it is running.
   descriptor table, and no way to change part of a file without rewriting all of it
   (`fat32_write_file` mirrors `fat32_read_file`). The root directory can grow, but
   there is no `mkdir` and no `.`/`..`, so subdirectory creation is still absent; and
-  a written entry's date and time fields are left zero, since MiniOS keeps no clock.
+  a written entry's date and time fields are left zero, since TownOS keeps no clock.
   File handles want to be designed alongside pipes. See
   [decisions/0020-writable-fat32.md](decisions/0020-writable-fat32.md).
 - **Long filenames, paths, and permissions.** Long-filename directory entries are
-  skipped, so a file with a long name is invisible to MiniOS, and a name that will
+  skipped, so a file with a long name is invisible to TownOS, and a name that will
   not fit 8.3 is rejected on write rather than mangled into a numbered alias;
   lookups are root-directory only, since the interface takes a bare name with no
   path to split; and FAT32 carries essentially no permissions, and no crash safety
@@ -385,7 +385,7 @@ mechanism.
   The filesystem inherits this: it caches nothing, so every FAT lookup reads a
   full 512-byte block through the polled driver, and reading a large file freezes
   the machine for the duration.
-- **No SMP.** MiniOS assumes a single CPU. It uses the legacy 8259 PIC, not the
+- **No SMP.** TownOS assumes a single CPU. It uses the legacy 8259 PIC, not the
   APIC/IO-APIC, and has no per-core state or locking.
 - **1GB identity-map ceiling.** The boot climb (`boot/boot.asm`) maps a fixed
   32MB, then `kernel/memory.c` reads the Multiboot map and extends the identity
@@ -399,5 +399,5 @@ mechanism.
   [decisions/0009-read-multiboot-map-extend-identity-map.md](decisions/0009-read-multiboot-map-extend-identity-map.md).
 - **QEMU only.** The kernel has been built and booted under
   `qemu-system-x86_64`. It has not been run on real hardware or other emulators,
-  and the `minios.bin` boot path relies on QEMU's built-in Multiboot `-kernel`
+  and the `townos.bin` boot path relies on QEMU's built-in Multiboot `-kernel`
   loader.

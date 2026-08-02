@@ -1,6 +1,6 @@
 # The kernel heap
 
-This is the factual description of MiniOS's kernel heap, read from
+This is the factual description of TownOS's kernel heap, read from
 `kernel/heap.c`, `kernel/heap.h`, and the `alloc_frames_contiguous` helper in
 `kernel/memory.c`. It is an explicit-free-list allocator with boundary tags and
 coalescing, ported from the CMSC216 p5 `el_malloc`. For why it was ported rather
@@ -101,7 +101,7 @@ boundary-tag walk safe.
 
 ## Interrupt safety
 
-The free lists are shared mutable state, and MiniOS preempts. The timer fires
+The free lists are shared mutable state, and TownOS preempts. The timer fires
 100 times a second, and its handler (or the scheduler it drives) could call
 `kmalloc` while another `kmalloc` is halfway through relinking a list. That
 corrupts the list.
@@ -130,7 +130,7 @@ state, restore exactly that.
   unchanged.
 - **A global allocation lock in spirit.** The interrupt guard serialises all
   allocation. Fine at 100 Hz with short critical sections, but it would need
-  revisiting under SMP (which MiniOS does not have).
+  revisiting under SMP (which TownOS does not have).
 - **One shared address space.** The heap allocates; it does not isolate. It sits
   on the same single identity-mapped space as everything else. See
   [memory-map.md](memory-map.md).

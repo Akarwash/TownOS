@@ -1,6 +1,6 @@
 # Shell reference
 
-MiniOS boots into an interactive shell that is a ring-3 program, `SHELL.ELF`,
+TownOS boots into an interactive shell that is a ring-3 program, `SHELL.ELF`,
 loaded off the disk like any other. It reads typed commands and runs them using
 nothing but syscalls: it holds no privilege and touches the keyboard, screen,
 filesystem, and loader only through the `int 0x50` gate. This page documents the
@@ -12,7 +12,7 @@ the `write`/`delete`/`free` commands, [decision 0020](../decisions/0020-writable
 
 ## The command table
 
-The names are MiniOS's own and deliberately not the Unix ones.
+The names are TownOS's own and deliberately not the Unix ones.
 
 | Command | Argument | Effect |
 |---------|----------|--------|

@@ -14,9 +14,9 @@
 #   # or on 64-bit hosts the native gcc/ld can be used with the flags below.
 #
 # The kernel links and boots. `make` produces two artifacts:
-#   minios.elf  the linked ELF64 image, with 64-bit symbols for gdb
-#   minios.bin  the same image repackaged as a 32-bit ELF, which is what QEMU's
-#               Multiboot -kernel loader accepts (see the minios.bin rule below)
+#   townos.elf  the linked ELF64 image, with 64-bit symbols for gdb
+#   townos.bin  the same image repackaged as a 32-bit ELF, which is what QEMU's
+#               Multiboot -kernel loader accepts (see the townos.bin rule below)
 # ============================================================================
 
 # The target `make` with no arguments builds. GNU make otherwise picks the FIRST
@@ -114,10 +114,10 @@ user/SHELL.ELF: user/shell.c user/userlib.h $(USER_LD_SCRIPT) include/syscalls.h
 	$(CC) $(USER_CFLAGS) $(USER_LDFLAGS) -o $@ $<
 
 # Default target
-all: minios.bin $(USER_PROGRAMS)
+all: townos.bin $(USER_PROGRAMS)
 
 # Link everything into the ELF64 image. This keeps the 64-bit symbols gdb needs.
-minios.elf: $(ALL_OBJECTS)
+townos.elf: $(ALL_OBJECTS)
 	$(LD) $(LDFLAGS) -o $@ $^
 
 # Repackage the ELF64 as a 32-bit ELF for booting.
@@ -126,8 +126,8 @@ minios.elf: $(ALL_OBJECTS)
 #   32-bit protected mode and climbs to long mode itself, and every address in the
 #   image lives in low memory, so relabelling the container as elf32-i386 is
 #   accepted by the loader and boots correctly. The code is unchanged; only the
-#   ELF header class differs. gdb should point at minios.elf for symbols.
-minios.bin: minios.elf
+#   ELF header class differs. gdb should point at townos.elf for symbols.
+townos.bin: townos.elf
 	$(OBJCOPY) -O elf32-i386 $< $@
 
 # Compile C files
@@ -229,8 +229,8 @@ disk-testfiles: $(DISK_IMG) $(DISK_TESTFILES)
 #               AHCI), so it answers at I/O ports 0x1F0-0x1F7 where the driver looks
 #   index=0     first drive on that controller = primary bus master
 #   format=raw  the file is a flat byte array, no qcow layering
-run: minios.bin disk-programs disk-testfiles
-	$(QEMU) -kernel minios.bin -drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk
+run: townos.bin disk-programs disk-testfiles
+	$(QEMU) -kernel townos.bin -drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk
 
 # Clean build files. The disk image is NOT removed: it is not build output, it is
 # the machine's disk, and the test files on it were put there by hand.
@@ -245,5 +245,5 @@ run: minios.bin disk-programs disk-testfiles
 # `make run` writes it again. The COPY of it already on the disk image stays, along
 # with everything else there, because the image is not build output.
 clean:
-	rm -f $(ALL_OBJECTS) minios.bin minios.elf $(USER_PROGRAMS) $(DISK_TESTFILES)
+	rm -f $(ALL_OBJECTS) townos.bin townos.elf $(USER_PROGRAMS) $(DISK_TESTFILES)
 	rm -f user/A.ELF user/B.ELF user/C.ELF user/user_program.o
