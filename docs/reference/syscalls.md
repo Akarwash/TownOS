@@ -91,9 +91,12 @@ scheduler's sweeper and from the parent's `SYS_WAIT`. See
 [scheduling.md](scheduling.md) and
 [decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md).
 
-`SYS_WAIT` is **any-child, not `waitpid`**. It takes no argument: a caller with
-several children is told about whichever it finds finished first and cannot ask
-about a particular one. If a finished child is already waiting, it returns that
+`SYS_WAIT` is **any-child, not `waitpid`**. Its one argument (`RDI`) is only an
+optional out-pointer for the id of whichever child exited, not a way to name one to
+wait for: a caller with several children is still told about whichever it finds
+finished first and cannot ask about a particular one — it just learns, afterwards,
+which one that was. (A shell running a pipeline uses that to match the reaped child
+to its last stage.) If a finished child is already waiting, it returns that
 child's status immediately and frees the tombstone; if the caller has children but
 none has finished, it blocks with `WAIT_CHILD` until one exits; if the caller has
 no children at all, it returns `(uint64_t)-1` rather than blocking forever on

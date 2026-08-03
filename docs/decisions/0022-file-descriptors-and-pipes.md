@@ -230,6 +230,24 @@ behave like the first.
 - **The console has no EOF.** `sys_read(0, ...)` blocks for keys and never returns 0,
   because a keyboard is never "done" and there is no Ctrl-D line discipline. A program
   reading the console until EOF does not terminate on its own.
+- **Two existing syscalls changed their contract to support the last-stage status.**
+  Reporting the pipeline's status as the last stage's (decision 8) needed a way to
+  match a reaped child to the stage that started it, and that was bought by changing
+  two calls rather than adding a fifteenth:
+  - **`SYS_RUN`'s return value changed meaning.** It used to return 0 on success; it
+    now returns the child's **task id** (still `SYSCALL_ERROR` on failure). Every
+    surviving caller checks `== SYS_FAIL` and so still works, but *only* because a
+    child's id is always **>= 1** (id 0 is the boot task, which nothing runs), so a
+    successful id can never collide with the failure value. This is a silent change
+    to an existing call's contract: a future caller that tested `== 0` for success —
+    the old convention — would be **silently wrong**, treating every successful `run`
+    as a failure. Documented in `docs/reference/syscalls.md`.
+  - **`SYS_WAIT` gained an optional out-pointer.** `RDI`, when nonzero, is a
+    `uint64_t *` that receives the exited child's id (0 means "do not report it", which
+    is what the old no-argument `sys_wait()` now passes). This is an addition rather
+    than a break — an existing `sys_wait()` still returns the status in `RAX` — but it
+    is the same kind of quiet contract growth and is called out here for the same
+    reason.
 
 ## Related
 
