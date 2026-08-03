@@ -525,6 +525,12 @@ static void lifecycle_report_reap(char *by, uint32_t id, int32_t status) {
     print_int((uint32_t)status);
     print_string("), free frames: ");
     print_int((uint32_t)frame_free_count());
+    // Heap bytes in use, ALONGSIDE the free frame count, so every leak test gets
+    // small-object coverage for free: frame_free_count sees a leaked address space
+    // but not a leaked file_t (~24 bytes), and heap_used_bytes sees the file_t. A
+    // reap line whose two numbers both come back to baseline is a stronger all-clear.
+    print_string(", heap used: ");
+    print_int((uint32_t)heap_used_bytes());
     print_string("\n");
 #else
     (void)by;
