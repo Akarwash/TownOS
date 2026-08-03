@@ -84,32 +84,46 @@ the known limitations. It is a factual snapshot, not a roadmap.
   and [decisions/0006-user-mode-with-separate-pages.md](decisions/0006-user-mode-with-separate-pages.md).
 - System calls (`kernel/syscall.c`, `include/syscalls.h`): the ring-3 programs
   call back into the kernel through one `int 0x50` gate, the only DPL 3 gate in
-  the IDT. Eleven calls: `SYS_WRITE` prints a string; `SYS_EXIT` ends the calling
+  the IDT. Fourteen calls: `SYS_WRITE` writes a counted buffer to a descriptor;
+  `SYS_EXIT` ends the calling
   task with a status; `SYS_READKEY`
   pops one key from the keyboard ring buffer, sleeping the caller until one
   arrives; `SYS_LIST` writes the
   root directory's names into a caller buffer; `SYS_RUN` loads and starts a named
-  program; `SYS_READFILE` reads a whole file into a caller buffer; `SYS_WAIT`
+  program (giving it descriptors as fd 0/1); `SYS_READFILE` reads a whole file into
+  a caller buffer; `SYS_WAIT`
   blocks until any child exits and returns its status; `SYS_WRITEFILE` writes a
   whole file; `SYS_DELETE` removes one; `SYS_FREECOUNT` reports the free-cluster
-  count (so the shell's `free` command and the leak test can watch it); and
+  count (so the shell's `free` command and the leak test can watch it);
   `SYS_STAT` reports a file's size without reading it, so the shell's `read` can
-  size a buffer first and tell a missing file from one too big for it. The
+  size a buffer first and tell a missing file from one too big for it; and
+  `SYS_READ`, `SYS_CLOSE`, `SYS_PIPE` are the descriptor calls (read from a fd,
+  close one, make a pipe). The
   dispatcher switches on RAX and returns its result in RAX; an unknown number is
-  rejected, not fatal. The `SYS_WRITE` pointer check is a stopgap (see limitations
-  below), but the data calls bound the whole `[ptr, ptr+len)` range with
-  `user_range_ok` and cap copied filenames with `copy_user_string`. See
+  rejected, not fatal. Every pointer a call takes bounds the whole
+  `[ptr, ptr+len)` range with `user_range_ok` (write-target pointers included) and
+  caps copied filenames with `copy_user_string`; `SYS_WRITE` was a start-only
+  stopgap until it became a counted `(fd, buf, len)` call. See
   [reference/syscalls.md](reference/syscalls.md),
+  [reference/descriptors.md](reference/descriptors.md),
+  [reference/pipes.md](reference/pipes.md),
   [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md),
-  [decisions/0020-writable-fat32.md](decisions/0020-writable-fat32.md), and
-  [decisions/0021-sys-stat.md](decisions/0021-sys-stat.md).
+  [decisions/0020-writable-fat32.md](decisions/0020-writable-fat32.md),
+  [decisions/0021-sys-stat.md](decisions/0021-sys-stat.md), and
+  [decisions/0022-file-descriptors-and-pipes.md](decisions/0022-file-descriptors-and-pipes.md).
 - An interactive shell (`user/shell.c`, booted as `SHELL.ELF`): a ring-3 program,
   loaded off the disk like any other, that reads typed commands and runs them using
   only syscalls. It reads a line a key at a time through `SYS_READKEY` (blocking, so
   it costs nothing while the user is thinking, echoing, with backspace), tokenizes
   it in place with a reentrant `next_token`, and
   dispatches the custom commands `list`, `read`, `write`, `delete`, `free`, `run`,
-  `help`, `clear`, and `return` (deliberately not the Unix names). The keyboard IRQ was reduced to a
+  `help`, `clear`, and `return` (deliberately not the Unix names). It also understands
+  the `|` operator: `run A | run B | run C` runs the stages at once, connects each
+  stage's output to the next through a pipe, and reports the last stage's exit status,
+  closing its own copies of the pipe ends immediately so the stream ends rather than
+  hangs ([reference/shell.md](reference/shell.md),
+  [decisions/0022-file-descriptors-and-pipes.md](decisions/0022-file-descriptors-and-pipes.md)).
+  The keyboard IRQ was reduced to a
   producer that only pushes a decoded character into a 128-slot ring buffer; the old
   in-kernel shell (`shell/shell.c`) is deleted. That a fully fenced-in program runs
   an interactive shell is the proof the syscall boundary is complete. See
@@ -213,13 +227,17 @@ it is running.
   lazy allocation on fault, no copy-on-write sharing (the read-only user text is
   copied in full per task rather than shared, `TODO(shared-text)`), and no paging
   to disk.
-- **File handles, seek, append, subdirectories, and timestamps.** `fs/fat32.c` now
-  writes, but a write is the whole file at once: there is no `open`, no `seek`, no
-  descriptor table, and no way to change part of a file without rewriting all of it
-  (`fat32_write_file` mirrors `fat32_read_file`). The root directory can grow, but
-  there is no `mkdir` and no `.`/`..`, so subdirectory creation is still absent; and
-  a written entry's date and time fields are left zero, since TownOS keeps no clock.
-  File handles want to be designed alongside pipes. See
+- **A disk file behind a descriptor, seek, append, subdirectories, and timestamps.**
+  There is now a descriptor table and pipes sit in it
+  ([reference/descriptors.md](reference/descriptors.md)), but a **disk file** cannot:
+  a write is still the whole file at once, so there is no `open`, no `seek`, no file
+  redirect (`> OUT.TXT`), and no way to change part of a file without rewriting all of
+  it (`fat32_write_file` mirrors `fat32_read_file`). Redirect is the piece that wants
+  streaming file writes, which is why it is a later rung than pipes
+  ([decisions/0022-file-descriptors-and-pipes.md](decisions/0022-file-descriptors-and-pipes.md)).
+  The root directory can grow, but there is no `mkdir` and no `.`/`..`, so subdirectory
+  creation is still absent; and a written entry's date and time fields are left zero,
+  since TownOS keeps no clock. See
   [decisions/0020-writable-fat32.md](decisions/0020-writable-fat32.md).
 - **Long filenames, paths, and permissions.** Long-filename directory entries are
   skipped, so a file with a long name is invisible to TownOS, and a name that will
@@ -227,14 +245,15 @@ it is running.
   lookups are root-directory only, since the interface takes a bare name with no
   path to split; and FAT32 carries essentially no permissions, and no crash safety
   beyond the write ordering that keeps a crash from corrupting a live file.
-- **Arguments to a launched program, and a shell beyond one line.** The shell's
+- **Arguments to a launched program, and a shell beyond a pipeline.** The shell's
   `run` command starts a program on demand now, but it cannot pass it anything:
-  `SYS_RUN` forges the same empty, argv-less frame the loader always does. And the
-  shell is one line at a time: no pipes or redirection to connect programs, no job
-  control to background one, and no history or line recall (backspace editing of the
-  current line is all there is). `run` now waits for its program and reports an exit
-  status, but it can only wait: there is no way to background a program, and no way
-  to interrupt one that will not finish.
+  `SYS_RUN` forges the same empty, argv-less frame the loader always does. The shell
+  now connects programs with **pipes** (`run A | run B | run C`,
+  [reference/shell.md](reference/shell.md)), but there is no redirection to or from a
+  file (`> OUT.TXT`), no job control to background a stage, and no history or line
+  recall (backspace editing of the current line is all there is). `run` and a pipeline
+  wait for their programs and report an exit status, but they can only wait: there is
+  no way to background a program, and no way to interrupt one that will not finish.
 
 ## Natural next steps
 
@@ -248,7 +267,7 @@ The remaining steps build on it.
 **System calls.** Done. Ring-3 code re-enters the kernel through one DPL 3 IDT
 gate at `int 0x50` (`kernel/syscall.c`), the first and only deliberate exception
 to the DPL-0-everywhere IDT policy. A call number in RAX selects a handler; there
-are eleven. See
+are fourteen. See
 [decisions/0007-syscalls-via-int-0x50.md](decisions/0007-syscalls-via-int-0x50.md).
 What remains for a real syscall layer is safe argument validation (see the
 untrusted-pointer limitation below) and more calls, both of which wait on
@@ -299,10 +318,12 @@ rebuild. See
 
 **The interactive shell.** Done. `user/shell.c` is a ring-3 program that reads
 commands and runs them through the syscalls (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`,
-`SYS_READFILE`, and now `SYS_WRITEFILE`/`SYS_DELETE`/`SYS_FREECOUNT` behind
-`write`/`delete`/`free`) and a keyboard ring buffer. `run` loads a named program on
-demand, so the fixed program list in `kernel_main` is gone. See
-[decisions/0016-interactive-shell.md](decisions/0016-interactive-shell.md).
+`SYS_READFILE`, `SYS_WRITEFILE`/`SYS_DELETE`/`SYS_FREECOUNT` behind
+`write`/`delete`/`free`, and `SYS_PIPE`/`SYS_CLOSE` behind `|`) and a keyboard ring
+buffer. `run` loads a named program on demand, so the fixed program list in
+`kernel_main` is gone, and `run A | run B` connects two of them with a pipe. See
+[decisions/0016-interactive-shell.md](decisions/0016-interactive-shell.md) and
+[decisions/0022-file-descriptors-and-pipes.md](decisions/0022-file-descriptors-and-pipes.md).
 
 **Blocking and sleep.** Done. A task can leave the rotation and be woken by the
 event it waits for, so an idle machine halts rather than spins: an idle shell
@@ -330,25 +351,28 @@ rather than maintained. `write`/`delete`/`free` expose it from the shell. See
 **Next.** The remaining process work the shell makes concrete: argv on the new stack
 so `run` can pass arguments, a way to kill a task so a runaway program does not
 require a reboot (`TODO(kill-and-signals)`), and `waitpid` so a parent with several
-children can name one. Subdirectories and paths are the filesystem's own next rung.
-Pipes and waiting on the disk are the same block/wake shape as `WAIT_KEY` and
-`WAIT_CHILD`, a new `wait_reason_t` and a waker in the right place rather than a new
-mechanism.
+children can name one (the pipeline shell reaches for it, working around it by
+matching the reaped child's id). Subdirectories and paths are the filesystem's own
+next rung, and a file redirect (`> OUT.TXT`) wants streaming file writes. **Pipes are
+done** ([decisions/0022-file-descriptors-and-pipes.md](decisions/0022-file-descriptors-and-pipes.md)),
+added exactly as predicted — a new pair of `wait_reason_t` and a waker in the right
+place, no change to the block/wake mechanism. Waiting on the disk is the same shape
+and still a seam.
 
 ## Known limitations
 
-- **Syscall pointer validation is a stopgap, not real.** `SYS_WRITE` takes a
-  pointer from ring 3, which is untrusted (the confused-deputy problem). The
-  current check confirms only that the *start* pointer lies in the ring-3 region
-  (`USER_REGION_START`..`USER_REGION_END`); it does **not** bound the string's
-  length, so a string starting just below `USER_REGION_END` with no NUL still
-  walks off the region into kernel pages. Real validation, checking the whole
-  `[ptr, ptr+len)` range against the caller's mapped pages and capping the
-  length, is now possible (each task has a private tree that can be walked to
-  confirm a page is mapped and user-accessible) but is not yet implemented: the
-  check still only tests the start pointer against the fixed region constants.
-  Recorded as a TODO in `kernel/syscall.c`. Do not read the region check as real
-  pointer safety. See [reference/syscalls.md](reference/syscalls.md).
+- **Syscall pointer validation is region-based, not per-process.** Every call that
+  takes a pointer from ring 3 (untrusted — the confused-deputy problem) now bounds
+  the **whole** `[ptr, ptr+len)` range with `user_range_ok`, including the
+  write-target pointers of `SYS_STAT`, `SYS_PIPE`, and `SYS_WAIT`, and caps copied
+  filenames with `copy_user_string`; `SYS_WRITE` was a start-pointer-only stopgap
+  until it became a counted `(fd, buf, len)` call and moved onto `user_range_ok`
+  like the rest. What is still missing is that the check tests virtual addresses
+  against the **fixed region constants** (`USER_REGION_START`..`USER_REGION_END`)
+  rather than walking the caller's own page tables to confirm each page is mapped
+  and user-accessible — which is now possible (every task has a private tree) but
+  not implemented. Recorded as a TODO in `kernel/syscall.c`. See
+  [reference/syscalls.md](reference/syscalls.md).
 - **Blocking is narrow, and a runaway task cannot be stopped.** Task structs
   are heap-allocated and each task now has its own address space with a private
   stack (per-process paging), so the old fixed four-task ceiling and the shared

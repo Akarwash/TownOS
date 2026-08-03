@@ -131,11 +131,54 @@ under the shell's 32KB read buffer, so afterwards `read FTEST.TXT` still prints 
 whole thing for a human spot check. On the host, `mtype -i disk.img ::/FTEST.TXT |
 wc -c` reports 16384.
 
+## COUNT.ELF — the downstream end of a pipe
+
+Reads `fd 0` until end of file, counts the bytes, prints the count to `fd 1`, exits
+0. It exists to be the reader half of a pipeline: `run a.elf | run count.elf` prints
+`20`, because A writes twenty bytes into the pipe and COUNT reads them all.
+
+It is the fixture that proves EOF. Piped after a writer, COUNT blocks on the empty
+pipe between the writer's slow writes, and it only ever finishes because closing the
+last write end (which A's exit does) makes a read return 0. So a run that prints the
+right total and returns is evidence that a close is an event that unblocks an
+EOF-waiting reader, not just that bytes flow. It loops on partial reads: a pipe hands
+over only what has been written so far, so one read is never assumed to drain the
+stream.
+
+    > run a.elf | run count.elf
+    20
+    pipeline exited with status 0
+
+Run alone (`run count.elf`, `fd 0` the console), it reads keys and counts them but
+never finishes, because a console has no EOF to send — there is no Ctrl-D. That is
+expected, not a bug; see [decision 0022](../../docs/decisions/0022-file-descriptors-and-pipes.md).
+
+## UPPER.ELF — a streaming middle stage
+
+Reads `fd 0` until EOF, uppercases each byte, writes it to `fd 1`, exits 0. It has a
+pipe on **both** sides, so `run a.elf | run upper.elf | run count.elf` exercises
+three stages and a program that both reads and writes a pipe. It streams — passing
+bytes through as it reads them rather than buffering the whole input — so it also
+shows a pipeline making incremental progress and shows backpressure: when the pipe
+ahead of it fills, its write blocks until the next stage drains it, which is correct
+rather than a hang.
+
+It loops on partial reads **and** partial writes: a write into a pipe takes only what
+fits and returns that count, so the remainder is retried, and a write returning `<= 0`
+means the stage downstream is gone and there is nothing left to do.
+
+    > run a.elf | run upper.elf | run count.elf
+    20
+    pipeline exited with status 0
+
 ## Why every loop is bounded
 
 There is no way to kill a task and there are no signals. A program that never exits
 leaves its parent blocked in `SYS_WAIT` with no way back short of a reboot, so
-`run <that program>` would make the shell permanently unusable. Every program here
-therefore runs a fixed number of rounds and calls `sys_exit` at the bottom. There is
-no crt0 either, so falling off the end of `_start` is undefined behaviour rather than
-an implicit `exit(0)`: the call has to be written out.
+`run <that program>` would make the shell permanently unusable. `A`–`F` therefore run
+a fixed number of rounds and call `sys_exit` at the bottom. `COUNT` and `UPPER` are
+bounded differently: they loop until end of file, which a **pipe** always delivers
+(the writer closes) but a **console** never does, so they terminate when piped and do
+not when run alone on the console — which is why they are pipeline fixtures, not
+standalone ones. There is no crt0 either, so falling off the end of `_start` is
+undefined behaviour rather than an implicit `exit(0)`: the call has to be written out.
