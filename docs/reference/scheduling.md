@@ -1,6 +1,6 @@
 # Scheduling reference
 
-MiniOS runs ring-3 programs by switching between them on every timer tick. It
+TownOS runs ring-3 programs by switching between them on every timer tick. It
 boots one task (the shell) and gains more whenever the shell runs a program; they
 now also go away again when those programs finish. This page documents how the
 switch works, why it is safe, and the things that are easy to get wrong. Read from
@@ -204,7 +204,7 @@ resume a program in the middle of a wait it has not finished.
 **Step 4: load the incoming task's CR3.** With per-process paging, switching the
 register frame is only half the switch: the next task's code and stack live in
 ITS tree, at the same virtual addresses the outgoing task used, so its CR3 must
-be loaded too. Writing CR3 also flushes the TLB (MiniOS uses no global pages),
+be loaded too. Writing CR3 also flushes the TLB (TownOS uses no global pages),
 dropping the outgoing task's stale user translations for free. The switch is safe
 mid-interrupt because everything the CPU still needs on the way out (the frame
 `r` on the kernel stack, the `tasks[]` array and this code, and the IDT/GDT/TSS/
@@ -255,10 +255,22 @@ timer tick; voluntarily, by calling `task_block` at a syscall boundary; or final
 by calling `SYS_EXIT`, which becomes a block it never wakes from. All three go
 through this same `schedule()`; only the thing that prompted the call differs.
 A blocked task also carries a `wait_reason_t` saying what it waits for, so the
-right waker can find it. The mechanism, including why a block rewinds the saved
-`rip` onto the `int 0x50` rather than resuming mid-syscall, is in
+right waker can find it. There are four reasons now: `WAIT_KEY` (woken by the
+keyboard IRQ), `WAIT_CHILD` (woken by a child's `task_exit`), and `WAIT_PIPE_READ`
+and `WAIT_PIPE_WRITE`, added for pipes and woken by a write, a read, or the close of
+the last end on the other side ([pipes.md](pipes.md)). Each is the same shape — a
+block paired with a wake from whatever causes the event — which is why adding pipes
+needed no change to `task_block` itself. The mechanism, including why a block rewinds
+the saved `rip` onto the `int 0x50` rather than resuming mid-syscall, is in
 [blocking.md](blocking.md) and
 [decision 0017](../decisions/0017-blocking-and-sleep.md).
+
+`task_exit` now also **closes every descriptor** the exiting task holds, before it
+becomes a zombie and before it switches away, so those closes happen while it is
+still `current`. That is what makes a pipe writer's exit deliver EOF to the reader
+downstream: closing the last write end wakes a reader parked on the empty pipe. See
+[descriptors.md](descriptors.md) and
+[decision 0022](../decisions/0022-file-descriptors-and-pipes.md).
 
 ## Starting, and the startup race
 

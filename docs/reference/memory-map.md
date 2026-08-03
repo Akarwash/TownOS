@@ -1,6 +1,6 @@
 # Physical memory map
 
-This is the physical memory layout of MiniOS as it stands, read from `linker.ld`,
+This is the physical memory layout of TownOS as it stands, read from `linker.ld`,
 `boot/boot.asm`, `kernel/gdt.c`, and `kernel/memory.c`. The kernel is identity
 mapped: for the kernel's mapped region, virtual address equals physical address.
 The one exception is the per-task user half: with per-process paging each task
@@ -12,7 +12,7 @@ address and differs per task. See [paging.md](paging.md).
 
 | Region | Address | Size | Source | Notes |
 |--------|---------|------|--------|-------|
-| Real-mode / low memory | `0x000000` | up to 1M | (hardware) | Not used by MiniOS, but inside the identity map. |
+| Real-mode / low memory | `0x000000` | up to 1M | (hardware) | Not used by TownOS, but inside the identity map. |
 | VGA text buffer | `0x0B8000` | 4000 bytes (80x25x2) | `drivers/screen.h` (`VIDEO_ADDRESS`) | Memory-mapped text output. Inside the identity map. |
 | Kernel image load address | `0x100000` (1M) | image size | `linker.ld` (`. = 1M`) | Sections load here in order: `.multiboot`, `.text`, `.rodata`, `.data`, `.bss`. Ring-0 only (PD[0]/PD[1] have no user bit). |
 | Ring-3 program code | `0x400000` (4M) | one small program per task | `user/user.ld`, `kernel/elf.c` | NOT part of the kernel image. Each program is a separate ELF64 file on the disk (`A.ELF`, `B.ELF`, `C.ELF`), linked at this address and loaded here at runtime. In the boot tree this range is a shared PD[2] huge page; with per-process paging each task gets PRIVATE 4KB pages at this same virtual address, holding its own loaded program (see below). |

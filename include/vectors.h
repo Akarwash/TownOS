@@ -2,7 +2,7 @@
 #define VECTORS_H
 
 // ============================================================================
-// The single source of truth for every interrupt vector number in MiniOS.
+// The single source of truth for every interrupt vector number in TownOS.
 //
 // After this header exists, a bare vector number must not appear anywhere else
 // in the codebase. Every consumer (the IDT gate installer, the PIC remap, the
@@ -28,7 +28,7 @@
 
 // --- CPU exceptions (vectors 0x00 - 0x1F, fixed by Intel) -------------------
 // A #DF-style short name in a comment is the Intel mnemonic; the constant name
-// is MiniOS's own. Vectors marked RESERVED are defined so the range is complete
+// is TownOS's own. Vectors marked RESERVED are defined so the range is complete
 // and so a stray one still resolves to a name, not a bare number.
 #define EXC_DIVIDE_BY_ZERO          0   // #DE  divide or modulo by zero
 #define EXC_DEBUG                   1   // #DB  debug trap / single step

@@ -1,8 +1,8 @@
-# MiniOS
+# TownOS
 
 A hobby x86-64 operating system kernel built from scratch in C and assembly.
 
-MiniOS boots via Multiboot, climbs the CPU into 64-bit long mode, sets up the GDT
+TownOS boots via Multiboot, climbs the CPU into 64-bit long mode, sets up the GDT
 and TSS, and boots into an interrupt-driven interactive shell. It is a learning
 kernel: ring-3 tasks preempted round-robin on the timer tick, each in its own
 address space, running ELF64 programs read by name off a read-only FAT32 disk. The
@@ -11,8 +11,8 @@ not to be a production OS.
 
 ## Status
 
-MiniOS **builds, links, and boots**. The kernel links into `minios.elf`, is
-repackaged as the Multiboot-loadable `minios.bin`, and under QEMU boots into an
+TownOS **builds, links, and boots**. The kernel links into `townos.elf`, is
+repackaged as the Multiboot-loadable `townos.bin`, and under QEMU boots into an
 interactive shell that is itself a ring-3 program (`SHELL.ELF`) loaded off the disk
 image. What works, what was deliberately never built, and what is next are in
 [docs/project-status.md](docs/project-status.md).
@@ -36,13 +36,13 @@ see [docs/building.md](docs/building.md).
 
 ## Documentation
 
-MiniOS keeps two separate bodies of documentation:
+TownOS keeps two separate bodies of documentation:
 
 - **[docs/](docs/README.md)** is project documentation: factual, derived from the
-  source. What MiniOS is, how it is built, and why the load-bearing decisions were
+  source. What TownOS is, how it is built, and why the load-bearing decisions were
   made. Start here to build or hack on the kernel.
 - **[learnings/](learnings/README.md)** is conceptual learning material: how
-  operating systems work in general, using MiniOS as the running example. Start
+  operating systems work in general, using TownOS as the running example. Start
   here to learn the ideas.
 
 They must not blur: `docs/` states facts about this codebase, `learnings/` teaches
@@ -58,7 +58,7 @@ drivers/    hardware drivers: screen, keyboard, ATA PIO disk, I/O ports
 fs/         read-only FAT32 filesystem
 libc/       minimal freestanding C library (string, mem)
 user/       ring-3 programs (shell, A/B/C) and their runtime, built as standalone
-            ELF64 binaries that live on the disk image, not in minios.bin
+            ELF64 binaries that live on the disk image, not in townos.bin
 include/    shared types, the interrupt vector map, the syscall numbers
 tools/      mkdisk.sh: builds the FAT32 disk image on the host
 docs/       project documentation (factual)

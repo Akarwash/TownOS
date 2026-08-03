@@ -2,7 +2,7 @@
 #define USERLIB_H
 
 // ============================================================================
-// The entire runtime a MiniOS user program gets.
+// The entire runtime a TownOS user program gets.
 // ============================================================================
 // A user program is now a separately compiled, statically linked ELF64 binary
 // that lives on the disk image. It links against NOTHING: no host libc, no
@@ -87,11 +87,73 @@ unsigned long syscall3(unsigned long number, unsigned long arg1,
     return ret;
 }
 
-// SYS_WRITE: hand the kernel a pointer to a NUL-terminated string to print.
-// Returns 0 on success, (unsigned long)-1 if the kernel rejected the pointer.
+// SYS_WRITE: write `len` bytes of `buf` to descriptor `fd`. Returns the number of
+// bytes actually written, which MAY BE LESS THAN len — a pipe accepts only what
+// fits, and one call never moves more than the kernel's staging buffer. A caller
+// MUST LOOP until everything is written (or a write returns <= 0, meaning the far
+// end is gone): assuming one call moved the whole buffer silently drops the rest
+// (B5 in docs/decisions/0022). sys_print below is that loop for the common case.
+// Returns (unsigned long)-1 (as a negative long) on a bad fd, a wrong-direction fd,
+// or a bad buffer. fd 1 is standard output, fd 0 standard input, by convention.
 static inline __attribute__((always_inline))
-unsigned long sys_write(const char *string) {
-    return syscall1(SYS_WRITE, (unsigned long)string);
+long sys_write(int fd, const char *buf, unsigned long len) {
+    return (long)syscall3(SYS_WRITE, (unsigned long)fd, (unsigned long)buf, len);
+}
+
+// Print a NUL-terminated string to fd 1 (standard output), looping until the whole
+// string is written. THE LOOP IS THE POINT: sys_write may move fewer bytes than
+// asked, so one call is never assumed to have moved everything. Returns the number
+// of bytes written (short only if the descriptor went away mid-write). This is the
+// replacement for the old single-argument sys_write, so the common "print this
+// string" call sites read the same and cannot forget the loop.
+static inline __attribute__((always_inline))
+long sys_print(const char *s) {
+    unsigned long n = 0;
+    while (s[n] != '\0') {
+        n++;
+    }
+    unsigned long done = 0;
+    while (done < n) {
+        long w = sys_write(1, s + done, n - done);
+        if (w <= 0) {
+            return (long)done;   // far end gone or error: stop, report progress
+        }
+        done += (unsigned long)w;
+    }
+    return (long)done;
+}
+
+// SYS_READ: read up to `len` bytes from descriptor `fd` into `buf`. Returns the
+// number of bytes read, which MAY BE LESS THAN len, or 0 at END OF FILE (a pipe
+// whose last writer has closed). A reader MUST LOOP: to consume a whole stream,
+// keep calling until it returns 0. Returns (unsigned long)-1 (as a negative long)
+// on a bad or wrong-direction fd. BLOCKING: an empty pipe with a live writer, or an
+// empty console, parks the task until there is something to read; from ring 3 it
+// looks like one call that took a while. fd 0 is standard input by convention.
+static inline __attribute__((always_inline))
+long sys_read(int fd, char *buf, unsigned long len) {
+    return (long)syscall3(SYS_READ, (unsigned long)fd, (unsigned long)buf, len);
+}
+
+// SYS_CLOSE: close descriptor `fd`. Returns 0, or (unsigned long)-1 on a bad fd.
+// Closing a pipe end is how the other end learns the stream is over: closing the
+// last write end gives readers EOF, and closing the last read end tells a writer
+// nobody is listening. A pipeline that does not close the ends it is done with hangs
+// (B1/B6 in docs/decisions/0022), so close is not optional bookkeeping.
+static inline __attribute__((always_inline))
+long sys_close(int fd) {
+    return (long)syscall1(SYS_CLOSE, (unsigned long)fd);
+}
+
+// SYS_PIPE: create a pipe. On success `fds[0]` is the read end and `fds[1]` the
+// write end, both descriptors in THIS program's table, and it returns 0. Returns
+// (unsigned long)-1 on failure (out of memory or no free descriptor slots). Whoever
+// creates a pipe holds BOTH ends and must close the ones it does not keep, or the
+// end-counts never reach zero and a reader waits forever for an EOF that cannot
+// arrive (B1 in docs/decisions/0022).
+static inline __attribute__((always_inline))
+long sys_pipe(int fds[2]) {
+    return (long)syscall1(SYS_PIPE, (unsigned long)fds);
 }
 
 // SYS_EXIT: end THIS PROGRAM with `status` (masked by the kernel to 0..255). It no
@@ -116,13 +178,23 @@ void sys_exit(int status) {
 // SYS_WAIT: block until any child of this program exits, and return its exit status
 // (0..255). Returns (unsigned long)-1 if this program has no children at all.
 //
-// ANY-CHILD, NOT waitpid: it takes no argument, so a program with several children
-// is told about whichever finished first and cannot ask about a particular one.
-// BLOCKING, like sys_readkey: waiting costs no CPU, and from here it looks like one
-// call that took a while to come back.
+// ANY-CHILD, NOT waitpid: a program with several children is told about whichever
+// finished first and cannot ask about a particular one. BLOCKING, like sys_readkey:
+// waiting costs no CPU, and from here it looks like one call that took a while to
+// come back. Passes 0 for the id-out pointer, so the kernel does not report which
+// child it was; sys_wait_id below is the variant that does.
 static inline __attribute__((always_inline))
 long sys_wait(void) {
-    return (long)syscall0(SYS_WAIT);
+    return (long)syscall1(SYS_WAIT, 0);
+}
+
+// Like sys_wait, but also writes the id of the child that exited through `out_id`.
+// A caller reaping several children (a shell running a pipeline) uses this to match
+// each reaped child against the stage it started, so it can report the last stage's
+// status. Same blocking behaviour and same -1 for "no children".
+static inline __attribute__((always_inline))
+long sys_wait_id(unsigned long *out_id) {
+    return (long)syscall1(SYS_WAIT, (unsigned long)out_id);
 }
 
 // SYS_READKEY: pop one buffered keystroke, waiting for one if none is ready.
@@ -143,10 +215,17 @@ unsigned long sys_list(char *buf, unsigned long size) {
 }
 
 // SYS_RUN: load and start the named program; it joins the scheduler alongside this
-// one. Returns 0 on success, (unsigned long)-1 if it could not be started.
+// one. `in_fd` and `out_fd` are descriptors in THIS program's table to give the
+// child as its fd 0 and fd 1, or -1 for a fresh console end. Passing pipe ends here
+// is the only way to wire one program's output to another's input, since a running
+// task's descriptors cannot be changed from outside. Returns the child's task id
+// (>= 1) on success, (unsigned long)-1 if it could not be started (bad file, or a
+// bad in_fd/out_fd). The id lets a caller running several children tell them apart
+// when it waits; an ordinary run just checks for the -1 failure.
 static inline __attribute__((always_inline))
-unsigned long sys_run(const char *name) {
-    return syscall1(SYS_RUN, (unsigned long)name);
+unsigned long sys_run(const char *name, int in_fd, int out_fd) {
+    return syscall3(SYS_RUN, (unsigned long)name,
+                    (unsigned long)(long)in_fd, (unsigned long)(long)out_fd);
 }
 
 // SYS_READFILE: read the named file into buf. Returns the number of bytes read, or
@@ -179,6 +258,16 @@ unsigned long sys_delete(const char *name) {
 static inline __attribute__((always_inline))
 unsigned long sys_freecount(void) {
     return syscall0(SYS_FREECOUNT);
+}
+
+// SYS_STAT: report the size in bytes of the named file, writing it through
+// `out_size`, so a caller can size a buffer before it reads. Returns 0 on success,
+// (unsigned long)-1 if the file is not found (or the name is not 8.3, or names a
+// directory). This is what lets `read` tell a missing file from one too big for
+// its buffer, and report the size instead of a bare failure.
+static inline __attribute__((always_inline))
+unsigned long sys_stat(const char *name, unsigned long *out_size) {
+    return syscall2(SYS_STAT, (unsigned long)name, (unsigned long)out_size);
 }
 
 // A crude busy-wait so the letters do not scroll past faster than the eye can

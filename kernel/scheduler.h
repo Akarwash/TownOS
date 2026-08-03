@@ -3,6 +3,7 @@
 
 #include "isr.h"
 #include "paging.h"
+#include "file.h"
 #include "../include/types.h"
 
 // ============================================================================
@@ -23,6 +24,13 @@
 // bounds the size of the pointer-bookkeeping array in scheduler.c, not where the
 // tasks live. 64 is arbitrary; raise it freely.
 #define MAX_TASKS_LIMIT 64
+
+// How many descriptors a task can hold open at once. A small fixed array in each
+// task_t (fds below), not growable: 8 is plenty for the shell (0 and 1 in use, up
+// to two more per pipe in a pipeline) and keeps the table a flat, cheaply-scanned
+// thing. Raising it is a one-line change; a program that needs more than a handful
+// of open descriptors is not something this kernel runs.
+#define MAX_FDS 8
 
 // Report every lifecycle event that returns memory to the pools, with the free
 // frame count after it. Set to 0 to silence the lot.
@@ -66,7 +74,9 @@ typedef enum {
 typedef enum {
     WAIT_NONE = 0,     // not waiting for anything (the only valid value when READY)
     WAIT_KEY,          // waiting for a keypress, woken by the keyboard IRQ
-    WAIT_CHILD         // waiting for a child to exit, woken by task_exit
+    WAIT_CHILD,        // waiting for a child to exit, woken by task_exit
+    WAIT_PIPE_READ,    // waiting to read a pipe (empty, writer alive), woken by a write or the last writer closing
+    WAIT_PIPE_WRITE    // waiting to write a pipe (full, reader alive), woken by a read or the last reader closing
 } wait_reason_t;
 
 // The parent id of a task nobody started: task 0, which kernel_main creates before
@@ -82,7 +92,7 @@ typedef enum {
 // now owns a private page-table tree (per-process paging), so two tasks can use
 // the same virtual address for different physical memory. It still has no kernel
 // stack of its own (see the limitations in the ADR).
-typedef struct {
+typedef struct task {
     registers_t regs;         // the saved/forged interrupt frame: IS the task
 
     // This task's private page-table tree, and the CR3 value that loads it.
@@ -114,6 +124,13 @@ typedef struct {
     // status distinguishable from the SYSCALL_ERROR (-1) that SYS_WAIT returns when
     // the caller has no children at all.
     int32_t exit_status;
+
+    // This task's open descriptors, indexed 0..MAX_FDS-1, NULL where unused. fd 0
+    // and fd 1 are a console by convention (input and output); a child in a pipeline
+    // has one or both replaced by an inherited pipe end. The number in a descriptor
+    // is an index into THIS task's table only — it means nothing in another task's.
+    // See kernel/file.h and docs/reference/descriptors.md.
+    file_t *fds[MAX_FDS];
 } task_t;
 
 // Forge a never-run task from a program FILE: read `name` (an 8.3 filename such
@@ -131,11 +148,19 @@ typedef struct {
 // exit, and what tells the sweeper whether anybody is still going to read this
 // task's exit status.
 //
+// `in_fd` and `out_fd` are the descriptors in the CALLER's table to inherit as the
+// child's fd 0 and fd 1, or -1 to give the child a fresh console end there (the
+// default). This is the ONLY way a child acquires a descriptor: nothing can inject
+// one into a running task, so a pipeline passes ends here at creation. in_fd must be
+// a read end and out_fd a write end; a wrong-direction or out-of-range fd fails the
+// create. -1/-1 (kernel_main's boot task, and an ordinary `run`) inherits nothing.
+//
 // Returns the task id, or -1 if the file is missing, is not a program this
-// kernel accepts, or the heap or frame pool is out of memory. A failed load
-// creates no task and must not disturb the ones that succeeded. Implemented in
+// kernel accepts, the heap or frame pool is out of memory, or an inherited fd is
+// bad. A failed load creates no task, leaks nothing (any inherited-end count it took
+// is undone), and must not disturb the ones that succeeded. Implemented in
 // scheduler.c.
-int task_create_from_file(const char *name, uint32_t parent_id);
+int task_create_from_file(const char *name, uint32_t parent_id, int in_fd, int out_fd);
 
 // Pick task 0 and enter it. Does not return (control only ever comes back into
 // the kernel through an interrupt, where schedule() runs).
@@ -202,6 +227,13 @@ void task_wait(registers_t *r);
 // who made a request (SYS_RUN stamps the new task's parent_id with it) without
 // scheduler.c having to export the whole task table.
 uint32_t scheduler_current_id(void);
+
+// The task currently on the CPU: the caller of whatever syscall is being served.
+// Exposed (unlike the rest of the table) because the descriptor syscalls
+// (SYS_READ/WRITE/CLOSE/PIPE) all operate on the CALLER's own fd table, and the
+// table itself stays private to scheduler.c. Never call this outside a syscall
+// handler: between syscalls `current` names whoever the round-robin last picked.
+task_t *scheduler_current_task(void);
 
 // The switch itself, called from the timer IRQ with a pointer to the live pile.
 // Only TASK_READY tasks are candidates: a blocked task is skipped entirely, and if

@@ -1,6 +1,6 @@
 # Shell reference
 
-MiniOS boots into an interactive shell that is a ring-3 program, `SHELL.ELF`,
+TownOS boots into an interactive shell that is a ring-3 program, `SHELL.ELF`,
 loaded off the disk like any other. It reads typed commands and runs them using
 nothing but syscalls: it holds no privilege and touches the keyboard, screen,
 filesystem, and loader only through the `int 0x50` gate. This page documents the
@@ -12,7 +12,7 @@ the `write`/`delete`/`free` commands, [decision 0020](../decisions/0020-writable
 
 ## The command table
 
-The names are MiniOS's own and deliberately not the Unix ones.
+The names are TownOS's own and deliberately not the Unix ones.
 
 | Command | Argument | Effect |
 |---------|----------|--------|
@@ -47,6 +47,34 @@ bytes, so `RUN a.elf` prints `unknown command: RUN`, while `run A.ELF` and
 it up. This is only reachable now that shift exists (see
 [keyboard.md](keyboard.md)); it is left as it is, because the shell's commands are
 its own vocabulary and matching them loosely buys nothing.
+
+## Pipelines
+
+A line containing `|` is a **pipeline**: `run A | run B | run C` runs the stages at
+once and connects each stage's output to the next stage's input through a pipe, so
+`B` reads what `A` writes. Every stage must be `run <file>` — the other commands are
+builtins that write to the shell's own console rather than to a child, so they cannot
+be a stage. Up to four stages (`SHELL_MAX_SEGS`); more is rejected. A line with no
+`|` takes exactly the single-command path it always has.
+
+The shell creates one pipe per join, gives each stage the right ends via
+`sys_run(name, in_fd, out_fd)` (the read end of the pipe behind it, the write end of
+the pipe ahead of it, or a console end at the two outer edges), and then **closes its
+own copies of every pipe end immediately**, which is load-bearing: the shell created
+the pipe so it holds both ends, and if it kept them the write-end count would never
+reach zero, the downstream reader would wait forever for an EOF that cannot arrive,
+and the shell would then wait forever for a child that never exits. It waits for all
+N stages and reports the **last** stage's exit status, matching `$?` in a real shell;
+it matches the reaped child against the last stage by id (`sys_wait_id`).
+
+**A slow pipeline is not a hang.** With three or more stages, a middle stage that
+must consume all of its input before it produces any output — a counter, a sort —
+leaves the stage after it blocked and idle for the whole run, and a full pipe
+likewise blocks the stage before it (backpressure). From the outside that is
+indistinguishable from a hang, but it is correct: the downstream stage is asleep
+waiting for bytes that only arrive when the middle stage finishes, and it wakes and
+runs the moment they do. See
+[decision 0022](../decisions/0022-file-descriptors-and-pipes.md).
 
 ## The read-match-do loop
 
@@ -151,6 +179,7 @@ number in and the result out, arguments in RDI/RSI/RDX. The ring-3 wrappers are 
 | 7 | `SYS_WRITEFILE` | RDI = filename, RSI = buffer, RDX = length | 0, or -1 |
 | 8 | `SYS_DELETE` | RDI = filename | 0, or -1 |
 | 9 | `SYS_FREECOUNT` | none | free-cluster count |
+| 10 | `SYS_STAT` | RDI = filename, RSI = `uint64_t *out_size` | 0, or -1 if not found |
 
 - **`SYS_READKEY`** pops one buffered key (above). Blocking: on an empty buffer the
   kernel parks the calling task, and the keyboard IRQ wakes it when it pushes a
@@ -185,45 +214,55 @@ number in and the result out, arguments in RDI/RSI/RDX. The ring-3 wrappers are 
 - **`SYS_FREECOUNT`** returns `fat32_free_count`, the number of free clusters on
   the volume — a full FAT walk, no pointer, no block. `free` prints it, and the
   leak test watches it hold steady across write/delete cycles.
+- **`SYS_STAT`** reports a file's size (through `fat32_stat`) without reading any
+  of it, writing the size through the `out_size` pointer. `read` uses it to ask how
+  big a file is before it commits a buffer, so it can tell a missing file from one
+  too big to read and report the size instead of a bare failure. The `out_size`
+  pointer is a write target and is bounds-checked over its whole `[ptr, ptr+8)`
+  range. It does not block. See
+  [decision 0021](../decisions/0021-sys-stat.md).
 
 ### `read` and files that do not fit
 
 The shell's file buffer is `SHELL_FILE_MAX` (32768) bytes and it asks
 `SYS_READFILE` for at most 32767 of them, holding one back for the NUL it appends
-before printing.
+before printing. A file larger than that will not fit, and `read` needs to know
+that *before* it reads — which is what `SYS_STAT` is for.
 
-**A file larger than that is not read at all.** `fat32_read_file` compares the
-directory entry's size against the buffer size before reading a cluster and returns
-`-1` if the file is bigger, so `SYS_READFILE` fails and `read` prints:
+**`read` stats first, then decides.** `cmd_read` calls `SYS_STAT` for the name and
+branches on the result:
 
 ```
+> read nosuch.txt
+read: no such file: nosuch.txt
 > read huge.txt
-read: cannot read huge.txt
+read: huge.txt is 40981 bytes, the buffer holds 32767
+> read hello.txt
+Hello from FAT32!
 ```
+
+- **Not found** (`SYS_STAT` returns -1) → `read: no such file: X`. A directory or a
+  non-8.3 name folds into this, since none of them names a file to read.
+- **Too big** (the reported size exceeds the buffer) → `read: X is N bytes, the
+  buffer holds M`, with both numbers, so the reason is unambiguous.
+- **Otherwise** → read it with `SYS_READFILE` and print it. The size is already
+  known to fit, so a failure here is a genuine disk or filesystem error, which the
+  old `read: cannot read X` line now names on its own.
 
 `HUGE.TXT` is 40981 bytes and is on the disk for exactly this reason: the Makefile
-generates it and copies it on every `make run`. Before it, nothing on the disk was
-over 16KB and this path had never once run.
+generates it and copies it on every `make run`. Before `SYS_STAT`, all three
+outcomes printed the same `read: cannot read X`, so a missing file, a too-large
+file, and a disk error were indistinguishable; the size is what tells them apart.
 
-Refusing rather than truncating is defensible on its own — a caller gets the whole
-file or an error, never a prefix it has no way to recognise as a prefix — but at
-the shell it is indistinguishable from "no such file" and from a disk error, which
-produce the same line.
-
-**`read` also carries a truncation notice, and it is unreachable.** After printing
-the contents, `cmd_read` checks whether the returned count filled the buffer
-exactly and, if so, prints:
-
-```
-read: showing the first 32767 bytes, the file may be longer
-```
-
-That was written for a `SYS_READFILE` that fills the buffer and stops. It does not.
-The count can only equal 32767 for a file of *exactly* 32767 bytes, which is
-complete — so the single case that reaches the notice is the one case where the
-notice is wrong. `TODO(read-truncation)`: either the read path truncates and
-reports the file's true size, or the notice goes. Both change `SYS_READFILE`'s
-contract and every caller of it, so neither is a small edit.
+**There is deliberately no partial read.** `read` on a large file still refuses; it
+just now says why. Showing a prefix would need an offset argument on `SYS_READFILE`
+— read bytes `[off, off+len)` rather than the whole file — which changes its
+contract and every caller of it, and is a rung of its own. This also retired an
+unreachable "showing the first N bytes, the file may be longer" notice the shell
+used to carry (`TODO(read-truncation)`, now gone): `SYS_READFILE` delivers the
+whole file or refuses it, never a prefix, so that notice could only ever fire for a
+file of exactly the buffer size, which is complete. See
+[decision 0021](../decisions/0021-sys-stat.md).
 
 **The child must exit.** There is no way to kill a task and there are no signals,
 so a program with an unbounded loop leaves the shell blocked in `SYS_WAIT` forever

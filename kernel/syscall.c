@@ -1,10 +1,24 @@
 #include "syscall.h"
 #include "memory.h"
 #include "scheduler.h"
+#include "file.h"
+#include "pipe.h"
+#include "heap.h"
 #include "../drivers/screen.h"
 #include "../drivers/keyboard.h"
 #include "../fs/fat32.h"
+#include "../libc/mem.h"
 #include "../include/syscalls.h"
+
+// The most bytes one SYS_READ or SYS_WRITE moves in a single call. A counted
+// buffer from ring 3 is copied through a kernel staging buffer of this size, so a
+// transfer larger than this comes back as a partial count and the caller loops
+// (this is the mechanism behind partial transfers, B5 in docs/decisions/0022, not
+// an edge case). One static buffer is safe because a syscall runs with interrupts
+// masked (the int 0x50 gate clears IF) and this kernel is single-CPU, so two
+// syscalls never touch it at once.
+#define SYSCALL_IO_MAX 4096
+static char io_staging[SYSCALL_IO_MAX];
 
 // The longest filename SYS_RUN and SYS_READFILE will copy in from ring 3. An 8.3
 // name needs at most 12 characters plus a terminator; 16 leaves a little slack.
@@ -55,29 +69,185 @@ static int copy_user_string(uint64_t user_ptr, char *dst, uint32_t dst_size) {
     return -1;                  // the name did not fit, treat as invalid
 }
 
-// SYS_WRITE: print a NUL-terminated string supplied by the ring-3 caller.
+// SYS_WRITE: write a counted buffer to one of the caller's descriptors.
+//   RDI = fd, RSI = user buffer pointer, RDX = length.
+// Returns the number of bytes written, which MAY BE LESS than the length asked for
+// (a pipe takes only what fits, and one call never moves more than SYSCALL_IO_MAX);
+// the caller loops on the count. Returns SYSCALL_ERROR on a bad fd, a wrong-
+// direction fd, or a bad buffer.
 //
-// The pointer in RDI is UNTRUSTED. A ring-3 program could pass a kernel address
-// and turn the kernel into a confused deputy, printing memory it is not allowed
-// to read. Proper validation means checking the pointer's whole range against
-// the caller's own mapped pages, which needs per-process address-space tracking
-// that does not exist yet.
+// VALIDATION ORDER is fd, slot, direction, then buffer: reject an fd out of range,
+// then an unopened slot, then a read-end (fd 0, or a pipe's read end) that cannot be
+// written, and only then bounds-check the memory. This is NOT copy_user_string: a
+// counted buffer may contain zero bytes and need not be NUL-terminated, so it is
+// range-checked and copied by length into the kernel staging buffer.
 //
-// STOPGAP, NOT REAL VALIDATION: we only check that the start pointer falls inside
-// the single ring-3 region (USER_REGION_START..USER_REGION_END). This does NOT
-// bound the string's length, so a string that starts just below USER_REGION_END
-// with no NUL still walks out of the region and into kernel pages. See the TODO
-// below and docs/reference/syscalls.md.
-static uint64_t sys_write(uint64_t user_ptr) {
-    // TODO: replace with a real per-process bounds check once address spaces
-    // exist: validate the entire [ptr, ptr+len) range lies in the caller's pages,
-    // and cap the length so an unterminated string cannot run off the region.
-    if (user_ptr < USER_REGION_START || user_ptr >= USER_REGION_END) {
-        print_string("syscall: SYS_WRITE rejected an out-of-bounds pointer\n");
+// BLOCK-AWARE, so it takes the register pile and writes rax ITSELF, and must NOT on
+// the path where file_write parks the task (a full pipe with a live reader). The
+// re-armed int 0x50 reads the syscall number back out of rax, so writing a return
+// value there would make the woken task issue a different call. Dispatched as a bare
+// statement, never `regs->rax = sys_write(...)`. See docs/reference/blocking.md and
+// the long comment on sys_readkey below.
+static void sys_write(registers_t *r) {
+    uint64_t fd = r->rdi;
+    uint64_t user_buf = r->rsi;
+    uint64_t len = r->rdx;
+
+    task_t *t = scheduler_current_task();
+    if (fd >= MAX_FDS || t->fds[fd] == NULL) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+    file_t *f = t->fds[fd];
+    if (!f->writable) {
+        r->rax = SYSCALL_ERROR;   // fd 0, or a pipe's read end: not writable
+        return;
+    }
+    if (len == 0) {
+        r->rax = 0;               // nothing to write is a successful no-op
+        return;
+    }
+
+    uint64_t n = len < SYSCALL_IO_MAX ? len : SYSCALL_IO_MAX;
+    if (!user_range_ok(user_buf, n)) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+    memcpy(io_staging, (const void *)user_buf, (size_t)n);
+
+    long w = file_write(f, io_staging, (uint32_t)n, r);
+    if (w == FILE_BLOCKED) {
+        return;                   // parked; leave rax holding SYS_WRITE for the re-issue
+    }
+    if (w < 0) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+    r->rax = (uint64_t)w;
+}
+
+// SYS_READ: read a counted buffer from one of the caller's descriptors.
+//   RDI = fd, RSI = user buffer pointer, RDX = length.
+// Returns the number of bytes read, which MAY BE LESS than the length asked for and
+// MAY BE 0, which is END OF FILE (a pipe drained with no writer left). Returns
+// SYSCALL_ERROR on a bad fd, a wrong-direction fd (fd 1, or a pipe's write end), or
+// a bad buffer. Validation order mirrors sys_write: fd, slot, direction, buffer.
+//
+// BLOCK-AWARE, and it carries the same RAX discipline as sys_readkey and sys_wait:
+// on the path where file_read parks the task (an empty pipe with a live writer, or
+// an empty console) it writes NOTHING to rax, because the re-armed int 0x50 reads
+// the syscall number back out of rax and a stray value there would make the woken
+// task issue a different call (a 0 would be SYS_EXIT). Dispatched as a bare
+// statement. See docs/reference/blocking.md.
+static void sys_read(registers_t *r) {
+    uint64_t fd = r->rdi;
+    uint64_t user_buf = r->rsi;
+    uint64_t len = r->rdx;
+
+    task_t *t = scheduler_current_task();
+    if (fd >= MAX_FDS || t->fds[fd] == NULL) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+    file_t *f = t->fds[fd];
+    if (f->writable) {
+        r->rax = SYSCALL_ERROR;   // fd 1, or a pipe's write end: not readable
+        return;
+    }
+    if (len == 0) {
+        r->rax = 0;
+        return;
+    }
+
+    uint64_t n = len < SYSCALL_IO_MAX ? len : SYSCALL_IO_MAX;
+    if (!user_range_ok(user_buf, n)) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+
+    long got = file_read(f, io_staging, (uint32_t)n, r);
+    if (got == FILE_BLOCKED) {
+        return;                   // parked; leave rax holding SYS_READ for the re-issue
+    }
+    if (got < 0) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+    if (got > 0) {
+        memcpy((void *)user_buf, io_staging, (size_t)got);
+    }
+    r->rax = (uint64_t)got;       // 0 delivered as EOF
+}
+
+// SYS_CLOSE: close one of the caller's descriptors.
+//   RDI = fd.
+// Frees the file_t and clears the slot (and, for a pipe end, drops the pipe's
+// end-count and may wake a peer or free the pipe — see close_fd). Returns 0, or
+// SYSCALL_ERROR on a bad fd. Does not block, so it returns through the dispatcher
+// normally with no RAX concern.
+static uint64_t sys_close(uint64_t fd) {
+    task_t *t = scheduler_current_task();
+    if (fd >= MAX_FDS || t->fds[fd] == NULL) {
+        return SYSCALL_ERROR;
+    }
+    close_fd(t->fds, (int)fd);
+    return 0;
+}
+
+// SYS_PIPE: create a pipe and hand back its two ends in the caller's table.
+//   RDI = user pointer to int[2]; on success it receives [read_fd, write_fd].
+// The out pointer is a WRITE TARGET from ring 3, so its whole 2*sizeof(int) range is
+// bounds-checked before the kernel writes through it (same rule as SYS_STAT's size
+// pointer). Allocates one pipe_t and two file_t and takes two table slots; on any
+// failure part way it unwinds what it took, so a failed SYS_PIPE consumes nothing.
+// The pipe starts with exactly these two ends (readers = writers = 1, set by
+// file_alloc_pipe). Does not block.
+static uint64_t sys_pipe(uint64_t user_out) {
+    if (!user_range_ok(user_out, 2 * sizeof(int))) {
+        print_string("syscall: SYS_PIPE rejected an out-of-bounds pointer\n");
         return SYSCALL_ERROR;
     }
 
-    print_string((char *)user_ptr);
+    task_t *t = scheduler_current_task();
+    pipe_t *p = pipe_create();
+    if (p == NULL) {
+        return SYSCALL_ERROR;
+    }
+
+    // Read end first. If there is no free slot, the pipe has no ends yet, so a plain
+    // kfree returns it cleanly.
+    int rfd = alloc_fd(t->fds);
+    if (rfd < 0) {
+        kfree(p);
+        return SYSCALL_ERROR;
+    }
+    file_t *rend = file_alloc_pipe(p, 0);   // read end -> readers = 1
+    if (rend == NULL) {
+        kfree(p);
+        return SYSCALL_ERROR;
+    }
+    t->fds[rfd] = rend;
+
+    // Write end. From here the pipe has one end, so a failure unwinds through
+    // close_fd(rfd): that drops readers to 0, and with writers still 0 both counts
+    // are zero, so file_close frees the pipe as well as the read end. No leak.
+    int wfd = alloc_fd(t->fds);
+    if (wfd < 0) {
+        close_fd(t->fds, rfd);
+        return SYSCALL_ERROR;
+    }
+    file_t *wend = file_alloc_pipe(p, 1);   // write end -> writers = 1
+    if (wend == NULL) {
+        close_fd(t->fds, rfd);
+        return SYSCALL_ERROR;
+    }
+    t->fds[wfd] = wend;
+
+    // Both ends are installed and counted; report the numbers. The destination was
+    // range-checked above and lies in the caller's own mapped pages.
+    int *out = (int *)user_out;
+    out[0] = rfd;
+    out[1] = wfd;
     return 0;
 }
 
@@ -148,8 +318,14 @@ static uint64_t sys_list(uint64_t user_buf, uint64_t bufsize) {
 // rest, and it already REPORTS AND SKIPS a missing or malformed program rather than
 // faulting, so a bad name here costs nothing but a returned -1: the kernel is never
 // taken down by what a program asks to run. Returns 0 on success, -1 on a bad
-// pointer or a load failure.
-static uint64_t sys_run(uint64_t user_name) {
+// pointer, a load failure, or a bad inherited descriptor.
+//
+// RSI = in_fd, RDX = out_fd: the caller's descriptors to give the child as its fd 0
+// and fd 1, or -1 for a fresh console. This is THE ONLY WAY a descriptor reaches a
+// child, since nothing can inject one into a running task, so a pipeline hands the
+// pipe ends across here at creation. task_create_from_file validates and inherits
+// them (in_fd must be a read end, out_fd a write end).
+static uint64_t sys_run(uint64_t user_name, uint64_t in_fd, uint64_t out_fd) {
     char name[SYSCALL_NAME_MAX];
     if (copy_user_string(user_name, name, sizeof(name)) != 0) {
         print_string("syscall: SYS_RUN rejected a bad filename pointer\n");
@@ -159,7 +335,8 @@ static uint64_t sys_run(uint64_t user_name) {
     // for the program it started. The id has to be taken HERE, inside the syscall,
     // because `current` is only the requesting task while its own syscall is being
     // served; by the next timer tick it means somebody else.
-    if (task_create_from_file(name, scheduler_current_id()) < 0) {
+    int id = task_create_from_file(name, scheduler_current_id(), (int)in_fd, (int)out_fd);
+    if (id < 0) {
         // REPORT THE FREE FRAME COUNT, not just the failure. A create can fail after
         // it has already built a page-table tree and mapped part of a program into
         // it, so "it did not start" and "it did not cost anything" are different
@@ -179,7 +356,10 @@ static uint64_t sys_run(uint64_t user_name) {
         print_string("\n");
         return SYSCALL_ERROR;
     }
-    return 0;
+    // Return the child's task id (always >= 1: id 0 is the boot task). The shell uses
+    // it to tell one pipeline stage from another when it reaps them; an ordinary
+    // `run` ignores it and only checks for the SYSCALL_ERROR failure value.
+    return (uint64_t)id;
 }
 
 // SYS_READFILE: read a whole file off the disk into a ring-3 buffer.
@@ -271,6 +451,42 @@ static uint64_t sys_freecount(void) {
     return (uint64_t)fat32_free_count();
 }
 
+// SYS_STAT: report the size in bytes of a named file, so a caller can size a
+// buffer before it reads.
+//   RDI = user pointer to a NUL-terminated 8.3 filename,
+//   RSI = user pointer to a uint64_t the size is written into.
+// BOTH pointers are untrusted. The filename is copied in and length-capped exactly
+// like SYS_RUN's. The out_size pointer is a WRITE TARGET, not just a read: the
+// kernel writes eight bytes through it, so the whole [ptr, ptr+8) range is bounds-
+// checked with user_range_ok, the same check SYS_READFILE uses on its destination
+// buffer. Checking only the start pointer would let a crafted pointer sitting just
+// below USER_REGION_END have the kernel write a uint64_t off the end of the region
+// and into kernel pages. Returns 0 on success, SYSCALL_ERROR if the file is not
+// found (or the name is not 8.3, or it names a directory) — fat32_stat folds those
+// into one -1, and the shell tells "no such file" apart from "too big" by the size
+// it gets back, not by which of these failed.
+//
+// DOES NOT BLOCK, so unlike SYS_READKEY and SYS_WAIT it has no RAX-discipline
+// problem: it computes an answer and returns it through the dispatcher normally,
+// and rax is never left holding the call number across a reschedule.
+static uint64_t sys_stat(uint64_t user_name, uint64_t user_size) {
+    char name[SYSCALL_NAME_MAX];
+    if (copy_user_string(user_name, name, sizeof(name)) != 0) {
+        print_string("syscall: SYS_STAT rejected a bad filename pointer\n");
+        return SYSCALL_ERROR;
+    }
+    if (!user_range_ok(user_size, sizeof(uint64_t))) {
+        print_string("syscall: SYS_STAT rejected an out-of-bounds size pointer\n");
+        return SYSCALL_ERROR;
+    }
+    uint32_t size = 0;
+    if (fat32_stat(name, &size) != 0) {
+        return SYSCALL_ERROR;   // not found, not 8.3, or a directory
+    }
+    *(uint64_t *)user_size = size;   // validated writable above; zero-extends
+    return 0;
+}
+
 // SYS_EXIT: end the calling task with the status in RDI.
 //   RDI = exit status, masked to 0..255 by task_exit.
 // This used to halt the machine, because there was no way for a task to stop
@@ -296,7 +512,18 @@ static void sys_exit(registers_t *regs) {
 // path task_wait leaves RAX alone so the re-armed `int 0x50` still reads SYS_WAIT
 // out of it. RAX is written only on the two paths that have an answer. See the long
 // comment on sys_readkey above, and task_wait in kernel/scheduler.c.
+//
+// RDI, if nonzero, is a user pointer to a uint64_t that receives the id of the child
+// that exited, so a caller reaping several children (a shell running a pipeline) can
+// tell which one finished. It is validated HERE, because syscall.c owns
+// user_range_ok, before task_wait writes through it on the answering path; 0 means
+// "do not report the id". This re-validates on every re-issue after a block, since
+// RDI is preserved across the re-arm.
 static void sys_wait(registers_t *regs) {
+    if (regs->rdi != 0 && !user_range_ok(regs->rdi, sizeof(uint64_t))) {
+        regs->rax = SYSCALL_ERROR;
+        return;
+    }
     task_wait(regs);
 }
 
@@ -308,7 +535,7 @@ void syscall_handler(registers_t *regs) {
             sys_exit(regs);   // does not return; deliberately not `regs->rax = ...`
             break;
         case SYS_WRITE:
-            regs->rax = sys_write(regs->rdi);
+            sys_write(regs);   // writes rax itself, and must not on the block path
             break;
         case SYS_READKEY:
             sys_readkey(regs);   // writes rax itself, and must not on the block path
@@ -317,7 +544,7 @@ void syscall_handler(registers_t *regs) {
             regs->rax = sys_list(regs->rdi, regs->rsi);
             break;
         case SYS_RUN:
-            regs->rax = sys_run(regs->rdi);
+            regs->rax = sys_run(regs->rdi, regs->rsi, regs->rdx);
             break;
         case SYS_READFILE:
             regs->rax = sys_readfile(regs->rdi, regs->rsi, regs->rdx);
@@ -330,6 +557,18 @@ void syscall_handler(registers_t *regs) {
             break;
         case SYS_FREECOUNT:
             regs->rax = sys_freecount();
+            break;
+        case SYS_STAT:
+            regs->rax = sys_stat(regs->rdi, regs->rsi);
+            break;
+        case SYS_READ:
+            sys_read(regs);   // writes rax itself, and must not on the block path
+            break;
+        case SYS_CLOSE:
+            regs->rax = sys_close(regs->rdi);
+            break;
+        case SYS_PIPE:
+            regs->rax = sys_pipe(regs->rdi);
             break;
         case SYS_WAIT:
             sys_wait(regs);   // writes rax itself, and must not on the block path

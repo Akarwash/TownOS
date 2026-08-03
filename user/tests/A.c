@@ -2,7 +2,7 @@
 //
 // Built as a standalone static ELF64 binary (see user/user.ld and the USER_*
 // rules in the Makefile), copied onto the FAT32 disk image as A.ELF, and loaded
-// at runtime by the kernel's ELF loader. It is NOT part of minios.bin: changing
+// at runtime by the kernel's ELF loader. It is NOT part of townos.bin: changing
 // this file and rebuilding A.ELF changes what the machine runs, with no kernel
 // rebuild.
 
@@ -26,7 +26,7 @@ static volatile unsigned long iterations;
 // linker script, not anything in the kernel.
 void _start(void) {
     for (unsigned long i = 0; i < A_ROUNDS; i++) {
-        sys_write("A");
+        sys_print("A");
         iterations++;
         user_delay();
     }

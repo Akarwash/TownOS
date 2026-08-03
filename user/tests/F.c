@@ -72,26 +72,26 @@ void _start(void) {
     }
 
     if (sys_writefile("FTEST.TXT", wbuf, F_SIZE) != 0) {
-        sys_write("F: write failed\n");
+        sys_print("F: write failed\n");
         sys_exit(F_WRITE_FAILED);
     }
 
     unsigned long n = sys_readfile("FTEST.TXT", rbuf, F_SIZE);
     if (n == (unsigned long)-1) {
-        sys_write("F: read failed\n");
+        sys_print("F: read failed\n");
         sys_exit(F_READ_FAILED);
     }
     if (n != F_SIZE) {
-        sys_write("F: length mismatch\n");
+        sys_print("F: length mismatch\n");
         sys_exit(F_LENGTH_MISMATCH);
     }
     for (unsigned long i = 0; i < F_SIZE; i++) {
         if (rbuf[i] != wbuf[i]) {
-            sys_write("F: content mismatch\n");
+            sys_print("F: content mismatch\n");
             sys_exit(F_CONTENT_MISMATCH);
         }
     }
 
-    sys_write("F: FTEST.TXT 16384 bytes written and verified\n");
+    sys_print("F: FTEST.TXT 16384 bytes written and verified\n");
     sys_exit(F_OK);
 }

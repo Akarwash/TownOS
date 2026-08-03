@@ -1,17 +1,42 @@
-# MiniOS project documentation
+# TownOS project documentation
 
-This is the factual documentation for MiniOS: what it is, how it is put together,
+This is the factual documentation for TownOS: what it is, how it is put together,
 how to build and run it, and why the load-bearing decisions were made. It is
 derived from the source, not from concepts. For the conceptual "how operating
 systems work" material, see [`../learnings/`](../learnings/README.md) instead.
 The two are kept separate on purpose: `docs/` states facts about this codebase,
 `learnings/` teaches ideas.
 
+## A note on the name
+
+The project was renamed from **MiniOS** to **TownOS**. That rename is deliberately
+finished in one direction only, and this note is here so the next person does not
+"finish" it the wrong way.
+
+**Live documentation carries the new name.** Everything whose job is to describe the
+project as it is now — this `docs/` tree, the top-level `README.md`, the code
+comments, and the strings the kernel prints — says TownOS, and should be corrected
+to TownOS the day any of it goes stale.
+
+**The records still say MiniOS, on purpose.** The architecture decision records in
+[`decisions/`](decisions/) and the entries in [`../CHANGELOG.md`](../CHANGELOG.md)
+keep the old name. Their whole value is in being a record of a moment: an ADR says
+what was decided *then*, under the name the project carried *then*, and a changelog
+entry says what shipped in a given release. Rewrite either to say TownOS and it now
+claims to have been written about a project that did not yet have that name — it
+forges the past into agreement with the present, which is the exact failure
+[`decisions/README.md`](decisions/README.md) freezes ADR bodies to avoid. A record
+that reads MiniOS under a dated heading is honest and datable; one retrofitted to
+TownOS is a claim nobody can check.
+
+So the split is not an unfinished chore. Correct the live pages forward; leave every
+ADR body and changelog entry exactly as it was written.
+
 ## Pages
 
 | Page | What it covers |
 |------|----------------|
-| [architecture.md](architecture.md) | What MiniOS is, the directory layout, the subsystem map, and control flow from `_start` to the event loop |
+| [architecture.md](architecture.md) | What TownOS is, the directory layout, the subsystem map, and control flow from `_start` to the event loop |
 | [building.md](building.md) | Toolchain and versions, install commands, how to build and run, and how to debug |
 | [reference/boot-sequence.md](reference/boot-sequence.md) | The 32 to 64 long-mode climb in `boot/boot.asm`, step by step |
 | [reference/memory-map.md](reference/memory-map.md) | Physical memory layout: load address, VGA buffer, identity-mapped region, page tables, stacks |
@@ -19,7 +44,9 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 | [reference/gdt.md](reference/gdt.md) | The kernel GDT and TSS: selector table, descriptor layouts, and the bootstrap-vs-kernel GDT split |
 | [reference/idt.md](reference/idt.md) | The IDT and interrupt entry path: gate format, PIC remap, the 48 stubs, dispatch, and EOI |
 | [reference/user-mode.md](reference/user-mode.md) | The drop to ring 3: the forged `iretq` frame, the ring-3 selectors and stack, the user bit ANDed down the page walk, and how the isolation is proven |
-| [reference/syscalls.md](reference/syscalls.md) | The `int 0x50` syscall gate: the single DPL 3 doorway, the register calling convention, the ten calls, and the untrusted-pointer checks |
+| [reference/syscalls.md](reference/syscalls.md) | The `int 0x50` syscall gate: the single DPL 3 doorway, the register calling convention, the fourteen calls, and the untrusted-pointer checks |
+| [reference/descriptors.md](reference/descriptors.md) | File descriptors: the per-task table, the console/pipe kinds, the 0-input/1-output convention, and the read/write/close/pipe calls |
+| [reference/pipes.md](reference/pipes.md) | Pipes: the ring buffer, the reader/writer counts, the block/wake rules, and how end-of-file works (why empty is not EOF, and why closing wakes) |
 | [reference/scheduling.md](reference/scheduling.md) | The round-robin preemptive scheduler: the interrupt frame as the task, the forged frame for a never-run task, the in-place frame overwrite and CR3 load, the task states, the zombie sweeper, and the startup race |
 | [reference/heap.md](reference/heap.md) | The kernel heap: header/footer boundary tags, split/coalesce, the frame-allocator seam, and interrupt safety |
 | [reference/disk.md](reference/disk.md) | The polled ATA PIO disk driver: the 512-byte block model, the port layout, the read and write flows, and the driver-vs-filesystem layering |
@@ -53,17 +80,19 @@ The two are kept separate on purpose: `docs/` states facts about this codebase,
 - [0018 — Process lifecycle: exit, wait, and two-phase death](decisions/0018-process-lifecycle-exit-and-wait.md) — Let a task end: `SYS_EXIT` takes a status and does paperwork only (mark `TASK_ZOMBIE`, wake the parent), a sweeper in `schedule()` frees the address space of any zombie that is not the running task, and the parent frees the tombstone at `SYS_WAIT`; `run` now waits and reports an exit status.
 - [0019 — Keyboard modifier state in the driver](decisions/0019-keyboard-modifier-state-in-the-driver.md) — Track shift and caps lock in `drivers/keyboard.c` and keep resolved ASCII in the ring buffer, rather than pushing raw scancodes for ring 3 to decode; uppercase and the shifted symbols become typeable, and a modifier press pushes nothing and wakes nobody.
 - [0020 — A writable FAT32 filesystem](decisions/0020-writable-fat32.md) — Make `fs/fat32.c` writable: whole-file writes with no handles, replace-not-overwrite with a strict write-before-publish ordering (new chain and data first, one directory-entry write as the commit point, old chain freed last), delete in the same rung, every FAT copy written, FSInfo invalidated rather than maintained, and non-8.3 names rejected rather than mangled.
+- [0021 — Expose `fat32_stat` to ring 3 as `SYS_STAT`](decisions/0021-sys-stat.md) — Add an eleventh syscall that reports a file's size without reading it, so the shell's `read` can stat first and tell a missing file (`read: no such file: X`) from one too big (`read: X is N bytes, the buffer holds M`) from a disk error; removes the unreachable truncation notice, and takes no partial reads and no offset (that would change `SYS_READFILE`).
+- [0022 — File descriptors and pipes](decisions/0022-file-descriptors-and-pipes.md) — Give every task a fixed table of open destinations, make pipes one kind of entry in it, reshape `SYS_WRITE` to `(fd, buf, len)` and add `SYS_READ`/`SYS_CLOSE`/`SYS_PIPE`, pass ends to children through `SYS_RUN`, and teach the shell `|`. Includes the EOF argument (empty is not finished; closing must wake) and a catalogue of the six silent ways pipes hang or corrupt (B1–B6).
 
 ## Status
 
-MiniOS **builds, links, and boots to an interactive shell** under QEMU, reads and
+TownOS **builds, links, and boots to an interactive shell** under QEMU, reads and
 writes files by name on a FAT32 disk, and loads and runs its ring-3 programs from
 that disk as ELF64 binaries. The shell itself is one of those ring-3 programs.
 
 - All C sources compile cleanly under `-Wall -Wextra`.
 - All assembly sources assemble cleanly with `nasm -f elf64`.
-- The kernel links into `minios.elf` and is repackaged as a Multiboot-loadable
-  `minios.bin`. `make run` boots it under QEMU: the banner appears, the timer ticks
+- The kernel links into `townos.elf` and is repackaged as a Multiboot-loadable
+  `townos.bin`. `make run` boots it under QEMU: the banner appears, the timer ticks
   on IRQ 0, the keyboard delivers keypresses on IRQ 1, and `SHELL.ELF` runs at
   ring 3, dispatching `list`, `read`, `write`, `delete`, `free`, `run`, `help`,
   `clear`, and `return` through the syscall gate. With nobody typing, the shell

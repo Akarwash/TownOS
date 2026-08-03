@@ -12,9 +12,11 @@
 // "returns" into a ring-3 context that never actually ran before.
 
 // RFLAGS for the ring-3 program: bit 1 is reserved-and-always-1, bit 9 (IF) is
-// the interrupt flag. IF MUST stay set — MiniOS has no scheduler, so if we
-// entered ring 3 with interrupts masked the timer and keyboard would go silent
-// and the machine would appear wedged.
+// the interrupt flag. IF MUST stay set. There is a round-robin scheduler now
+// (since chapter 12), and a task entered with interrupts masked would never be
+// preempted: the timer IRQ that drives every context switch could not fire, so
+// that task would own the CPU forever and no other task would ever run, with the
+// timer and keyboard silent and the machine apparently wedged.
 #define USER_MODE_RFLAGS  0x202
 
 // Top of the ring-3 stack. The stack lives in PD[3] (0x600000-0x7FFFFF, marked

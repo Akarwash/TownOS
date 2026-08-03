@@ -21,13 +21,13 @@
 #include "../userlib.h"
 
 void _start(void) {
-    sys_write("D: starting E\n");
+    sys_print("D: starting E\n");
 
     // Not checked, deliberately: if E.ELF is missing the kernel says so and this
     // program has nothing useful to add. D's job is to leave, not to supervise.
-    sys_run("E.ELF");
+    sys_run("E.ELF", -1, -1);   // fresh console for E; D orphans it and does not wait
 
-    sys_write("D: not waiting, exiting\n");
+    sys_print("D: not waiting, exiting\n");
 
     // NO sys_wait() HERE. See the comment at the top of this file before changing
     // anything about that.

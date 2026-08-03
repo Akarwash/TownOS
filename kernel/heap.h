@@ -33,4 +33,14 @@ void   heap_print_stats(void);
 size_t heap_avail_count(void);   // number of blocks on the available list
 size_t heap_total_bytes(void);   // current heap size in bytes (grows on demand)
 
+// Bytes currently allocated: the sum of the payload sizes of every in-use block,
+// found by walking the heap block by block rather than trusting a cached counter.
+// This is the leak metric that can see SMALL objects. heap_total_bytes only reports
+// the slab size, so it catches a leaked pipe_t (~4KB, twenty of which outgrow the
+// 64KB slab) but is blind to a leaked file_t (~24 bytes); this sums the used blocks
+// directly, so a handful of small leaks show up. Slow and off every allocation path,
+// exactly like frame_free_count and fat32_free_count. Returns (uint64_t)-1 if the
+// heap walk fails to terminate (a corrupt heap), rather than looping forever.
+uint64_t heap_used_bytes(void);
+
 #endif

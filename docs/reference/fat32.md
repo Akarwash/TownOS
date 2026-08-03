@@ -1,6 +1,6 @@
 # The FAT32 filesystem
 
-This is the factual description of MiniOS's filesystem layer, read from
+This is the factual description of TownOS's filesystem layer, read from
 `fs/fat32.c` and `fs/fat32.h`. It is read/write FAT32: it can list the root
 directory, read a file by name, and create, replace, or delete a file by name. For
 why 8.3 names and the first FAT copy for reads, see
@@ -45,7 +45,7 @@ block 0                                                    end of volume
 - **Reserved area**: `reserved_sector_count` blocks, starting with the boot
   sector. Its length is read from the BPB, not assumed.
 - **FAT copies**: `num_fats` identical copies, `sectors_per_fat` blocks each,
-  back to back. MiniOS reads the first only.
+  back to back. TownOS reads the first only.
 - **Data area**: everything after, carved into clusters.
 
 On the image `tools/mkdisk.sh` produces (64MB, formatted by `mformat`), those
@@ -283,7 +283,7 @@ directory-entry writers.
 and one entry is four bytes — and it writes the entry into **every** copy of the
 FAT, not just the first. The format keeps `num_fats` identical copies for
 redundancy; a reader consults one, but a writer that updates only one leaves the
-copies disagreeing. That bug is invisible inside MiniOS (it reads the first copy, so
+copies disagreeing. That bug is invisible inside TownOS (it reads the first copy, so
 it stays self-consistent) and shows up only when the host's tools cross-check the
 copies, which makes it the single most likely and least visible bug in the whole
 rung. The writer also preserves the reserved top four bits of the existing entry
@@ -361,7 +361,7 @@ clusters (corruption). A zero-length file owns no clusters, so the free is skipp
 ### FSInfo
 
 The FSInfo sector caches a free-cluster count and a next-free hint, both of which a
-write makes stale. MiniOS does not maintain them — that is a caching problem, and a
+write makes stale. TownOS does not maintain them — that is a caching problem, and a
 subtly wrong cache is worse than none — so after every write and delete it sets both
 to the format's `0xFFFFFFFF` "unknown, recount" value and lets anything that cares
 recompute. It verifies all three FSInfo signatures (`0x41615252` at offset 0,
@@ -384,6 +384,7 @@ command.
 ```c
 int fat32_init(void);
 int fat32_list_root(void);
+int fat32_stat(const char *name, uint32_t *out_size);
 int fat32_read_file(const char *name, void *buf, uint32_t bufsize,
                     uint32_t *out_size);
 int fat32_write_file(const char *name, const void *buf, uint32_t len);
@@ -393,7 +394,15 @@ uint32_t fat32_free_count(void);
 
 `fat32_init` must be called once, after `disk_init`, and returns -1 if the disk
 is unreadable or does not hold a FAT32 volume it can trust. `fat32_list_root`
-prints each entry's name and either its size in bytes or `<DIR>`.
+prints each entry's name and either its size in bytes or `<DIR>`. `fat32_stat`
+reports a file's size straight from its directory entry, reading none of its
+contents, and returns -1 if the name is not 8.3, is not found, or names a
+directory. It shares one root-directory lookup path with `fat32_read_file` and
+exists because reading a file means sizing a buffer for it first: a caller with no
+way to ask the size is left with a fixed buffer assumed to be big enough, which is
+a limit that fails quietly the day a file outgrows it. It is now reachable from
+ring 3 through `SYS_STAT`, which is what lets the shell's `read` tell a missing
+file from one too big for its buffer ([decision 0021](../decisions/0021-sys-stat.md)).
 `fat32_read_file` takes an 8.3 name (case insensitive) from the root directory,
 fills `buf`, writes the real byte count to `out_size`, and returns -1 if the name
 is not 8.3, is not found, names a directory, does not fit in `bufsize`, or the
@@ -410,10 +419,10 @@ clusters on the volume.
   [decision 0020](../decisions/0020-writable-fat32.md).
 - **No subdirectory creation, no timestamps.** The root directory can grow, but
   there is no `mkdir` and no `.`/`..`; and a written entry's date and time fields are
-  left zero (MiniOS keeps no clock), so the host's tools show a written file as
+  left zero (TownOS keeps no clock), so the host's tools show a written file as
   `1980-00-00`.
 - **No long filenames.** LFN entries are skipped, so a file with a long name is
-  invisible to MiniOS even though the host can see it. A name that will not fit 8.3
+  invisible to TownOS even though the host can see it. A name that will not fit 8.3
   is rejected outright rather than mangled into a numbered alias, since such an alias
   would be a file this layer could never see again.
 - **No paths.** Lookups are root-directory only. The walk takes any starting

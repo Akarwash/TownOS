@@ -24,7 +24,7 @@ static volatile unsigned long iterations;
 
 void _start(void) {
     for (unsigned long i = 0; i < E_ROUNDS; i++) {
-        sys_write("E");
+        sys_print("E");
         iterations++;
         user_delay();
     }

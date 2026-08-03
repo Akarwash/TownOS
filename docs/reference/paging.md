@@ -1,6 +1,6 @@
 # Per-process paging reference
 
-Each task in MiniOS runs in its own page-table tree, loaded into CR3 on every
+Each task in TownOS runs in its own page-table tree, loaded into CR3 on every
 context switch, so two tasks can use the same virtual address for different
 physical memory. This page documents how a tree is built, why the kernel is
 mapped in every one, the 4KB/2MB split, and the one invariant the whole scheme
@@ -71,7 +71,7 @@ touch. `paging_switch(as)` loads `as->pml4_phys` into CR3.
 ### By value, not by reference: why
 
 The obvious approach is to share the kernel half BY REFERENCE (point every tree's
-`PML4[0]` at the one boot `pdpt_table`/`pd_table`). It does not fit MiniOS's
+`PML4[0]` at the one boot `pdpt_table`/`pd_table`). It does not fit TownOS's
 layout. Everything hangs off a single branch, `PML4[0] -> PDPT[0] -> pd_table`,
 and the ring-3 region lives INSIDE that same `pd_table` (user code is
 `pd_table[2]`, user stack `pd_table[3]`). Sharing `pd_table` by reference would
@@ -212,7 +212,7 @@ to the scheduler, which may need to keep it as a tombstone).
 
 CR3 takes a PHYSICAL address. Everything below 1GB is identity mapped, so
 `as->pml4_phys` doubles as both the physical base of the PML4 and a writable
-virtual pointer to it. Writing CR3 also flushes the TLB, because MiniOS marks no
+virtual pointer to it. Writing CR3 also flushes the TLB, because TownOS marks no
 page `PG_GLOBAL`, so no entries survive the write. That is exactly what drops the
 outgoing task's stale user translations on a switch, for free, with no explicit
 `invlpg`.

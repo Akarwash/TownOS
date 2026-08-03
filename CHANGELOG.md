@@ -32,6 +32,101 @@ corrected on sight, or the source.
 
 ### Added
 
+- File descriptors and pipes, so one program's output can be another's input and the
+  shell can run `run A | run B | run C`. Every task gains a fixed table of open
+  destinations (`task_t.fds[MAX_FDS]`, `MAX_FDS` = 8) in a new `kernel/file.{h,c}`: a
+  `file_t` is `{kind, pipe, writable}`, **owned by exactly one slot in one task with
+  no reference count** — the only shared object is the `pipe_t`, whose reader/writer
+  counts are the single place a pipe end is tallied, so there is nothing for a second
+  count to drift against. fd 0 is a console input end (reads the keyboard) and fd 1 a
+  console output end (writes the screen) by a convention the kernel enforces via the
+  `writable` flag, not the hardware. `SYS_WRITE` (1) is reshaped from
+  `(str)`-prints-a-string to `(fd, buf, len)`-returns-a-count-that-may-be-less; three
+  syscalls join it — `SYS_READ` (11), `SYS_CLOSE` (12), `SYS_PIPE` (13) — for
+  fourteen. Counted buffers are copied through a 4096-byte kernel staging buffer
+  (`SYSCALL_IO_MAX`), so a transfer larger than that comes back partial and the caller
+  loops; `user_range_ok` now guards `SYS_WRITE`/`SYS_READ` too, and the write-target
+  pointers of `SYS_STAT`/`SYS_PIPE`/`SYS_WAIT` are bounds-checked before the kernel
+  writes through them. A new `kernel/pipe.{h,c}` is the keyboard driver's ring buffer
+  (one slot left unused so empty is distinguishable from full) plus a `readers` and a
+  `writers` count: `pipe_write` blocks on a full pipe with a live reader
+  (backpressure) and errors on a pipe with no reader, `pipe_read` blocks on an empty
+  pipe with a live writer and returns 0 (EOF) on an empty pipe with no writer —
+  **empty is not finished; empty with no writer is**. Two new `wait_reason_t` values,
+  `WAIT_PIPE_READ`/`WAIT_PIPE_WRITE`, woken by a write, a read, or the close of the
+  last end on the other side; **`close_fd` (via `file_close`) wakes on a count reaching
+  zero**, because a reader parked on an empty pipe whose last writer merely closes
+  would otherwise wait forever for an EOF it cannot observe. `sys_read`/`sys_write`
+  take the register pile and write RAX themselves, leaving it untouched on the block
+  path (the re-armed `int 0x50` reads the syscall number back out of RAX; a stray 0 is
+  `SYS_EXIT`), dispatched as bare statements. A child acquires a descriptor only at
+  `SYS_RUN`, now `(name, in_fd, out_fd)` (RSI/RDX, -1 = fresh console):
+  `task_create_from_file` validates the ends against the caller's table (in a read
+  end, out a write end), `file_dup`s each into a new `file_t` of the child's own
+  pointing at the same `pipe_t`, and swaps it in for the default console — all before
+  the task is registered, so no failure has to unwind a schedulable task, and every
+  failure undoes the inherited-end counts. `task_exit` closes every descriptor a task
+  holds before it becomes a zombie, which is what makes a pipe writer's exit deliver
+  EOF downstream. The shell (`user/shell.c`) splits a line on `|` into up to four
+  stages, creates a pipe per join, starts each stage, and **closes its own copies of
+  each pipe end immediately** (keeping them would leave `writers` > 0 forever and hang
+  the pipeline), closing whatever it opened on every early return so descriptors do
+  not leak into its 8-slot table across runs. It waits for all N stages and reports
+  the last stage's status (`$?`), matched by id: `SYS_RUN` now returns the child's
+  task id and `SYS_WAIT` gained an optional out-pointer (RDI) that reports which child
+  exited — extending call 6 rather than adding a fifteenth. All ring-3 programs
+  migrated at once: the old single-argument `sys_write` became `sys_print` (a
+  write-until-done loop), and every call site moved. Two new fixtures,
+  `user/tests/COUNT.c` (reads fd 0 to EOF, prints the byte count — the downstream half
+  of the EOF condition) and `user/tests/UPPER.c` (a streaming uppercase middle stage
+  with a pipe on both sides). Verified under QEMU: `run a.elf | run count.elf` prints
+  `20`, `run a.elf | run upper.elf | run count.elf` and a four-stage pipeline print
+  `20`, ten consecutive three-stage runs hold the free-frame count and the kernel heap
+  steady, 16KB (`F.c`) through a 4096-byte pipe into `count.elf` reports `16384`
+  (proving the writer blocked and resumed rather than dropping bytes), six idle seconds
+  under `-d int` move the `int 0x50` count by zero, and deliberately removing the
+  shell's write-end close made the pipeline hang with no output (the classic bug),
+  restored by putting it back. Builds warning-clean beyond the pre-existing RWX
+  warning. The decision, the EOF argument, and a catalogue of the six silent ways pipes
+  hang or corrupt (B1–B6) are in `docs/decisions/0022-file-descriptors-and-pipes.md`;
+  see also `docs/reference/descriptors.md`, `docs/reference/pipes.md`, and the updated
+  `docs/reference/syscalls.md`, `shell.md`, and `scheduling.md`.
+
+- `SYS_STAT` (10), the eleventh syscall: report a file's size without reading it,
+  so a caller can size a buffer before it reads. It wraps `fat32_stat`, which had
+  existed since the read-only rung but had never been reachable from ring 3, and it
+  takes `RDI` = filename, `RSI` = `uint64_t *out_size`, returning 0 or
+  `SYSCALL_ERROR` when the file is not found (a directory or a non-8.3 name folds
+  into the same error). Both pointers are untrusted: the filename is copied in and
+  length-capped like `SYS_RUN`'s, and the **`out_size` pointer is a write target**,
+  so its whole `[ptr, ptr+8)` range is bounds-checked with `user_range_ok` — the
+  same check `SYS_READFILE` applies to its destination — rather than only its start,
+  which would let a pointer just below `USER_REGION_END` have the kernel write a
+  `uint64_t` into kernel pages. Like the write-side calls it **does not block**, so
+  it has none of the RAX-discipline problem `SYS_READKEY`/`SYS_WAIT` carry. Added to
+  `include/syscalls.h`, `kernel/syscall.c`, and `user/userlib.h` (`sys_stat`). This
+  fixes two problems the writable-FAT32 rung's `HUGE.TXT` (40981 bytes) had exposed.
+  `fat32_read_file` refuses a file larger than the caller's buffer outright, so
+  `read HUGE.TXT` printed `read: cannot read huge.txt` — and that one line was three
+  different failures (absent, too big, disk error) wearing one message. `cmd_read`
+  (`user/shell.c`) now **stats first, then decides**: not found →
+  `read: no such file: X`; found but larger than the buffer →
+  `read: X is N bytes, the buffer holds M` (both numbers, e.g. `read: HUGE.TXT is
+  40981 bytes, the buffer holds 32767`); otherwise read and print as before, with
+  the old `read: cannot read X` now reachable only for a genuine disk error. There
+  are **no partial reads and no offset** — `read` still delivers the whole file or
+  none, it just says why when it declines; a prefix would need an offset on
+  `SYS_READFILE`, a rung of its own. This also retired the shell's unreachable
+  "showing the first N bytes, the file may be longer" notice (`TODO(read-truncation)`,
+  removed from `user/shell.c` and `docs/reference/shell.md`), which could only ever
+  fire for a file of exactly the buffer size, which is complete. Verified under QEMU:
+  `read HUGE.TXT` reports `read: HUGE.TXT is 40981 bytes, the buffer holds 32767`,
+  `read NOSUCH.TXT` reports `read: no such file: NOSUCH.TXT` (distinct from the
+  too-big case), and `read HELLO.TXT` and `read BIG.TXT` still print their contents
+  whole. Builds warning-clean. See `docs/decisions/0021-sys-stat.md`,
+  `docs/reference/syscalls.md`, `docs/reference/shell.md`, and
+  `docs/reference/fat32.md`.
+
 - Writing to the FAT32 filesystem: files can now be created, replaced, and deleted
   by name, and what the kernel writes survives a reboot. `fs/fat32.c` gains the
   whole write side. `fat32_set_entry` writes a FAT entry into **every** copy of the

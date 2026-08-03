@@ -1,5 +1,5 @@
 ; ============================================
-; MiniOS Boot Entry Point (Multiboot compliant)
+; TownOS Boot Entry Point (Multiboot compliant)
 ; ============================================
 
 ; --- Multiboot header constants ---

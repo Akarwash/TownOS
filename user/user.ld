@@ -1,9 +1,9 @@
-/* Linker script for a MiniOS user program.
+/* Linker script for a TownOS user program.
  *
  * A user program is now a SEPARATE binary from the kernel: it is compiled and
  * linked on its own, ends up as an ELF64 file on the FAT32 disk image, and is
  * read and loaded at runtime by kernel/elf.c. Nothing here is linked into
- * minios.bin. See docs/reference/elf-loading.md.
+ * townos.bin. See docs/reference/elf-loading.md.
  *
  * Load address 0x400000 (4MB), the start of the ring-3 region
  * (USER_REGION_START in kernel/memory.h). There is no relocation in the loader,
@@ -16,7 +16,7 @@ OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
 /* Two load segments so the loader has something real to distinguish. Only the
- * write bit is actually enforceable in the page tables (MiniOS does not enable
+ * write bit is actually enforceable in the page tables (TownOS does not enable
  * NX), so R+X and R mean the same thing to the hardware here; what matters is
  * that the text segment is mapped WITHOUT the writable bit and the data segment
  * with it. */

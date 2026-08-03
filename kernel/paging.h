@@ -58,7 +58,7 @@ int paging_map_page(address_space_t *as, uint64_t virt, uint64_t phys, uint64_t 
 // Nothing fails at the call. The frames are then handed out again to some later
 // allocation, which writes over the page tables still in use, and the machine dies
 // somewhere else entirely, on an unrelated line, tens of seconds later. Switch CR3
-// away first (in MiniOS that means letting schedule() move to another task) and
+// away first (in TownOS that means letting schedule() move to another task) and
 // only then destroy.
 //
 // It deliberately does NOT free the shared kernel mappings this tree points at:

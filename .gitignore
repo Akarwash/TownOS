@@ -3,8 +3,8 @@
 
 # Build artifacts
 *.o
-minios.elf
-minios.bin
+townos.elf
+townos.bin
 
 # User programs, built separately and copied onto the disk image. The second
 # pattern is needed as well as the first: `user/*.ELF` does NOT match a
@@ -25,3 +25,8 @@ disk.img.known-good
 # Generated rather than committed: it is 40KB of padding whose entire content is
 # described by three lines of the rule that writes it.
 HUGE.TXT
+
+# Per-tranche scratch checklist, never committed and deleted when the tranche ends.
+LOOSE-ENDS-TASK.md
+FD-PIPES-TASK.md
+PIPE-FOLLOWUPS-TASK.md

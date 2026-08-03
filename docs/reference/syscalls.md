@@ -1,17 +1,21 @@
 # System call reference
 
-MiniOS lets a ring-3 program request kernel services through a single software
+TownOS lets a ring-3 program request kernel services through a single software
 interrupt, `int 0x50`. This page documents the gate, the calling convention, the
-ten calls that exist, and the pointer checks that guard the untrusted ones. Read
+fourteen calls that exist, and the pointer checks that guard the untrusted ones. Read
 from `kernel/syscall.c`, `kernel/isr_stubs.asm`, `kernel/isr.c`,
 `include/syscalls.h`, `drivers/keyboard.c`, and `user/userlib.h`. For the
 rationale and the alternatives considered, see
 [decision 0007](../decisions/0007-syscalls-via-int-0x50.md). The calls the
-interactive shell needs (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`, and
-now `SYS_WRITEFILE`, `SYS_DELETE`, `SYS_FREECOUNT`) are covered here and in
-[shell.md](shell.md); see
-[decision 0016](../decisions/0016-interactive-shell.md) and
-[decision 0020](../decisions/0020-writable-fat32.md).
+interactive shell needs (`SYS_READKEY`, `SYS_LIST`, `SYS_RUN`, `SYS_READFILE`,
+`SYS_WRITEFILE`, `SYS_DELETE`, `SYS_FREECOUNT`, and now `SYS_STAT`) are covered here
+and in [shell.md](shell.md); see
+[decision 0016](../decisions/0016-interactive-shell.md),
+[decision 0020](../decisions/0020-writable-fat32.md), and
+[decision 0021](../decisions/0021-sys-stat.md). The descriptor calls (`SYS_WRITE` and
+`SYS_READ` on a fd, `SYS_CLOSE`, `SYS_PIPE`) have their own pages,
+[descriptors.md](descriptors.md) and [pipes.md](pipes.md); see
+[decision 0022](../decisions/0022-file-descriptors-and-pipes.md).
 
 ## The doorway
 
@@ -55,15 +59,19 @@ not do (kernel pages are not user-readable).
 | Number | Name | Arguments | Returns | Effect |
 |--------|------|-----------|---------|--------|
 | 0 | `SYS_EXIT` | RDI = exit status | does not return | Ends the calling task with that status. |
-| 1 | `SYS_WRITE` | RDI = pointer to a NUL-terminated string | 0 on success, `(uint64_t)-1` if rejected | Prints the string via the VGA driver. |
+| 1 | `SYS_WRITE` | RDI = fd, RSI = buffer, RDX = length | bytes written (may be < length), or -1 | Writes the counted buffer to that descriptor (screen, or a pipe). |
 | 2 | `SYS_READKEY` | none | one character (never 0) | Pops one key from the keyboard ring buffer, sleeping the caller until one arrives. |
 | 3 | `SYS_LIST` | RDI = buffer, RSI = size | number of names, or -1 | Writes the root directory's file names into the buffer, newline-separated. |
-| 4 | `SYS_RUN` | RDI = filename pointer | 0 on success, -1 on failure | Loads and starts the named program as a new task. |
+| 4 | `SYS_RUN` | RDI = filename, RSI = in_fd, RDX = out_fd (-1 = fresh console) | child's task id, or -1 | Loads and starts the named program, giving it those descriptors as fd 0/1. |
 | 5 | `SYS_READFILE` | RDI = filename, RSI = buffer, RDX = size | bytes read, or -1 | Reads a whole file into the buffer. |
-| 6 | `SYS_WAIT` | none | a child's exit status (0..255), or -1 | Blocks until any child of the caller exits. |
+| 6 | `SYS_WAIT` | RDI = `uint64_t *out_id` or 0 | a child's exit status (0..255), or -1 | Blocks until any child exits; reports its id through out_id when nonzero. |
 | 7 | `SYS_WRITEFILE` | RDI = filename, RSI = buffer, RDX = length | 0 on success, -1 on failure | Creates or wholly replaces a file with the buffer's bytes. |
 | 8 | `SYS_DELETE` | RDI = filename | 0 on success, -1 on failure | Deletes a file from the root directory. |
 | 9 | `SYS_FREECOUNT` | none | free-cluster count | Reports how many clusters on the volume are free. |
+| 10 | `SYS_STAT` | RDI = filename, RSI = `uint64_t *out_size` | 0 on success, -1 if not found | Reports a file's size without reading it. |
+| 11 | `SYS_READ` | RDI = fd, RSI = buffer, RDX = length | bytes read, 0 at EOF, or -1 | Reads from that descriptor (keyboard, or a pipe); blocks when there is nothing yet. |
+| 12 | `SYS_CLOSE` | RDI = fd | 0, or -1 on a bad fd | Closes the descriptor; a pipe end's close may wake a peer or free the pipe. |
+| 13 | `SYS_PIPE` | RDI = `int[2]` out | 0 (writes `[read_fd, write_fd]`), or -1 | Creates a pipe and puts its two ends in the caller's table. |
 
 `SYS_EXIT` **ends the calling task**, and no longer halts the machine. That was
 what it meant when there was no scheduler and no parent to return to; now the task
@@ -83,9 +91,12 @@ scheduler's sweeper and from the parent's `SYS_WAIT`. See
 [scheduling.md](scheduling.md) and
 [decision 0018](../decisions/0018-process-lifecycle-exit-and-wait.md).
 
-`SYS_WAIT` is **any-child, not `waitpid`**. It takes no argument: a caller with
-several children is told about whichever it finds finished first and cannot ask
-about a particular one. If a finished child is already waiting, it returns that
+`SYS_WAIT` is **any-child, not `waitpid`**. Its one argument (`RDI`) is only an
+optional out-pointer for the id of whichever child exited, not a way to name one to
+wait for: a caller with several children is still told about whichever it finds
+finished first and cannot ask about a particular one — it just learns, afterwards,
+which one that was. (A shell running a pipeline uses that to match the reaped child
+to its last stage.) If a finished child is already waiting, it returns that
 child's status immediately and frees the tombstone; if the caller has children but
 none has finished, it blocks with `WAIT_CHILD` until one exits; if the caller has
 no children at all, it returns `(uint64_t)-1` rather than blocking forever on
@@ -141,56 +152,57 @@ count one layer up. **None of the three blocks**, so unlike `SYS_READKEY` and
 `SYS_WAIT` none has the RAX-discipline problem below: each computes an answer and
 returns it through the dispatcher normally.
 
+`SYS_STAT` reports a file's size without reading it, wrapping `fat32_stat`
+([decision 0021](../decisions/0021-sys-stat.md)). It is what lets the shell's
+`read` ask how big a file is before it commits a buffer, so it can tell a missing
+file from one too large for the buffer and report the size instead of a bare
+failure. Its `out_size` pointer is a **write target**: the kernel writes a
+`uint64_t` through it, so the whole `[ptr, ptr+8)` range is bounds-checked with
+`user_range_ok` exactly as `SYS_READFILE` checks its destination buffer — a
+start-only check would let a pointer just below `USER_REGION_END` have the kernel
+write off the end of the region. It returns `(uint64_t)-1` when the file is not
+found (a directory or a non-8.3 name folds into the same error), and like the write
+side it **does not block**, so it has no RAX-discipline problem.
+
 An **unknown syscall number** is not fatal. `syscall_handler` prints the offending
 number and returns `(uint64_t)-1` in RAX; a bad request from ring 3 must never
 fault or halt the kernel.
 
-## The untrusted pointer, and why the check is a stopgap
+## Untrusted pointers are bounded over their whole range
 
-`SYS_WRITE` receives a pointer from ring 3, and that pointer is **untrusted**. A
-ring-3 program could pass a kernel address and turn the kernel into a confused
-deputy, printing memory the program itself is not allowed to read.
-
-The current check is a stopgap and is documented as one. It confirms only that
-the *start* pointer falls inside the ring-3 region
-(`USER_REGION_START`..`USER_REGION_END`, i.e. 4-8M, the same constants
-`kernel/memory.c` reserves, exposed in `kernel/memory.h`). Anything outside is
-rejected with `(uint64_t)-1` and nothing is printed.
-
-What it does **not** do: it does not bound the string's *length*. A string that
-starts just below `USER_REGION_END` with no NUL terminator still walks out of the
-region and into kernel pages, and this check would not catch it. Proper
-validation means checking the whole `[ptr, ptr+len)` range against the caller's
-own mapped pages and capping the length, which needs per-process address-space
-tracking that does not exist yet. This is recorded as a TODO in
-`kernel/syscall.c` and in [../project-status.md](../project-status.md). Do not
-mistake the region check for real pointer validation.
-
-## The shell syscalls bound the whole range
-
-The four calls added for the shell take untrusted pointers too, and they do better
-than the `SYS_WRITE` stopgap: they bound the entire range, not just the start.
-`kernel/syscall.c` has two shared helpers.
+Every pointer these calls take comes from ring 3 and is **untrusted**: a program
+could pass a kernel address and turn the kernel into a confused deputy, reading or
+writing memory it is not allowed to. `kernel/syscall.c` has two shared helpers, and
+every call that takes a pointer uses one of them before it touches a byte.
 
 `user_range_ok(ptr, len)` confirms that all of `[ptr, ptr+len)` lies inside the
-ring-3 region before the kernel writes a byte through the pointer. It is careful
-about overflow: `ptr + len` can wrap on a crafted length and a wrapped sum compares
-as comfortably small, so `len` is checked against the room above `ptr`
-(`USER_REGION_END - ptr`) rather than by forming the sum. `SYS_LIST` and
-`SYS_READFILE` bound their destination buffers with it.
+ring-3 region (`USER_REGION_START`..`USER_REGION_END`, i.e. 4-8M, the constants
+`kernel/memory.c` reserves). It is careful about overflow: `ptr + len` can wrap on a
+crafted length and a wrapped sum compares as comfortably small, so `len` is checked
+against the room above `ptr` (`USER_REGION_END - ptr`) rather than by forming the sum.
+`SYS_WRITE` and `SYS_READ` bound their counted buffers with it — and copy them through
+a kernel staging buffer, since a counted buffer may contain zero bytes and need not be
+NUL-terminated, so `copy_user_string` would be wrong for it. `SYS_LIST`,
+`SYS_READFILE`, and `SYS_WRITEFILE` bound theirs. The **write-target pointers** —
+`SYS_STAT`'s `out_size`, `SYS_PIPE`'s `int[2]`, and `SYS_WAIT`'s `out_id` — are bounded
+the same way before the kernel writes through them, which is not just a read check: a
+pointer just below `USER_REGION_END` could otherwise have the kernel write off the end
+of the region.
 
-`copy_user_string(ptr, dst, cap)` copies a NUL-terminated string in from ring 3
-with a length cap, so a string with no terminator cannot walk off the region: it
-bounds-checks the start pointer, then copies until a NUL, until the cap, or until
-`USER_REGION_END`, whichever comes first, and always NUL-terminates. `SYS_RUN` and
-`SYS_READFILE` copy their filenames in with it.
+`copy_user_string(ptr, dst, cap)` copies a NUL-terminated string in from ring 3 with a
+length cap, so a string with no terminator cannot walk off the region: it bounds-checks
+the start pointer, then copies until a NUL, until the cap, or until `USER_REGION_END`,
+whichever comes first, and always NUL-terminates. `SYS_RUN`, `SYS_READFILE`,
+`SYS_WRITEFILE`, `SYS_DELETE`, and `SYS_STAT` copy their filenames in with it.
 
 This is the same category of check as the ELF loader's segment bounds
-([elf-loading.md](elf-loading.md)) and stricter than the `SYS_WRITE` stopgap above.
-It still checks virtual addresses against the fixed region constants rather than
-walking the caller's page tables, so it is not yet the full per-process validation
-the `SYS_WRITE` TODO describes, but it does bound the whole range and cap the
-length, which the stopgap does not.
+([elf-loading.md](elf-loading.md)). It still checks virtual addresses against the fixed
+region constants rather than walking the caller's page tables, so it is not yet full
+per-process validation — recorded as a TODO in `kernel/syscall.c` and in
+[../project-status.md](../project-status.md) — but it bounds the whole range and caps
+the length. `SYS_WRITE` was once a start-pointer-only stopgap that did neither; when it
+became a counted `(fd, buf, len)` call ([descriptors.md](descriptors.md)) it moved onto
+`user_range_ok` like the rest.
 
 ## The ring-3 side
 
@@ -198,8 +210,8 @@ length, which the stopgap does not.
 `always_inline` helpers built on inline asm with explicit register constraints
 (`"a"` = RAX, `"D"` = RDI, `"S"` = RSI, `"d"` = RDX), one per arity: `syscall0`
 through `syscall3`, with `sys_write`, `sys_exit`, `sys_wait`, `sys_readkey`,
-`sys_list`, `sys_run`, `sys_readfile`, `sys_writefile`, `sys_delete`, and
-`sys_freecount` over them. `SYSCALL_VECTOR` reaches the `int`
+`sys_list`, `sys_run`, `sys_readfile`, `sys_writefile`, `sys_delete`,
+`sys_freecount`, and `sys_stat` over them. `SYSCALL_VECTOR` reaches the `int`
 instruction as an immediate through an `"i"` constraint so the vector stays a named
 constant. `always_inline` is kept: it folds the trap
 directly into the caller, so every instruction the program runs is inside its own
@@ -218,15 +230,23 @@ check above and fault a ring-3 read; that is why the old build forced them into 
 ## What a run looks like
 
 The machine boots into `SHELL.ELF`, which prints a prompt and blocks in
-`SYS_READKEY`, echoing each key with `SYS_WRITE`, tokenizing each line, and
-dispatching the commands in [shell.md](shell.md). Booted under QEMU and driven
-with a scripted key sequence, it behaves like this:
+`SYS_READKEY`, echoing each key with `SYS_WRITE` to fd 1, tokenizing each line, and
+dispatching the commands in [shell.md](shell.md). Booted under QEMU and driven by a
+scripted key sequence, a real session prints this (regenerated from an actual boot;
+the free-frame and heap numbers are that boot's):
 
 ```
 > help
 commands:
-  list           list files in the root directory
-  ...
+  list                 list files in the root directory
+  read <file>          print a file's contents
+  write <file> <text>  write the rest of the line to a file (creates/replaces)
+  delete <file>        delete a file
+  free                 how many clusters on the volume are free
+  run <file>           run a program and wait for it to finish
+  help                 show this list
+  clear                clear the screen
+  return <text>        print the text back
 > list
 HELLO.TXT
 TEST.TXT
@@ -235,11 +255,18 @@ A.ELF
 B.ELF
 C.ELF
 SHELL.ELF
-> read hello.txt
+D.ELF
+E.ELF
+HUGE.TXT
+F.ELF
+COUNT.ELF
+UPPER.ELF
+G.ELF
+> read HELLO.TXT
 Hello from FAT32!
 > run a.elf
 run: started a.elf
-AAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAreap (wait):    task 1 exited (status 0), free frames: 30587, heap used: 616
 run: a.elf exited with status 0
 >
 ```
@@ -248,7 +275,14 @@ run: a.elf exited with status 0
 its parent, and then `SYS_WAIT`, which blocks the shell until A is finished. A's
 `SYS_WRITE` output appears while the shell sleeps, which is the scheduler running
 what is left after the shell steps out of the rotation; the prompt comes back only
-once `SYS_WAIT` returns A's status. `run c.elf` prints `exited with status 3`,
+once `SYS_WAIT` returns A's status. **The `A`s running straight into the reap line
+is real, not a typo**: A prints no trailing newline, so its twenty `A`s and the
+kernel's report share a line. Exactly how many `A`s precede the report, and whether
+one slips into the shell's own `run: started` line, is a matter of scheduler timing
+and can differ on another boot. The `reap (wait):` line is the `LIFECYCLE_DEBUG`
+report at the moment A's address space goes back to the pools; its two numbers — the
+free frame count and `heap used` — are the leak test, and both must return to the
+same value after identical work. `run c.elf` prints `exited with status 3`,
 which is the proof that the number survives the whole trip from the child's RDI to
 the parent's RAX. Over the session `-d int` shows only
 timer (`v=40`), keyboard (`v=41`), and syscall (`v=50`) vectors, all at `cpl=3` for
@@ -257,10 +291,11 @@ triple fault, and no disk IRQ (0x4E). `v=50` now appears only when the shell has
 something to do: over a six second idle window at the prompt the kernel services
 three syscalls, down from 362,648 when `SYS_READKEY` was polled.
 
-Passing a kernel address (for example `0x100000`) to `SYS_WRITE` still prints
-`syscall: SYS_WRITE rejected an out-of-bounds pointer` and returns `-1`, and the
-shell syscalls reject an out-of-region buffer or filename the same way, printing
-nothing from kernel memory.
+Passing a bad fd, a wrong-direction fd, or an out-of-region buffer to `SYS_WRITE` or
+`SYS_READ` returns `-1` (silently — a rejected descriptor is a routine program error,
+not worth a console line), and the disk and directory calls reject an out-of-region
+buffer or filename the same way (those do print a one-line reason), none copying
+anything from kernel memory.
 
 ## Related
 

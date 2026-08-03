@@ -496,3 +496,36 @@ size_t heap_avail_count(void){
 size_t heap_total_bytes(void){
   return el_ctl->heap_bytes;
 }
+
+// Sum the payload sizes of every in-use block, walking the heap block by block via
+// el_block_above (the same linear walk el_print_heap_blocks uses). It TRUSTS NO
+// CACHED COUNTER: a leak test wants an independent count for the same reason
+// fat32_free_count recounts the FAT rather than reading FSInfo's cached total -- a
+// counter that is itself buggy would hide the very leak it is meant to reveal. It is
+// slow (a whole-heap walk) and only ever called off the allocation path, from the
+// LIFECYCLE_DEBUG reap report and leak tests, like frame_free_count.
+//
+// BOUNDED, the same discipline as free_chain in fs/fat32.c: a corrupt heap could make
+// the walk cycle or never reach heap_end, so it is capped at the most blocks the heap
+// could possibly hold (one per overhead unit) and returns the error sentinel
+// (uint64_t)-1 rather than looping forever. Guarded like kmalloc/kfree, because it
+// reads the shared block structure and the timer's kmalloc must not relink it mid-walk.
+uint64_t heap_used_bytes(void){
+  uint64_t flags = irq_save();
+  uint64_t used = 0;
+  uint64_t seen = 0;
+  uint64_t max_blocks = (uint64_t) el_ctl->heap_bytes / EL_BLOCK_OVERHEAD + 1;
+  el_blockhead_t *cur = el_ctl->heap_start;
+  while(cur != NULL){
+    if(++seen > max_blocks){
+      irq_restore(flags);
+      return (uint64_t) -1;   // walk did not terminate: the heap is corrupt
+    }
+    if(cur->state == EL_USED){
+      used += cur->size;
+    }
+    cur = el_block_above(cur);
+  }
+  irq_restore(flags);
+  return used;
+}

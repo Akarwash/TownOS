@@ -1,6 +1,6 @@
 # GDT and TSS reference
 
-MiniOS uses two GDTs in sequence. `boot/boot.asm` installs a minimal **bootstrap
+TownOS uses two GDTs in sequence. `boot/boot.asm` installs a minimal **bootstrap
 GDT** to make the far jump into 64-bit code legal. Once C is running,
 `gdt_init()` (`kernel/gdt.c`) installs the real **kernel GDT** and loads the task
 register. This page documents the kernel GDT; for the bootstrap GDT see the note

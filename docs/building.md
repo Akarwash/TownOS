@@ -1,11 +1,11 @@
 # Building, running, and debugging
 
-This is the operational guide: what you need, how to build MiniOS, how to run it,
+This is the operational guide: what you need, how to build TownOS, how to run it,
 and how to debug it. It reflects what actually works on the development machine.
 
 ## Dependencies
 
-MiniOS needs a cross toolchain that targets bare-metal x86-64 (not the host OS),
+TownOS needs a cross toolchain that targets bare-metal x86-64 (not the host OS),
 an assembler, and an emulator. The versions below are the ones actually in use on
 the development machine (macOS on Apple Silicon, Homebrew):
 
@@ -56,8 +56,8 @@ make
 This assembles every `.asm` file with `nasm -f elf64`, compiles every `.c` file
 with the cross-compiler, and produces two artifacts:
 
-- `minios.elf` — the linked ELF64 image with 64-bit symbols, used for gdb.
-- `minios.bin` — the same image repackaged with `x86_64-elf-objcopy -O
+- `townos.elf` — the linked ELF64 image with 64-bit symbols, used for gdb.
+- `townos.bin` — the same image repackaged with `x86_64-elf-objcopy -O
   elf32-i386`, which is what QEMU's Multiboot `-kernel` loader accepts.
 
 QEMU's built-in Multiboot loader rejects an ELF64 image ("Cannot load x86-64
@@ -68,7 +68,7 @@ by the loader and boots correctly. The code is unchanged; only the ELF header
 class differs.
 
 It also builds the user programs, which are separate binaries and not part of
-`minios.bin`: `user/SHELL.ELF`, the interactive shell, plus the kernel test
+`townos.bin`: `user/SHELL.ELF`, the interactive shell, plus the kernel test
 fixtures `user/tests/A.ELF` through `E.ELF`. The two directories build with the
 same recipe and land on the same disk; `user/` holds the program the machine is
 *for* and `user/tests/` holds programs that exist only to prove a piece of the
@@ -92,7 +92,7 @@ with it attached to the primary ATA bus:
 
 ```bash
 ./tools/mkdisk.sh disk.img 64M               # once, if disk.img is absent
-qemu-system-x86_64 -kernel minios.bin \
+qemu-system-x86_64 -kernel townos.bin \
     -drive file=disk.img,format=raw,if=ide,index=0,media=disk
 ```
 
@@ -166,7 +166,7 @@ larger than the shell's 32KB file buffer. See
 which is not what the shell's own error message suggests.
 
 The kernel reads 8.3 names only and skips long-filename entries, so a file copied
-in as `my-long-name.text` is readable by mtools but invisible to MiniOS. Use
+in as `my-long-name.text` is readable by mtools but invisible to TownOS. Use
 names of at most 8 characters plus a 3 character extension.
 
 ## Building a user program
@@ -215,7 +215,7 @@ To change an existing program without touching the kernel:
 ```bash
 make user/tests/A.ELF
 mcopy -o -i disk.img user/tests/A.ELF ::/
-qemu-system-x86_64 -kernel minios.bin -drive file=disk.img,format=raw,if=ide,index=0,media=disk
+qemu-system-x86_64 -kernel townos.bin -drive file=disk.img,format=raw,if=ide,index=0,media=disk
 ```
 
 `make run` does the copy step for you, on every run, so a stale program on the
@@ -226,11 +226,11 @@ A window opens showing the banner, the detected RAM, the disk detection line, an
 then the shell prompt:
 
 ```
-Welcome to MiniOS!
+Welcome to TownOS!
 Detected RAM: 127 MB
 Disk: primary ATA master detected
 Starting scheduler with 1 ring-3 tasks...
-MiniOS shell. type 'help'.
+TownOS shell. type 'help'.
 >
 ```
 
@@ -239,7 +239,7 @@ shell reads through `SYS_READKEY`. Type `help` for the command list, `list` to s
 the files on the disk, `read HELLO.TXT` to print a file, `return hello` to echo
 text, or `run A.ELF` to start one of the letter-printers, whose output then
 interleaves with the prompt (a live demonstration of the scheduler running two
-tasks). The command names are MiniOS's own, not the Unix ones; see
+tasks). The command names are TownOS's own, not the Unix ones; see
 [reference/shell.md](reference/shell.md). To quit QEMU, close the window, or press
 `Ctrl-A` then `X` in the launching terminal.
 
@@ -252,7 +252,7 @@ A misconfigured boot climb (see
 where the CPU resets instead of reporting an error. These flags make it visible:
 
 ```bash
-qemu-system-x86_64 -kernel minios.bin -d int -no-reboot -no-shutdown
+qemu-system-x86_64 -kernel townos.bin -d int -no-reboot -no-shutdown
 ```
 
 - `-d int` logs every interrupt and exception the CPU takes.
@@ -268,17 +268,17 @@ map that does not cover the address of the code executing when `CR0.PG` is set.
 Start QEMU with a gdb stub, halted before the first instruction:
 
 ```bash
-qemu-system-x86_64 -kernel minios.bin -s -S
+qemu-system-x86_64 -kernel townos.bin -s -S
 ```
 
 - `-s` opens a gdb server on TCP port 1234.
 - `-S` freezes the CPU at startup so you can set breakpoints before anything runs.
 
-In another terminal, point gdb at `minios.elf` (the ELF64 image keeps the 64-bit
-symbols; `minios.bin` does not):
+In another terminal, point gdb at `townos.elf` (the ELF64 image keeps the 64-bit
+symbols; `townos.bin` does not):
 
 ```bash
-gdb minios.elf
+gdb townos.elf
 (gdb) target remote :1234
 (gdb) break kernel_main
 (gdb) continue
@@ -289,7 +289,7 @@ gdb minios.elf
 Route the QEMU monitor to the terminal and query the CPU directly:
 
 ```bash
-qemu-system-x86_64 -kernel minios.bin -monitor stdio
+qemu-system-x86_64 -kernel townos.bin -monitor stdio
 ```
 
 Then at the `(qemu)` prompt, `info registers` dumps the control registers

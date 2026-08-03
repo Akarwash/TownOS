@@ -1,6 +1,6 @@
 # IDT and interrupt entry reference
 
-MiniOS installs a 256-entry **Interrupt Descriptor Table** so the CPU has a
+TownOS installs a 256-entry **Interrupt Descriptor Table** so the CPU has a
 handler for every exception and hardware interrupt. The table is built in
 `kernel/idt.c`, the per-vector assembly entry points are in
 `kernel/isr_stubs.asm`, and the C-side dispatch is in `kernel/isr.c`. This page
@@ -24,7 +24,7 @@ first timer tick cannot jump to an empty gate.
 
 ## Vector table
 
-MiniOS uses a **self-describing vector map**: the high nibble of a vector names
+TownOS uses a **self-describing vector map**: the high nibble of a vector names
 its category. This is a deliberate deviation from the conventional 0x20 IRQ base;
 the reasoning and its costs are in
 [../decisions/0005-self-describing-vector-map.md](../decisions/0005-self-describing-vector-map.md).
@@ -72,7 +72,7 @@ The handler address is scattered across three fields (`idt_entry_t` in
 `idt_set_entry()` packs a 64-bit handler address into `offset_low` /
 `offset_mid` / `offset_high`, sets the selector and flags, and zeroes `ist` and
 `zero`. `ist = 0` means "keep using the current stack" rather than switching to a
-preset IST stack; MiniOS never crosses privilege levels, so the running stack is
+preset IST stack; TownOS never crosses privilege levels, so the running stack is
 always a valid kernel stack.
 
 ## The flags byte: `0x8E`, an interrupt gate
@@ -83,7 +83,7 @@ type `0xE` (a 64-bit **interrupt gate**).
 **Interrupt gate vs trap gate.** The two gate types differ in one behavior: an
 interrupt gate clears the interrupt flag (IF) on entry, so the handler runs with
 further hardware interrupts masked and cannot be nested by another IRQ. A trap
-gate (type `0xF`) leaves IF as it was, allowing nesting. MiniOS uses interrupt
+gate (type `0xF`) leaves IF as it was, allowing nesting. TownOS uses interrupt
 gates everywhere so a handler is never interrupted mid-way, which keeps the
 handler and the shared dispatch state simple. The counterpart `iretq` at the end
 of each stub restores the saved flags, re-enabling interrupts on return.
