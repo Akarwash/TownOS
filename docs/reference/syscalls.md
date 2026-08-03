@@ -230,15 +230,23 @@ check above and fault a ring-3 read; that is why the old build forced them into 
 ## What a run looks like
 
 The machine boots into `SHELL.ELF`, which prints a prompt and blocks in
-`SYS_READKEY`, echoing each key with `SYS_WRITE`, tokenizing each line, and
-dispatching the commands in [shell.md](shell.md). Booted under QEMU and driven
-with a scripted key sequence, it behaves like this:
+`SYS_READKEY`, echoing each key with `SYS_WRITE` to fd 1, tokenizing each line, and
+dispatching the commands in [shell.md](shell.md). Booted under QEMU and driven by a
+scripted key sequence, a real session prints this (regenerated from an actual boot;
+the free-frame and heap numbers are that boot's):
 
 ```
 > help
 commands:
-  list           list files in the root directory
-  ...
+  list                 list files in the root directory
+  read <file>          print a file's contents
+  write <file> <text>  write the rest of the line to a file (creates/replaces)
+  delete <file>        delete a file
+  free                 how many clusters on the volume are free
+  run <file>           run a program and wait for it to finish
+  help                 show this list
+  clear                clear the screen
+  return <text>        print the text back
 > list
 HELLO.TXT
 TEST.TXT
@@ -247,11 +255,18 @@ A.ELF
 B.ELF
 C.ELF
 SHELL.ELF
-> read hello.txt
+D.ELF
+E.ELF
+HUGE.TXT
+F.ELF
+COUNT.ELF
+UPPER.ELF
+G.ELF
+> read HELLO.TXT
 Hello from FAT32!
 > run a.elf
 run: started a.elf
-AAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAreap (wait):    task 1 exited (status 0), free frames: 30587, heap used: 616
 run: a.elf exited with status 0
 >
 ```
@@ -260,7 +275,14 @@ run: a.elf exited with status 0
 its parent, and then `SYS_WAIT`, which blocks the shell until A is finished. A's
 `SYS_WRITE` output appears while the shell sleeps, which is the scheduler running
 what is left after the shell steps out of the rotation; the prompt comes back only
-once `SYS_WAIT` returns A's status. `run c.elf` prints `exited with status 3`,
+once `SYS_WAIT` returns A's status. **The `A`s running straight into the reap line
+is real, not a typo**: A prints no trailing newline, so its twenty `A`s and the
+kernel's report share a line. Exactly how many `A`s precede the report, and whether
+one slips into the shell's own `run: started` line, is a matter of scheduler timing
+and can differ on another boot. The `reap (wait):` line is the `LIFECYCLE_DEBUG`
+report at the moment A's address space goes back to the pools; its two numbers — the
+free frame count and `heap used` — are the leak test, and both must return to the
+same value after identical work. `run c.elf` prints `exited with status 3`,
 which is the proof that the number survives the whole trip from the child's RDI to
 the parent's RAX. Over the session `-d int` shows only
 timer (`v=40`), keyboard (`v=41`), and syscall (`v=50`) vectors, all at `cpl=3` for
@@ -273,8 +295,7 @@ Passing a bad fd, a wrong-direction fd, or an out-of-region buffer to `SYS_WRITE
 `SYS_READ` returns `-1` (silently — a rejected descriptor is a routine program error,
 not worth a console line), and the disk and directory calls reject an out-of-region
 buffer or filename the same way (those do print a one-line reason), none copying
-anything from kernel memory. The `SYS_WRITE` example above and the file list are from
-before pipes and the extra fixtures; the shapes are unchanged.
+anything from kernel memory.
 
 ## Related
 
