@@ -74,7 +74,9 @@ typedef enum {
 typedef enum {
     WAIT_NONE = 0,     // not waiting for anything (the only valid value when READY)
     WAIT_KEY,          // waiting for a keypress, woken by the keyboard IRQ
-    WAIT_CHILD         // waiting for a child to exit, woken by task_exit
+    WAIT_CHILD,        // waiting for a child to exit, woken by task_exit
+    WAIT_PIPE_READ,    // waiting to read a pipe (empty, writer alive), woken by a write or the last writer closing
+    WAIT_PIPE_WRITE    // waiting to write a pipe (full, reader alive), woken by a read or the last reader closing
 } wait_reason_t;
 
 // The parent id of a task nobody started: task 0, which kernel_main creates before

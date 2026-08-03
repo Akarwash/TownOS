@@ -145,6 +145,17 @@ long sys_close(int fd) {
     return (long)syscall1(SYS_CLOSE, (unsigned long)fd);
 }
 
+// SYS_PIPE: create a pipe. On success `fds[0]` is the read end and `fds[1]` the
+// write end, both descriptors in THIS program's table, and it returns 0. Returns
+// (unsigned long)-1 on failure (out of memory or no free descriptor slots). Whoever
+// creates a pipe holds BOTH ends and must close the ones it does not keep, or the
+// end-counts never reach zero and a reader waits forever for an EOF that cannot
+// arrive (B1 in docs/decisions/0022).
+static inline __attribute__((always_inline))
+long sys_pipe(int fds[2]) {
+    return (long)syscall1(SYS_PIPE, (unsigned long)fds);
+}
+
 // SYS_EXIT: end THIS PROGRAM with `status` (masked by the kernel to 0..255). It no
 // longer halts the machine, which is what it used to mean when there was no parent
 // to return to: the task leaves the scheduler for good, its memory goes back to the

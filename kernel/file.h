@@ -56,6 +56,25 @@ typedef struct file {
 // NULL if the heap is out of memory.
 file_t *file_alloc_console(int writable);
 
+// Allocate a pipe descriptor pointing at `p`, and COUNT the new end on the pipe
+// (writers++ if writable, else readers++). `writable` 1 is the write end, 0 the read
+// end. Returns NULL on OOM, having counted nothing. The count is the number of live
+// ends, which is why creating one bumps it and file_close drops it — there is no
+// separate refcount on the file_t (B4).
+file_t *file_alloc_pipe(struct pipe *p, int writable);
+
+// Free a file_t not held by any table slot, dropping its pipe end-count. This is the
+// core close_fd delegates to; it is exposed so a half-built inheritance in
+// task_create_from_file can undo one dup cleanly. For a pipe end it decrements the
+// matching count, WAKES a peer blocked on the opposite condition when that count
+// reaches zero (a close is the event that gives a waiting reader EOF, B2), and frees
+// the pipe_t once both counts are zero.
+void file_close(file_t *f);
+
+// Lowest free slot in the table `fds`, or -1 if it is full. The kernel chooses the
+// number and hands it back; it indexes THIS task's table only.
+int alloc_fd(file_t **fds);
+
 // Write up to `len` bytes of `buf` to `f`, returning the count actually written
 // (which MAY BE LESS than len — a pipe takes only what fits), FILE_BLOCKED if it
 // parked the task, or FILE_ERR. `r` is the live syscall pile, needed only on the

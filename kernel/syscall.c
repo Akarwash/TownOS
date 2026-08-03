@@ -2,6 +2,8 @@
 #include "memory.h"
 #include "scheduler.h"
 #include "file.h"
+#include "pipe.h"
+#include "heap.h"
 #include "../drivers/screen.h"
 #include "../drivers/keyboard.h"
 #include "../fs/fat32.h"
@@ -189,6 +191,63 @@ static uint64_t sys_close(uint64_t fd) {
         return SYSCALL_ERROR;
     }
     close_fd(t->fds, (int)fd);
+    return 0;
+}
+
+// SYS_PIPE: create a pipe and hand back its two ends in the caller's table.
+//   RDI = user pointer to int[2]; on success it receives [read_fd, write_fd].
+// The out pointer is a WRITE TARGET from ring 3, so its whole 2*sizeof(int) range is
+// bounds-checked before the kernel writes through it (same rule as SYS_STAT's size
+// pointer). Allocates one pipe_t and two file_t and takes two table slots; on any
+// failure part way it unwinds what it took, so a failed SYS_PIPE consumes nothing.
+// The pipe starts with exactly these two ends (readers = writers = 1, set by
+// file_alloc_pipe). Does not block.
+static uint64_t sys_pipe(uint64_t user_out) {
+    if (!user_range_ok(user_out, 2 * sizeof(int))) {
+        print_string("syscall: SYS_PIPE rejected an out-of-bounds pointer\n");
+        return SYSCALL_ERROR;
+    }
+
+    task_t *t = scheduler_current_task();
+    pipe_t *p = pipe_create();
+    if (p == NULL) {
+        return SYSCALL_ERROR;
+    }
+
+    // Read end first. If there is no free slot, the pipe has no ends yet, so a plain
+    // kfree returns it cleanly.
+    int rfd = alloc_fd(t->fds);
+    if (rfd < 0) {
+        kfree(p);
+        return SYSCALL_ERROR;
+    }
+    file_t *rend = file_alloc_pipe(p, 0);   // read end -> readers = 1
+    if (rend == NULL) {
+        kfree(p);
+        return SYSCALL_ERROR;
+    }
+    t->fds[rfd] = rend;
+
+    // Write end. From here the pipe has one end, so a failure unwinds through
+    // close_fd(rfd): that drops readers to 0, and with writers still 0 both counts
+    // are zero, so file_close frees the pipe as well as the read end. No leak.
+    int wfd = alloc_fd(t->fds);
+    if (wfd < 0) {
+        close_fd(t->fds, rfd);
+        return SYSCALL_ERROR;
+    }
+    file_t *wend = file_alloc_pipe(p, 1);   // write end -> writers = 1
+    if (wend == NULL) {
+        close_fd(t->fds, rfd);
+        return SYSCALL_ERROR;
+    }
+    t->fds[wfd] = wend;
+
+    // Both ends are installed and counted; report the numbers. The destination was
+    // range-checked above and lies in the caller's own mapped pages.
+    int *out = (int *)user_out;
+    out[0] = rfd;
+    out[1] = wfd;
     return 0;
 }
 
@@ -486,6 +545,9 @@ void syscall_handler(registers_t *regs) {
             break;
         case SYS_CLOSE:
             regs->rax = sys_close(regs->rdi);
+            break;
+        case SYS_PIPE:
+            regs->rax = sys_pipe(regs->rdi);
             break;
         case SYS_WAIT:
             sys_wait(regs);   // writes rax itself, and must not on the block path
