@@ -1,10 +1,22 @@
 #include "syscall.h"
 #include "memory.h"
 #include "scheduler.h"
+#include "file.h"
 #include "../drivers/screen.h"
 #include "../drivers/keyboard.h"
 #include "../fs/fat32.h"
+#include "../libc/mem.h"
 #include "../include/syscalls.h"
+
+// The most bytes one SYS_READ or SYS_WRITE moves in a single call. A counted
+// buffer from ring 3 is copied through a kernel staging buffer of this size, so a
+// transfer larger than this comes back as a partial count and the caller loops
+// (this is the mechanism behind partial transfers, B5 in docs/decisions/0022, not
+// an edge case). One static buffer is safe because a syscall runs with interrupts
+// masked (the int 0x50 gate clears IF) and this kernel is single-CPU, so two
+// syscalls never touch it at once.
+#define SYSCALL_IO_MAX 4096
+static char io_staging[SYSCALL_IO_MAX];
 
 // The longest filename SYS_RUN and SYS_READFILE will copy in from ring 3. An 8.3
 // name needs at most 12 characters plus a terminator; 16 leaves a little slack.
@@ -55,30 +67,61 @@ static int copy_user_string(uint64_t user_ptr, char *dst, uint32_t dst_size) {
     return -1;                  // the name did not fit, treat as invalid
 }
 
-// SYS_WRITE: print a NUL-terminated string supplied by the ring-3 caller.
+// SYS_WRITE: write a counted buffer to one of the caller's descriptors.
+//   RDI = fd, RSI = user buffer pointer, RDX = length.
+// Returns the number of bytes written, which MAY BE LESS than the length asked for
+// (a pipe takes only what fits, and one call never moves more than SYSCALL_IO_MAX);
+// the caller loops on the count. Returns SYSCALL_ERROR on a bad fd, a wrong-
+// direction fd, or a bad buffer.
 //
-// The pointer in RDI is UNTRUSTED. A ring-3 program could pass a kernel address
-// and turn the kernel into a confused deputy, printing memory it is not allowed
-// to read. Proper validation means checking the pointer's whole range against
-// the caller's own mapped pages, which needs per-process address-space tracking
-// that does not exist yet.
+// VALIDATION ORDER is fd, slot, direction, then buffer: reject an fd out of range,
+// then an unopened slot, then a read-end (fd 0, or a pipe's read end) that cannot be
+// written, and only then bounds-check the memory. This is NOT copy_user_string: a
+// counted buffer may contain zero bytes and need not be NUL-terminated, so it is
+// range-checked and copied by length into the kernel staging buffer.
 //
-// STOPGAP, NOT REAL VALIDATION: we only check that the start pointer falls inside
-// the single ring-3 region (USER_REGION_START..USER_REGION_END). This does NOT
-// bound the string's length, so a string that starts just below USER_REGION_END
-// with no NUL still walks out of the region and into kernel pages. See the TODO
-// below and docs/reference/syscalls.md.
-static uint64_t sys_write(uint64_t user_ptr) {
-    // TODO: replace with a real per-process bounds check once address spaces
-    // exist: validate the entire [ptr, ptr+len) range lies in the caller's pages,
-    // and cap the length so an unterminated string cannot run off the region.
-    if (user_ptr < USER_REGION_START || user_ptr >= USER_REGION_END) {
-        print_string("syscall: SYS_WRITE rejected an out-of-bounds pointer\n");
-        return SYSCALL_ERROR;
+// BLOCK-AWARE, so it takes the register pile and writes rax ITSELF, and must NOT on
+// the path where file_write parks the task (a full pipe with a live reader). The
+// re-armed int 0x50 reads the syscall number back out of rax, so writing a return
+// value there would make the woken task issue a different call. Dispatched as a bare
+// statement, never `regs->rax = sys_write(...)`. See docs/reference/blocking.md and
+// the long comment on sys_readkey below.
+static void sys_write(registers_t *r) {
+    uint64_t fd = r->rdi;
+    uint64_t user_buf = r->rsi;
+    uint64_t len = r->rdx;
+
+    task_t *t = scheduler_current_task();
+    if (fd >= MAX_FDS || t->fds[fd] == NULL) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+    file_t *f = t->fds[fd];
+    if (!f->writable) {
+        r->rax = SYSCALL_ERROR;   // fd 0, or a pipe's read end: not writable
+        return;
+    }
+    if (len == 0) {
+        r->rax = 0;               // nothing to write is a successful no-op
+        return;
     }
 
-    print_string((char *)user_ptr);
-    return 0;
+    uint64_t n = len < SYSCALL_IO_MAX ? len : SYSCALL_IO_MAX;
+    if (!user_range_ok(user_buf, n)) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+    memcpy(io_staging, (const void *)user_buf, (size_t)n);
+
+    long w = file_write(f, io_staging, (uint32_t)n, r);
+    if (w == FILE_BLOCKED) {
+        return;                   // parked; leave rax holding SYS_WRITE for the re-issue
+    }
+    if (w < 0) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+    r->rax = (uint64_t)w;
 }
 
 // SYS_READKEY: pop one character from the keyboard ring buffer, sleeping until one
@@ -344,7 +387,7 @@ void syscall_handler(registers_t *regs) {
             sys_exit(regs);   // does not return; deliberately not `regs->rax = ...`
             break;
         case SYS_WRITE:
-            regs->rax = sys_write(regs->rdi);
+            sys_write(regs);   // writes rax itself, and must not on the block path
             break;
         case SYS_READKEY:
             sys_readkey(regs);   // writes rax itself, and must not on the block path

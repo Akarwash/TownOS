@@ -14,7 +14,7 @@
 // The vector the program raises is SYSCALL_VECTOR (0x50) from include/vectors.h.
 
 #define SYS_EXIT     0   // RDI = exit status (masked to 0..255); ends the calling task. Never returns.
-#define SYS_WRITE    1   // RDI = pointer to a NUL-terminated string; print it
+#define SYS_WRITE    1   // RDI = fd, RSI = buffer, RDX = length; write the bytes to that descriptor, return bytes written (may be < length), or SYSCALL_ERROR
 #define SYS_READKEY  2   // no args; return one buffered key in RAX, or 0 if none
 #define SYS_LIST     3   // RDI = buffer, RSI = size; list root dir names, return count
 #define SYS_RUN      4   // RDI = filename ptr; load and start it, return 0 or -1

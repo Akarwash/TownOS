@@ -116,6 +116,23 @@ static int task_register(address_space_t *as, uint64_t entry, uint32_t parent_id
         return -1;                          // out of heap: same contract as old "table full"
     }
 
+    // Every task is born with a console on fd 0 and fd 1: fd 0 an INPUT end that
+    // reads the keyboard, fd 1 an OUTPUT end that writes the screen. Allocate them
+    // BEFORE consuming an id below, so running out of heap here fails as cleanly as a
+    // full table — no id is spent and nothing is published to tasks[]. That 0 = input
+    // and 1 = output is a CONVENTION shared by the kernel, every program, and the
+    // shell; nothing in the hardware or the dispatcher enforces it, and a program
+    // that writes fd 0 or reads fd 1 is simply rejected. A pipeline child has one or
+    // both of these replaced by an inherited pipe end (see task_create_from_file).
+    file_t *fd_in = file_alloc_console(0);
+    file_t *fd_out = file_alloc_console(1);
+    if (fd_in == NULL || fd_out == NULL) {
+        if (fd_in != NULL) kfree(fd_in);
+        if (fd_out != NULL) kfree(fd_out);
+        kfree(t);
+        return -1;
+    }
+
     uint32_t id = num_tasks++;
     tasks[id] = t;
 
@@ -144,6 +161,14 @@ static int task_register(address_space_t *as, uint64_t entry, uint32_t parent_id
     t->wait_reason = WAIT_NONE;   // only meaningful once the task blocks
     t->parent_id = parent_id;     // who to wake and who may read the status below
     t->exit_status = 0;           // only meaningful once the task is a TASK_ZOMBIE
+
+    // Install the console descriptors allocated above and clear the rest of the
+    // table. From here the task can read fd 0 and write fd 1 the instant it runs.
+    for (int i = 0; i < MAX_FDS; i++) {
+        t->fds[i] = NULL;
+    }
+    t->fds[0] = fd_in;
+    t->fds[1] = fd_out;
     return (int)id;
 }
 
@@ -206,6 +231,14 @@ uint32_t scheduler_current_id(void) {
     // stamps the new task's parent_id with it), so the id is exported and the table
     // is not.
     return current;
+}
+
+task_t *scheduler_current_task(void) {
+    // The one deliberate window into the table, for the descriptor syscalls that
+    // must read and edit the CALLER's own fd table (SYS_READ/WRITE/CLOSE/PIPE). It
+    // returns the running task, which during a syscall is the one that made the
+    // call. Everything else about the table stays private to this file.
+    return tasks[current];
 }
 
 void scheduler_start(void) {

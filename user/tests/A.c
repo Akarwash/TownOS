@@ -26,7 +26,7 @@ static volatile unsigned long iterations;
 // linker script, not anything in the kernel.
 void _start(void) {
     for (unsigned long i = 0; i < A_ROUNDS; i++) {
-        sys_write("A");
+        sys_print("A");
         iterations++;
         user_delay();
     }

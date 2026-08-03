@@ -87,11 +87,40 @@ unsigned long syscall3(unsigned long number, unsigned long arg1,
     return ret;
 }
 
-// SYS_WRITE: hand the kernel a pointer to a NUL-terminated string to print.
-// Returns 0 on success, (unsigned long)-1 if the kernel rejected the pointer.
+// SYS_WRITE: write `len` bytes of `buf` to descriptor `fd`. Returns the number of
+// bytes actually written, which MAY BE LESS THAN len — a pipe accepts only what
+// fits, and one call never moves more than the kernel's staging buffer. A caller
+// MUST LOOP until everything is written (or a write returns <= 0, meaning the far
+// end is gone): assuming one call moved the whole buffer silently drops the rest
+// (B5 in docs/decisions/0022). sys_print below is that loop for the common case.
+// Returns (unsigned long)-1 (as a negative long) on a bad fd, a wrong-direction fd,
+// or a bad buffer. fd 1 is standard output, fd 0 standard input, by convention.
 static inline __attribute__((always_inline))
-unsigned long sys_write(const char *string) {
-    return syscall1(SYS_WRITE, (unsigned long)string);
+long sys_write(int fd, const char *buf, unsigned long len) {
+    return (long)syscall3(SYS_WRITE, (unsigned long)fd, (unsigned long)buf, len);
+}
+
+// Print a NUL-terminated string to fd 1 (standard output), looping until the whole
+// string is written. THE LOOP IS THE POINT: sys_write may move fewer bytes than
+// asked, so one call is never assumed to have moved everything. Returns the number
+// of bytes written (short only if the descriptor went away mid-write). This is the
+// replacement for the old single-argument sys_write, so the common "print this
+// string" call sites read the same and cannot forget the loop.
+static inline __attribute__((always_inline))
+long sys_print(const char *s) {
+    unsigned long n = 0;
+    while (s[n] != '\0') {
+        n++;
+    }
+    unsigned long done = 0;
+    while (done < n) {
+        long w = sys_write(1, s + done, n - done);
+        if (w <= 0) {
+            return (long)done;   // far end gone or error: stop, report progress
+        }
+        done += (unsigned long)w;
+    }
+    return (long)done;
 }
 
 // SYS_EXIT: end THIS PROGRAM with `status` (masked by the kernel to 0..255). It no

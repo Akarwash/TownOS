@@ -3,6 +3,7 @@
 
 #include "isr.h"
 #include "paging.h"
+#include "file.h"
 #include "../include/types.h"
 
 // ============================================================================
@@ -23,6 +24,13 @@
 // bounds the size of the pointer-bookkeeping array in scheduler.c, not where the
 // tasks live. 64 is arbitrary; raise it freely.
 #define MAX_TASKS_LIMIT 64
+
+// How many descriptors a task can hold open at once. A small fixed array in each
+// task_t (fds below), not growable: 8 is plenty for the shell (0 and 1 in use, up
+// to two more per pipe in a pipeline) and keeps the table a flat, cheaply-scanned
+// thing. Raising it is a one-line change; a program that needs more than a handful
+// of open descriptors is not something this kernel runs.
+#define MAX_FDS 8
 
 // Report every lifecycle event that returns memory to the pools, with the free
 // frame count after it. Set to 0 to silence the lot.
@@ -82,7 +90,7 @@ typedef enum {
 // now owns a private page-table tree (per-process paging), so two tasks can use
 // the same virtual address for different physical memory. It still has no kernel
 // stack of its own (see the limitations in the ADR).
-typedef struct {
+typedef struct task {
     registers_t regs;         // the saved/forged interrupt frame: IS the task
 
     // This task's private page-table tree, and the CR3 value that loads it.
@@ -114,6 +122,13 @@ typedef struct {
     // status distinguishable from the SYSCALL_ERROR (-1) that SYS_WAIT returns when
     // the caller has no children at all.
     int32_t exit_status;
+
+    // This task's open descriptors, indexed 0..MAX_FDS-1, NULL where unused. fd 0
+    // and fd 1 are a console by convention (input and output); a child in a pipeline
+    // has one or both replaced by an inherited pipe end. The number in a descriptor
+    // is an index into THIS task's table only — it means nothing in another task's.
+    // See kernel/file.h and docs/reference/descriptors.md.
+    file_t *fds[MAX_FDS];
 } task_t;
 
 // Forge a never-run task from a program FILE: read `name` (an 8.3 filename such
@@ -202,6 +217,13 @@ void task_wait(registers_t *r);
 // who made a request (SYS_RUN stamps the new task's parent_id with it) without
 // scheduler.c having to export the whole task table.
 uint32_t scheduler_current_id(void);
+
+// The task currently on the CPU: the caller of whatever syscall is being served.
+// Exposed (unlike the rest of the table) because the descriptor syscalls
+// (SYS_READ/WRITE/CLOSE/PIPE) all operate on the CALLER's own fd table, and the
+// table itself stays private to scheduler.c. Never call this outside a syscall
+// handler: between syscalls `current` names whoever the round-robin last picked.
+task_t *scheduler_current_task(void);
 
 // The switch itself, called from the timer IRQ with a pointer to the live pile.
 // Only TASK_READY tasks are candidates: a blocked task is skipped entirely, and if

@@ -117,35 +117,35 @@ static void print_uint(unsigned long value) {
         value /= 10;
     } while (value != 0);
 
-    sys_write(p);
+    sys_print(p);
 }
 
 static void print_help(void) {
     // The command names are TownOS's own and deliberately not the Unix ones.
-    sys_write("commands:\n");
-    sys_write("  list                 list files in the root directory\n");
-    sys_write("  read <file>          print a file's contents\n");
-    sys_write("  write <file> <text>  write the rest of the line to a file (creates/replaces)\n");
-    sys_write("  delete <file>        delete a file\n");
-    sys_write("  free                 how many clusters on the volume are free\n");
-    sys_write("  run <file>           run a program and wait for it to finish\n");
-    sys_write("  help                 show this list\n");
-    sys_write("  clear                clear the screen\n");
-    sys_write("  return <text>        print the text back\n");
+    sys_print("commands:\n");
+    sys_print("  list                 list files in the root directory\n");
+    sys_print("  read <file>          print a file's contents\n");
+    sys_print("  write <file> <text>  write the rest of the line to a file (creates/replaces)\n");
+    sys_print("  delete <file>        delete a file\n");
+    sys_print("  free                 how many clusters on the volume are free\n");
+    sys_print("  run <file>           run a program and wait for it to finish\n");
+    sys_print("  help                 show this list\n");
+    sys_print("  clear                clear the screen\n");
+    sys_print("  return <text>        print the text back\n");
 }
 
 static void cmd_list(void) {
     if (sys_list(list_buf, sizeof(list_buf)) == SYS_FAIL) {
-        sys_write("list: could not read the directory\n");
+        sys_print("list: could not read the directory\n");
         return;
     }
     // The kernel filled list_buf with newline-separated names, NUL-terminated.
-    sys_write(list_buf);
+    sys_print(list_buf);
 }
 
 static void cmd_read(char *name) {
     if (name == (char *)0) {
-        sys_write("read: missing filename\n");
+        sys_print("read: missing filename\n");
         return;
     }
 
@@ -156,9 +156,9 @@ static void cmd_read(char *name) {
     // falls through to the old line.
     unsigned long size = 0;
     if (sys_stat(name, &size) == SYS_FAIL) {
-        sys_write("read: no such file: ");
-        sys_write(name);
-        sys_write("\n");
+        sys_print("read: no such file: ");
+        sys_print(name);
+        sys_print("\n");
         return;
     }
 
@@ -172,13 +172,13 @@ static void cmd_read(char *name) {
     // "showing the first N bytes" notice, which only ever fired for a file of
     // exactly the buffer size, which is complete (TODO(read-truncation), now gone).
     if (size > sizeof(file_buf) - 1) {
-        sys_write("read: ");
-        sys_write(name);
-        sys_write(" is ");
+        sys_print("read: ");
+        sys_print(name);
+        sys_print(" is ");
         print_uint(size);
-        sys_write(" bytes, the buffer holds ");
+        sys_print(" bytes, the buffer holds ");
         print_uint(sizeof(file_buf) - 1);
-        sys_write("\n");
+        sys_print("\n");
         return;
     }
 
@@ -187,15 +187,15 @@ static void cmd_read(char *name) {
     // line now names on its own.
     unsigned long n = sys_readfile(name, file_buf, sizeof(file_buf) - 1);
     if (n == SYS_FAIL) {
-        sys_write("read: cannot read ");
-        sys_write(name);
-        sys_write("\n");
+        sys_print("read: cannot read ");
+        sys_print(name);
+        sys_print("\n");
         return;
     }
     // File contents are raw and not NUL-terminated, so terminate before printing.
     file_buf[n] = '\0';
-    sys_write(file_buf);
-    sys_write("\n");   // the file may not end in a newline; keep the prompt tidy
+    sys_print(file_buf);
+    sys_print("\n");   // the file may not end in a newline; keep the prompt tidy
 }
 
 // `write <file> <text>`: store the rest of the line, verbatim, as the file's
@@ -207,21 +207,21 @@ static void cmd_read(char *name) {
 // writing is exercised by user/tests/F.c, not by typing.
 static void cmd_write(char *name, char *content) {
     if (name == (char *)0) {
-        sys_write("write: missing filename\n");
+        sys_print("write: missing filename\n");
         return;
     }
     if (!name_is_83(name)) {
         // The user's fault and fixable by retyping, so it is called out on its own
         // rather than lumped in with disk failures.
-        sys_write("write: ");
-        sys_write(name);
-        sys_write(" is not an 8.3 name (max 8 chars, dot, 3 chars)\n");
+        sys_print("write: ");
+        sys_print(name);
+        sys_print(" is not an 8.3 name (max 8 chars, dot, 3 chars)\n");
         return;
     }
     if (sys_writefile(name, content, str_len(content)) != 0) {
-        sys_write("write: could not write ");
-        sys_write(name);
-        sys_write("\n");
+        sys_print("write: could not write ");
+        sys_print(name);
+        sys_print("\n");
         return;
     }
 }
@@ -233,46 +233,46 @@ static void cmd_write(char *name, char *content) {
 // rather than a cached total that a leak could hide behind.
 static void cmd_free(void) {
     print_uint(sys_freecount());
-    sys_write(" clusters free\n");
+    sys_print(" clusters free\n");
 }
 
 // `delete <file>`: remove a file from the disk.
 static void cmd_delete(char *name) {
     if (name == (char *)0) {
-        sys_write("delete: missing filename\n");
+        sys_print("delete: missing filename\n");
         return;
     }
     if (!name_is_83(name)) {
-        sys_write("delete: ");
-        sys_write(name);
-        sys_write(" is not an 8.3 name (max 8 chars, dot, 3 chars)\n");
+        sys_print("delete: ");
+        sys_print(name);
+        sys_print(" is not an 8.3 name (max 8 chars, dot, 3 chars)\n");
         return;
     }
     if (sys_delete(name) != 0) {
-        sys_write("delete: could not delete ");
-        sys_write(name);
-        sys_write("\n");
+        sys_print("delete: could not delete ");
+        sys_print(name);
+        sys_print("\n");
         return;
     }
 }
 
 static void cmd_run(char *name) {
     if (name == (char *)0) {
-        sys_write("run: missing filename\n");
+        sys_print("run: missing filename\n");
         return;
     }
     if (sys_run(name) == SYS_FAIL) {
-        sys_write("run: could not start ");
-        sys_write(name);
-        sys_write("\n");
+        sys_print("run: could not start ");
+        sys_print(name);
+        sys_print("\n");
         return;
     }
     // The program is now a task of its own and its output interleaves with this
     // shell from the next timer tick on. Announce it before waiting, so the letters
     // that follow are visibly attributed to something that was started.
-    sys_write("run: started ");
-    sys_write(name);
-    sys_write("\n");
+    sys_print("run: started ");
+    sys_print(name);
+    sys_print("\n");
 
     // WAIT FOR IT. This is what makes `run` feel like a command rather than a
     // detach: the prompt does not come back until the program is finished, because
@@ -291,20 +291,20 @@ static void cmd_run(char *name) {
     // only this task reaps its own children. Report it rather than printing a status
     // that was never returned.
     if (status < 0) {
-        sys_write("run: no child to wait for\n");
+        sys_print("run: no child to wait for\n");
         return;
     }
 
-    sys_write("run: ");
-    sys_write(name);
-    sys_write(" exited with status ");
+    sys_print("run: ");
+    sys_print(name);
+    sys_print(" exited with status ");
     print_uint((unsigned long)status);
-    sys_write("\n");
+    sys_print("\n");
 }
 
 static void cmd_clear(void) {
     for (int i = 0; i < SHELL_CLEAR_LINES; i++) {
-        sys_write("\n");
+        sys_print("\n");
     }
 }
 
@@ -316,8 +316,8 @@ static void cmd_return(char *rest) {
     while (*rest == ' ') {
         rest++;
     }
-    sys_write(rest);
-    sys_write("\n");
+    sys_print(rest);
+    sys_print("\n");
 }
 
 // Read one line, building it a keystroke at a time. Returns with `line` holding a
@@ -334,7 +334,7 @@ static void read_line(void) {
         char c = (char)sys_readkey();
 
         if (c == '\n') {
-            sys_write("\n");   // echo the newline that ends the line
+            sys_print("\n");   // echo the newline that ends the line
             break;
         }
 
@@ -344,7 +344,7 @@ static void read_line(void) {
             // len > 0 means backspace cannot chew back into the prompt.
             if (len > 0) {
                 len--;
-                sys_write("\b");
+                sys_print("\b");
             }
             continue;
         }
@@ -355,7 +355,7 @@ static void read_line(void) {
         if (len < SHELL_LINE_MAX - 1) {
             line[len++] = c;
             char echo[2] = { c, '\0' };
-            sys_write(echo);
+            sys_print(echo);
         }
     }
 
@@ -365,10 +365,10 @@ static void read_line(void) {
 // The entry point named by user.ld's ENTRY(_start). The loader takes the entry
 // address from the ELF header, so this symbol only has to match the linker script.
 void _start(void) {
-    sys_write("TownOS shell. type 'help'.\n");
+    sys_print("TownOS shell. type 'help'.\n");
 
     for (;;) {
-        sys_write("> ");
+        sys_print("> ");
         read_line();
 
         // Tokenize IN PLACE: next_token shreds `line`, so the command and any
@@ -404,9 +404,9 @@ void _start(void) {
         } else if (str_eq(cmd, "return")) {
             cmd_return(pos);   // the raw remainder after the "return" token
         } else {
-            sys_write("unknown command: ");
-            sys_write(cmd);
-            sys_write("\n");
+            sys_print("unknown command: ");
+            sys_print(cmd);
+            sys_print("\n");
         }
     }
 }
