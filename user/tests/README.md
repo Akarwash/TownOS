@@ -131,6 +131,25 @@ under the shell's 32KB read buffer, so afterwards `read FTEST.TXT` still prints 
 whole thing for a human spot check. On the host, `mtype -i disk.img ::/FTEST.TXT |
 wc -c` reports 16384.
 
+## G.ELF — the backpressure writer
+
+Writes 16384 bytes to `fd 1` in a repeating 16-byte pattern, looping on partial
+writes, then exits 0. It is the upstream half of a backpressure test and is kept
+that simple on purpose.
+
+`run g.elf | run count.elf` prints `16384`, and that number is the whole point: 16384
+is four times the kernel's `PIPE_SIZE` (4096), so the pipe fills and G must **block
+and resume at least three times** to get everything through. If it printed fewer than
+16384, either G stopped looping on partial writes or backpressure regressed — the two
+things this fixture exists to catch.
+
+    > run g.elf | run count.elf
+    16384
+    pipeline exited with status 0
+
+Run alone (`run g.elf`), it floods the screen with the pattern. That is expected, not
+a bug — it is a 16KB writer with nowhere quieter to write when there is no pipe.
+
 ## COUNT.ELF — the downstream end of a pipe
 
 Reads `fd 0` until end of file, counts the bytes, prints the count to `fd 1`, exits
