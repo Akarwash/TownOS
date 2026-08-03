@@ -178,13 +178,23 @@ void sys_exit(int status) {
 // SYS_WAIT: block until any child of this program exits, and return its exit status
 // (0..255). Returns (unsigned long)-1 if this program has no children at all.
 //
-// ANY-CHILD, NOT waitpid: it takes no argument, so a program with several children
-// is told about whichever finished first and cannot ask about a particular one.
-// BLOCKING, like sys_readkey: waiting costs no CPU, and from here it looks like one
-// call that took a while to come back.
+// ANY-CHILD, NOT waitpid: a program with several children is told about whichever
+// finished first and cannot ask about a particular one. BLOCKING, like sys_readkey:
+// waiting costs no CPU, and from here it looks like one call that took a while to
+// come back. Passes 0 for the id-out pointer, so the kernel does not report which
+// child it was; sys_wait_id below is the variant that does.
 static inline __attribute__((always_inline))
 long sys_wait(void) {
-    return (long)syscall0(SYS_WAIT);
+    return (long)syscall1(SYS_WAIT, 0);
+}
+
+// Like sys_wait, but also writes the id of the child that exited through `out_id`.
+// A caller reaping several children (a shell running a pipeline) uses this to match
+// each reaped child against the stage it started, so it can report the last stage's
+// status. Same blocking behaviour and same -1 for "no children".
+static inline __attribute__((always_inline))
+long sys_wait_id(unsigned long *out_id) {
+    return (long)syscall1(SYS_WAIT, (unsigned long)out_id);
 }
 
 // SYS_READKEY: pop one buffered keystroke, waiting for one if none is ready.
@@ -208,8 +218,10 @@ unsigned long sys_list(char *buf, unsigned long size) {
 // one. `in_fd` and `out_fd` are descriptors in THIS program's table to give the
 // child as its fd 0 and fd 1, or -1 for a fresh console end. Passing pipe ends here
 // is the only way to wire one program's output to another's input, since a running
-// task's descriptors cannot be changed from outside. Returns 0 on success,
-// (unsigned long)-1 if it could not be started (bad file, or a bad in_fd/out_fd).
+// task's descriptors cannot be changed from outside. Returns the child's task id
+// (>= 1) on success, (unsigned long)-1 if it could not be started (bad file, or a
+// bad in_fd/out_fd). The id lets a caller running several children tell them apart
+// when it waits; an ordinary run just checks for the -1 failure.
 static inline __attribute__((always_inline))
 unsigned long sys_run(const char *name, int in_fd, int out_fd) {
     return syscall3(SYS_RUN, (unsigned long)name,

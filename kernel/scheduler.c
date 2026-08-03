@@ -694,8 +694,10 @@ void task_wait(registers_t *r) {
             continue;           // alive: keep looking, it may not be the only child
         }
 
-        // A child has already exited. Take its status, then take it apart.
+        // A child has already exited. Take its status AND its id (read the id before
+        // the struct is freed below), then take it apart.
         int32_t status = t->exit_status;
+        uint32_t child_id = t->id;
 
         // Freeing the address space HERE as well as in the sweeper is DELIBERATE and
         // is not a duplicated responsibility to be tidied away. A parent can call
@@ -725,6 +727,13 @@ void task_wait(registers_t *r) {
         kfree(t);
         tasks[i] = NULL;        // a permanent hole; the id is never reused
 
+        // Report WHICH child, if the caller asked. r->rdi is a user pointer the
+        // sys_wait wrapper already validated (or zero, meaning "do not report"). This
+        // is what lets a shell running a pipeline match the reaped child against its
+        // last stage and report that stage's status (docs/reference/shell.md).
+        if (r->rdi != 0) {
+            *(uint64_t *)r->rdi = (uint64_t)child_id;
+        }
         r->rax = (uint64_t)(int64_t)status;
         return;
     }

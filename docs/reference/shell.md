@@ -48,6 +48,34 @@ it up. This is only reachable now that shift exists (see
 [keyboard.md](keyboard.md)); it is left as it is, because the shell's commands are
 its own vocabulary and matching them loosely buys nothing.
 
+## Pipelines
+
+A line containing `|` is a **pipeline**: `run A | run B | run C` runs the stages at
+once and connects each stage's output to the next stage's input through a pipe, so
+`B` reads what `A` writes. Every stage must be `run <file>` — the other commands are
+builtins that write to the shell's own console rather than to a child, so they cannot
+be a stage. Up to four stages (`SHELL_MAX_SEGS`); more is rejected. A line with no
+`|` takes exactly the single-command path it always has.
+
+The shell creates one pipe per join, gives each stage the right ends via
+`sys_run(name, in_fd, out_fd)` (the read end of the pipe behind it, the write end of
+the pipe ahead of it, or a console end at the two outer edges), and then **closes its
+own copies of every pipe end immediately**, which is load-bearing: the shell created
+the pipe so it holds both ends, and if it kept them the write-end count would never
+reach zero, the downstream reader would wait forever for an EOF that cannot arrive,
+and the shell would then wait forever for a child that never exits. It waits for all
+N stages and reports the **last** stage's exit status, matching `$?` in a real shell;
+it matches the reaped child against the last stage by id (`sys_wait_id`).
+
+**A slow pipeline is not a hang.** With three or more stages, a middle stage that
+must consume all of its input before it produces any output — a counter, a sort —
+leaves the stage after it blocked and idle for the whole run, and a full pipe
+likewise blocks the stage before it (backpressure). From the outside that is
+indistinguishable from a hang, but it is correct: the downstream stage is asleep
+waiting for bytes that only arrive when the middle stage finishes, and it wakes and
+runs the moment they do. See
+[decision 0022](../decisions/0022-file-descriptors-and-pipes.md).
+
 ## The read-match-do loop
 
 `_start` (`user/shell.c`) prints a prompt and then loops:

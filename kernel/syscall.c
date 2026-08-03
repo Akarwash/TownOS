@@ -335,7 +335,8 @@ static uint64_t sys_run(uint64_t user_name, uint64_t in_fd, uint64_t out_fd) {
     // for the program it started. The id has to be taken HERE, inside the syscall,
     // because `current` is only the requesting task while its own syscall is being
     // served; by the next timer tick it means somebody else.
-    if (task_create_from_file(name, scheduler_current_id(), (int)in_fd, (int)out_fd) < 0) {
+    int id = task_create_from_file(name, scheduler_current_id(), (int)in_fd, (int)out_fd);
+    if (id < 0) {
         // REPORT THE FREE FRAME COUNT, not just the failure. A create can fail after
         // it has already built a page-table tree and mapped part of a program into
         // it, so "it did not start" and "it did not cost anything" are different
@@ -355,7 +356,10 @@ static uint64_t sys_run(uint64_t user_name, uint64_t in_fd, uint64_t out_fd) {
         print_string("\n");
         return SYSCALL_ERROR;
     }
-    return 0;
+    // Return the child's task id (always >= 1: id 0 is the boot task). The shell uses
+    // it to tell one pipeline stage from another when it reaps them; an ordinary
+    // `run` ignores it and only checks for the SYSCALL_ERROR failure value.
+    return (uint64_t)id;
 }
 
 // SYS_READFILE: read a whole file off the disk into a ring-3 buffer.
@@ -508,7 +512,18 @@ static void sys_exit(registers_t *regs) {
 // path task_wait leaves RAX alone so the re-armed `int 0x50` still reads SYS_WAIT
 // out of it. RAX is written only on the two paths that have an answer. See the long
 // comment on sys_readkey above, and task_wait in kernel/scheduler.c.
+//
+// RDI, if nonzero, is a user pointer to a uint64_t that receives the id of the child
+// that exited, so a caller reaping several children (a shell running a pipeline) can
+// tell which one finished. It is validated HERE, because syscall.c owns
+// user_range_ok, before task_wait writes through it on the answering path; 0 means
+// "do not report the id". This re-validates on every re-issue after a block, since
+// RDI is preserved across the re-arm.
 static void sys_wait(registers_t *regs) {
+    if (regs->rdi != 0 && !user_range_ok(regs->rdi, sizeof(uint64_t))) {
+        regs->rax = SYSCALL_ERROR;
+        return;
+    }
     task_wait(regs);
 }
 
