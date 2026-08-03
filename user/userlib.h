@@ -205,10 +205,15 @@ unsigned long sys_list(char *buf, unsigned long size) {
 }
 
 // SYS_RUN: load and start the named program; it joins the scheduler alongside this
-// one. Returns 0 on success, (unsigned long)-1 if it could not be started.
+// one. `in_fd` and `out_fd` are descriptors in THIS program's table to give the
+// child as its fd 0 and fd 1, or -1 for a fresh console end. Passing pipe ends here
+// is the only way to wire one program's output to another's input, since a running
+// task's descriptors cannot be changed from outside. Returns 0 on success,
+// (unsigned long)-1 if it could not be started (bad file, or a bad in_fd/out_fd).
 static inline __attribute__((always_inline))
-unsigned long sys_run(const char *name) {
-    return syscall1(SYS_RUN, (unsigned long)name);
+unsigned long sys_run(const char *name, int in_fd, int out_fd) {
+    return syscall3(SYS_RUN, (unsigned long)name,
+                    (unsigned long)(long)in_fd, (unsigned long)(long)out_fd);
 }
 
 // SYS_READFILE: read the named file into buf. Returns the number of bytes read, or

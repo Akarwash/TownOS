@@ -172,7 +172,30 @@ static int task_register(address_space_t *as, uint64_t entry, uint32_t parent_id
     return (int)id;
 }
 
-int task_create_from_file(const char *name, uint32_t parent_id) {
+int task_create_from_file(const char *name, uint32_t parent_id, int in_fd, int out_fd) {
+    // (0) Resolve any inherited descriptors against the CALLER's table FIRST, before
+    // building anything, so a bad fd fails with nothing to undo. -1 means "fresh
+    // console" (the default fds task_register makes), so only a real fd is resolved,
+    // and this never touches the caller's table for kernel_main's boot task, which
+    // passes -1/-1 before any task exists. in_fd must be a READ end and out_fd a
+    // WRITE end: the child reads its fd 0 and writes its fd 1.
+    file_t *in_src = NULL;
+    file_t *out_src = NULL;
+    if (in_fd != -1) {
+        file_t **caller = scheduler_current_task()->fds;
+        if (in_fd < 0 || in_fd >= MAX_FDS || caller[in_fd] == NULL || caller[in_fd]->writable) {
+            return -1;                      // no such fd, or it is a write end
+        }
+        in_src = caller[in_fd];
+    }
+    if (out_fd != -1) {
+        file_t **caller = scheduler_current_task()->fds;
+        if (out_fd < 0 || out_fd >= MAX_FDS || caller[out_fd] == NULL || !caller[out_fd]->writable) {
+            return -1;                      // no such fd, or it is a read end
+        }
+        out_src = caller[out_fd];
+    }
+
     // Four steps, in this order: private address space, program loaded into it,
     // stack mapped, task registered and its frame forged. This is the only
     // creation path there is. It replaced one that copied a ring-3 image linked
@@ -214,13 +237,55 @@ int task_create_from_file(const char *name, uint32_t parent_id) {
         return -1;
     }
 
+    // Pre-allocate the inherited descriptors BEFORE registering the task, counting
+    // their pipe ends now. Doing the last fallible allocation before the task becomes
+    // schedulable means the steps after task_register cannot fail, so we never have
+    // to tear down a live, already-registered task — only this not-yet-registered
+    // address space and any dup already made (undone with file_close, which drops the
+    // pipe count it took).
+    file_t *in_dup = NULL;
+    file_t *out_dup = NULL;
+    if (in_src != NULL) {
+        in_dup = file_dup(in_src);
+        if (in_dup == NULL) {
+            paging_destroy_address_space(as);
+            return -1;
+        }
+    }
+    if (out_src != NULL) {
+        out_dup = file_dup(out_src);
+        if (out_dup == NULL) {
+            if (in_dup != NULL) file_close(in_dup);   // undo the count in_dup took
+            paging_destroy_address_space(as);
+            return -1;
+        }
+    }
+
     int id = task_register(as, entry, parent_id);
     if (id < 0) {
         // Out of kernel heap, or the bookkeeping array is full. The tree was built
         // perfectly; there is simply nowhere to record the task that would own it,
-        // so nobody will ever free it later and it has to go back now.
+        // so nobody will ever free it later and it has to go back now. Undo the
+        // inherited-end counts too, or the pipe would never be freed.
+        if (in_dup != NULL) file_close(in_dup);
+        if (out_dup != NULL) file_close(out_dup);
         paging_destroy_address_space(as);
         return -1;
+    }
+
+    // The task is registered with a fresh console on fd 0 and fd 1. Swap in whichever
+    // ends are inherited, freeing the default console each displaces (close_fd frees a
+    // console file_t outright — it has no pipe count). No allocation happens here, so
+    // nothing below can fail. It is safe against a timer tick scheduling the child
+    // early: this whole function runs inside sys_run with interrupts masked, so the
+    // child cannot run until the syscall returns.
+    if (in_dup != NULL) {
+        close_fd(tasks[id]->fds, 0);
+        tasks[id]->fds[0] = in_dup;
+    }
+    if (out_dup != NULL) {
+        close_fd(tasks[id]->fds, 1);
+        tasks[id]->fds[1] = out_dup;
     }
     return id;
 }
@@ -543,6 +608,21 @@ static void reap_sweep(void) {
 
 void task_exit(registers_t *r, int status) {
     task_t *t = tasks[current];
+
+    // (0) Close every descriptor this task holds, BEFORE it becomes a zombie and
+    // before schedule() below, so the wakes happen while this task is still `current`
+    // and the scheduler has not moved on. A task that exits without closing anything
+    // is the normal case, and THIS LOOP IS WHAT MAKES EOF WORK AT ALL: closing a pipe
+    // write end here drops writers to zero and wakes a downstream reader parked on an
+    // empty pipe (close_fd -> file_close, the B2 wake), which is how `a.elf | count`
+    // ends rather than hanging. Closing frees the file_t's now (the heap they sit on
+    // is reclaimed immediately, unlike the address space, which the sweeper frees on a
+    // later tick).
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (t->fds[i] != NULL) {
+            close_fd(t->fds, i);
+        }
+    }
 
     // (1) Record how it ended, MASKED TO 0..255. The mask is not cosmetic: SYS_WAIT
     // returns the status in RAX and returns SYSCALL_ERROR (-1) when the caller has

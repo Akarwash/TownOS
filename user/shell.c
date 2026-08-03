@@ -261,7 +261,7 @@ static void cmd_run(char *name) {
         sys_print("run: missing filename\n");
         return;
     }
-    if (sys_run(name) == SYS_FAIL) {
+    if (sys_run(name, -1, -1) == SYS_FAIL) {   // -1/-1: a plain run, fresh console, no pipe
         sys_print("run: could not start ");
         sys_print(name);
         sys_print("\n");

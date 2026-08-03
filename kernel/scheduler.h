@@ -148,11 +148,19 @@ typedef struct task {
 // exit, and what tells the sweeper whether anybody is still going to read this
 // task's exit status.
 //
+// `in_fd` and `out_fd` are the descriptors in the CALLER's table to inherit as the
+// child's fd 0 and fd 1, or -1 to give the child a fresh console end there (the
+// default). This is the ONLY way a child acquires a descriptor: nothing can inject
+// one into a running task, so a pipeline passes ends here at creation. in_fd must be
+// a read end and out_fd a write end; a wrong-direction or out-of-range fd fails the
+// create. -1/-1 (kernel_main's boot task, and an ordinary `run`) inherits nothing.
+//
 // Returns the task id, or -1 if the file is missing, is not a program this
-// kernel accepts, or the heap or frame pool is out of memory. A failed load
-// creates no task and must not disturb the ones that succeeded. Implemented in
+// kernel accepts, the heap or frame pool is out of memory, or an inherited fd is
+// bad. A failed load creates no task, leaks nothing (any inherited-end count it took
+// is undone), and must not disturb the ones that succeeded. Implemented in
 // scheduler.c.
-int task_create_from_file(const char *name, uint32_t parent_id);
+int task_create_from_file(const char *name, uint32_t parent_id, int in_fd, int out_fd);
 
 // Pick task 0 and enter it. Does not return (control only ever comes back into
 // the kernel through an interrupt, where schedule() runs).

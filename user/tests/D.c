@@ -25,7 +25,7 @@ void _start(void) {
 
     // Not checked, deliberately: if E.ELF is missing the kernel says so and this
     // program has nothing useful to add. D's job is to leave, not to supervise.
-    sys_run("E.ELF");
+    sys_run("E.ELF", -1, -1);   // fresh console for E; D orphans it and does not wait
 
     sys_print("D: not waiting, exiting\n");
 

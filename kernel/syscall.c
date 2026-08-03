@@ -318,8 +318,14 @@ static uint64_t sys_list(uint64_t user_buf, uint64_t bufsize) {
 // rest, and it already REPORTS AND SKIPS a missing or malformed program rather than
 // faulting, so a bad name here costs nothing but a returned -1: the kernel is never
 // taken down by what a program asks to run. Returns 0 on success, -1 on a bad
-// pointer or a load failure.
-static uint64_t sys_run(uint64_t user_name) {
+// pointer, a load failure, or a bad inherited descriptor.
+//
+// RSI = in_fd, RDX = out_fd: the caller's descriptors to give the child as its fd 0
+// and fd 1, or -1 for a fresh console. This is THE ONLY WAY a descriptor reaches a
+// child, since nothing can inject one into a running task, so a pipeline hands the
+// pipe ends across here at creation. task_create_from_file validates and inherits
+// them (in_fd must be a read end, out_fd a write end).
+static uint64_t sys_run(uint64_t user_name, uint64_t in_fd, uint64_t out_fd) {
     char name[SYSCALL_NAME_MAX];
     if (copy_user_string(user_name, name, sizeof(name)) != 0) {
         print_string("syscall: SYS_RUN rejected a bad filename pointer\n");
@@ -329,7 +335,7 @@ static uint64_t sys_run(uint64_t user_name) {
     // for the program it started. The id has to be taken HERE, inside the syscall,
     // because `current` is only the requesting task while its own syscall is being
     // served; by the next timer tick it means somebody else.
-    if (task_create_from_file(name, scheduler_current_id()) < 0) {
+    if (task_create_from_file(name, scheduler_current_id(), (int)in_fd, (int)out_fd) < 0) {
         // REPORT THE FREE FRAME COUNT, not just the failure. A create can fail after
         // it has already built a page-table tree and mapped part of a program into
         // it, so "it did not start" and "it did not cost anything" are different
@@ -523,7 +529,7 @@ void syscall_handler(registers_t *regs) {
             regs->rax = sys_list(regs->rdi, regs->rsi);
             break;
         case SYS_RUN:
-            regs->rax = sys_run(regs->rdi);
+            regs->rax = sys_run(regs->rdi, regs->rsi, regs->rdx);
             break;
         case SYS_READFILE:
             regs->rax = sys_readfile(regs->rdi, regs->rsi, regs->rdx);

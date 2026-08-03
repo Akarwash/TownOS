@@ -90,6 +90,25 @@ file_t *file_alloc_pipe(struct pipe *p, int writable) {
     return f;
 }
 
+file_t *file_dup(file_t *src) {
+    file_t *f = (file_t *)kmalloc(sizeof(file_t));
+    if (f == NULL) {
+        return NULL;
+    }
+    *f = *src;                   // same kind, same pipe pointer, same direction
+    if (f->kind == FD_PIPE) {
+        // A new END exists now, so count it — that is what makes the child's copy a
+        // real, independently-closable end and not a mere alias. The shared pipe_t is
+        // the entire connection between the two tasks.
+        if (f->writable) {
+            f->pipe->writers++;
+        } else {
+            f->pipe->readers++;
+        }
+    }
+    return f;
+}
+
 void file_close(file_t *f) {
     if (f->kind == FD_PIPE) {
         pipe_t *p = f->pipe;

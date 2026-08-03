@@ -63,6 +63,13 @@ file_t *file_alloc_console(int writable);
 // separate refcount on the file_t (B4).
 file_t *file_alloc_pipe(struct pipe *p, int writable);
 
+// Duplicate a descriptor into a NEW file_t of its own (same kind, same pipe, same
+// direction), COUNTING the new end if it is a pipe. This is how a child inherits a
+// parent's pipe end: a fresh file_t pointing at the SAME pipe_t, which is the only
+// thing linking the two tasks — one buffer, two tables, different indices. Returns
+// NULL on OOM (having counted nothing); undo a successful dup with file_close.
+file_t *file_dup(file_t *src);
+
 // Free a file_t not held by any table slot, dropping its pipe end-count. This is the
 // core close_fd delegates to; it is exposed so a half-built inheritance in
 // task_create_from_file can undo one dup cleanly. For a pipe end it decrements the

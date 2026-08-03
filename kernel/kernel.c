@@ -60,7 +60,10 @@ void kernel_main(uint64_t multiboot_info_addr) {
         // task in existence yet that could be its parent, so nothing will ever
         // call SYS_WAIT on it and its tombstone is dropped by the sweeper rather
         // than collected. See task_exit and reap_sweep in kernel/scheduler.c.
-        if (task_create_from_file(user_programs[i], TASK_NO_PARENT) >= 0) {
+        // -1, -1: a fresh console on fd 0 and fd 1. The boot task inherits no pipe
+        // ends (there is no caller to inherit from), so it reads the keyboard and
+        // writes the screen like any ordinary `run` with no pipeline around it.
+        if (task_create_from_file(user_programs[i], TASK_NO_PARENT, -1, -1) >= 0) {
             started++;
         }
     }
