@@ -123,6 +123,28 @@ long sys_print(const char *s) {
     return (long)done;
 }
 
+// SYS_READ: read up to `len` bytes from descriptor `fd` into `buf`. Returns the
+// number of bytes read, which MAY BE LESS THAN len, or 0 at END OF FILE (a pipe
+// whose last writer has closed). A reader MUST LOOP: to consume a whole stream,
+// keep calling until it returns 0. Returns (unsigned long)-1 (as a negative long)
+// on a bad or wrong-direction fd. BLOCKING: an empty pipe with a live writer, or an
+// empty console, parks the task until there is something to read; from ring 3 it
+// looks like one call that took a while. fd 0 is standard input by convention.
+static inline __attribute__((always_inline))
+long sys_read(int fd, char *buf, unsigned long len) {
+    return (long)syscall3(SYS_READ, (unsigned long)fd, (unsigned long)buf, len);
+}
+
+// SYS_CLOSE: close descriptor `fd`. Returns 0, or (unsigned long)-1 on a bad fd.
+// Closing a pipe end is how the other end learns the stream is over: closing the
+// last write end gives readers EOF, and closing the last read end tells a writer
+// nobody is listening. A pipeline that does not close the ends it is done with hangs
+// (B1/B6 in docs/decisions/0022), so close is not optional bookkeeping.
+static inline __attribute__((always_inline))
+long sys_close(int fd) {
+    return (long)syscall1(SYS_CLOSE, (unsigned long)fd);
+}
+
 // SYS_EXIT: end THIS PROGRAM with `status` (masked by the kernel to 0..255). It no
 // longer halts the machine, which is what it used to mean when there was no parent
 // to return to: the task leaves the scheduler for good, its memory goes back to the

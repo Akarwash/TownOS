@@ -1,6 +1,8 @@
 #include "file.h"
 #include "heap.h"
+#include "scheduler.h"          // task_block, WAIT_KEY (console read parks like sys_readkey)
 #include "../drivers/screen.h"
+#include "../drivers/keyboard.h" // keyboard_getchar, the console read source
 
 // ============================================================================
 // File descriptors: the read/write interface behind a task's fd table.
@@ -39,4 +41,44 @@ long file_write(file_t *f, const char *buf, uint32_t len, registers_t *r) {
     // FD_PIPE is unreachable until stage 3 wires pipe_write in here: no pipe exists
     // to hold a descriptor yet.
     return FILE_ERR;
+}
+
+long file_read(file_t *f, char *buf, uint32_t len, registers_t *r) {
+    if (f->kind == FD_CONSOLE) {
+        // Drain up to `len` characters from the keyboard ring. If none is waiting,
+        // park the task on WAIT_KEY exactly as sys_readkey does, and the keyboard IRQ
+        // wakes it when a key arrives. A CONSOLE HAS NO END OF FILE: a keyboard is
+        // never "done", so this never returns 0. Signalling console EOF would need a
+        // Ctrl-D-style key and line discipline the driver does not have (ADR 0022).
+        uint32_t n = 0;
+        while (n < len) {
+            int c = keyboard_getchar();
+            if (c == 0) {
+                break;
+            }
+            buf[n++] = (char)c;
+        }
+        if (n > 0) {
+            return (long)n;
+        }
+        task_block(r, WAIT_KEY);
+        return FILE_BLOCKED;      // parked; the caller must not touch rax
+    }
+
+    // FD_PIPE is unreachable until stage 3 wires pipe_read in here.
+    return FILE_ERR;
+}
+
+void close_fd(file_t **fds, int fd) {
+    file_t *f = fds[fd];
+    if (f == NULL) {
+        return;                  // already closed, or never opened: nothing to do
+    }
+    fds[fd] = NULL;
+
+    // Stage 3 inserts the pipe end-count handling HERE, before the file_t is freed:
+    // drop this end from the pipe's reader/writer count, wake a peer blocked on the
+    // opposite condition when a count hits zero (the close IS the event that unblocks
+    // an EOF-waiting reader, B2), and free the pipe_t once both counts are zero.
+    kfree(f);
 }

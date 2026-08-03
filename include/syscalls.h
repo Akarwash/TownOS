@@ -24,5 +24,8 @@
 #define SYS_DELETE    8  // RDI = filename ptr; 0 on success, SYSCALL_ERROR on failure
 #define SYS_FREECOUNT 9  // no args; return the count of free clusters on the volume. Exposes fat32_free_count so the shell's `free` command (and the leak test) can watch it.
 #define SYS_STAT     10  // RDI = name, RSI = uint64_t *out_size; 0 on success, SYSCALL_ERROR if not found. Reports a file's size without reading it, so a caller can size a buffer first. Does not block.
+#define SYS_READ     11  // RDI = fd, RSI = buffer, RDX = length; read up to length bytes, return the count, 0 at EOF, SYSCALL_ERROR on a bad fd. Blocks on an empty pipe/console.
+#define SYS_CLOSE    12  // RDI = fd; close the descriptor, return 0, or SYSCALL_ERROR on a bad fd. Does not block.
+#define SYS_PIPE     13  // RDI = int[2] out; make a pipe, write [read_fd, write_fd], return 0 or SYSCALL_ERROR. Does not block.
 
 #endif

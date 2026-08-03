@@ -63,4 +63,16 @@ file_t *file_alloc_console(int writable);
 // always accepts everything.
 long file_write(file_t *f, const char *buf, uint32_t len, registers_t *r);
 
+// Read up to `len` bytes from `f` into `buf`, returning the count read (0 means
+// end of file: a pipe drained with no writer left), FILE_BLOCKED if it parked the
+// task (an empty pipe with a live writer, or an empty console), or FILE_ERR. `r` is
+// the live syscall pile for the block path. A console never returns EOF.
+long file_read(file_t *f, char *buf, uint32_t len, registers_t *r);
+
+// Close descriptor `fd` in the table `fds`: free the file_t and clear the slot. A
+// no-op if the slot is already empty. For a pipe end (stage 3) this also drops the
+// end-count and, when a count reaches zero, wakes a blocked peer and frees the pipe.
+// Takes the fds array rather than a task_t so this header need not know that type.
+void close_fd(file_t **fds, int fd);
+
 #endif

@@ -124,6 +124,74 @@ static void sys_write(registers_t *r) {
     r->rax = (uint64_t)w;
 }
 
+// SYS_READ: read a counted buffer from one of the caller's descriptors.
+//   RDI = fd, RSI = user buffer pointer, RDX = length.
+// Returns the number of bytes read, which MAY BE LESS than the length asked for and
+// MAY BE 0, which is END OF FILE (a pipe drained with no writer left). Returns
+// SYSCALL_ERROR on a bad fd, a wrong-direction fd (fd 1, or a pipe's write end), or
+// a bad buffer. Validation order mirrors sys_write: fd, slot, direction, buffer.
+//
+// BLOCK-AWARE, and it carries the same RAX discipline as sys_readkey and sys_wait:
+// on the path where file_read parks the task (an empty pipe with a live writer, or
+// an empty console) it writes NOTHING to rax, because the re-armed int 0x50 reads
+// the syscall number back out of rax and a stray value there would make the woken
+// task issue a different call (a 0 would be SYS_EXIT). Dispatched as a bare
+// statement. See docs/reference/blocking.md.
+static void sys_read(registers_t *r) {
+    uint64_t fd = r->rdi;
+    uint64_t user_buf = r->rsi;
+    uint64_t len = r->rdx;
+
+    task_t *t = scheduler_current_task();
+    if (fd >= MAX_FDS || t->fds[fd] == NULL) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+    file_t *f = t->fds[fd];
+    if (f->writable) {
+        r->rax = SYSCALL_ERROR;   // fd 1, or a pipe's write end: not readable
+        return;
+    }
+    if (len == 0) {
+        r->rax = 0;
+        return;
+    }
+
+    uint64_t n = len < SYSCALL_IO_MAX ? len : SYSCALL_IO_MAX;
+    if (!user_range_ok(user_buf, n)) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+
+    long got = file_read(f, io_staging, (uint32_t)n, r);
+    if (got == FILE_BLOCKED) {
+        return;                   // parked; leave rax holding SYS_READ for the re-issue
+    }
+    if (got < 0) {
+        r->rax = SYSCALL_ERROR;
+        return;
+    }
+    if (got > 0) {
+        memcpy((void *)user_buf, io_staging, (size_t)got);
+    }
+    r->rax = (uint64_t)got;       // 0 delivered as EOF
+}
+
+// SYS_CLOSE: close one of the caller's descriptors.
+//   RDI = fd.
+// Frees the file_t and clears the slot (and, for a pipe end, drops the pipe's
+// end-count and may wake a peer or free the pipe — see close_fd). Returns 0, or
+// SYSCALL_ERROR on a bad fd. Does not block, so it returns through the dispatcher
+// normally with no RAX concern.
+static uint64_t sys_close(uint64_t fd) {
+    task_t *t = scheduler_current_task();
+    if (fd >= MAX_FDS || t->fds[fd] == NULL) {
+        return SYSCALL_ERROR;
+    }
+    close_fd(t->fds, (int)fd);
+    return 0;
+}
+
 // SYS_READKEY: pop one character from the keyboard ring buffer, sleeping until one
 // arrives if the buffer is empty. No pointer crosses the ring boundary here, so
 // there is nothing to bounds-check: the character is returned by value in RAX.
@@ -412,6 +480,12 @@ void syscall_handler(registers_t *regs) {
             break;
         case SYS_STAT:
             regs->rax = sys_stat(regs->rdi, regs->rsi);
+            break;
+        case SYS_READ:
+            sys_read(regs);   // writes rax itself, and must not on the block path
+            break;
+        case SYS_CLOSE:
+            regs->rax = sys_close(regs->rdi);
             break;
         case SYS_WAIT:
             sys_wait(regs);   // writes rax itself, and must not on the block path
