@@ -9,7 +9,7 @@ programs you actually care about**. It exists to solve one recurring problem:
 hardware is primitive, dangerous, and singular, but we want to run software that
 is high-level, safe, and plural.
 
-Concretely, every OS — from Linux to the firmware in a washing machine — does
+Concretely, every OS, from Linux to the firmware in a washing machine, does
 some subset of four jobs:
 
 1. **Abstraction.** Turn "write a byte to I/O port 0x60 and wait for an interrupt"
